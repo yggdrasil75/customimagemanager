@@ -4,7 +4,7 @@ thumbnails, dedup and the background workers. Modules extend it through the
 Host (modules/host.py).
 """
 
-import os, glob, subprocess, shutil, errno, numpy as np
+import os, sys, glob, subprocess, shutil, errno, numpy as np
 from types import SimpleNamespace
 import tempfile, io, time, random, json, threading
 import base64, re, xml.sax.saxutils as saxutils
@@ -38,6 +38,7 @@ modules.config.declare("filename_cleanup", default=dict(mt.DEFAULT_FILENAME_PREF
                        on_change=lambda new, old: mt.set_filename_prefs(new))
 import video_tracks as vt
 import tiering
+import assets as _assets
 
 def _read_bytes_loose(path):
     try:
@@ -208,6 +209,25 @@ _all_conns = {}                  # id(conn) -> (conn, thread)
 _all_conns_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = 30000
 
+# The gallery's COUNT(*) is a full scan of `files` (every filter is a NOT IN or
+# a LIKE) and runs on every page turn; a page itself is a short index walk. The
+# count is remembered per WHERE and reused while nothing in the DB changed:
+# PRAGMA data_version moves when another connection commits, total_changes
+# when this one writes.
+_count_cache: OrderedDict = OrderedDict()
+_count_cache_lock = threading.Lock()
+_COUNT_CACHE_MAX = 256
+
+def _db_stamp(db) -> tuple:
+    """! @brief A value that changes whenever the database content may have."""
+    return (db.execute("PRAGMA data_version").fetchone()[0], db.total_changes)
+
+def _count_cache_forget(conn_id: int) -> None:
+    """! @brief Drop a closed connection's entries (its id may be reused with fresh counters)."""
+    with _count_cache_lock:
+        for k in [k for k in _count_cache if k[0] == conn_id]:
+            del _count_cache[k]
+
 
 def _register_conn(conn):
     """! @brief Track a new per-thread connection, closing those of threads that have
@@ -234,6 +254,11 @@ def _db() -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-32000")  # 32 MB page cache
+        # Map the file instead of read() into the page cache: a gallery COUNT is a
+        # scan of `files`, and the OS cache then serves it without copies.
+        conn.execute("PRAGMA mmap_size=268435456")  # 256 MB
+        # ORDER BY / GROUP BY spill b-trees go to RAM, not a temp file.
+        conn.execute("PRAGMA temp_store=MEMORY")
         conn.row_factory = sqlite3.Row
         _db_local.conn = conn
         _register_conn(conn)
@@ -285,9 +310,16 @@ def _db_close():
         _db_local.conn = None
         with _all_conns_lock:
             _all_conns.pop(id(conn), None)
+        _count_cache_forget(id(conn))
         try:
             if conn.in_transaction:
                 conn.rollback()
+        except Exception:
+            pass
+        try:
+            # keeps the planner's statistics fresh; cheap, and what SQLite
+            # recommends before closing a long-lived connection
+            conn.execute("PRAGMA optimize")
         except Exception:
             pass
         try:
@@ -498,6 +530,13 @@ def _init_db():
     try:
         for c in ("d_actual", "d_original", "d_capture", "d_digitized", "d_modified"):
             db.execute(f"CREATE INDEX IF NOT EXISTS idx_{c} ON files({c})")
+        # sort:date / sort:-date order by "(X IS NULL), X [DESC], rel_path" with
+        # X = COALESCE(d_actual, d_original, d_digitized) (the search module's key).
+        # An expression index per direction lets a page come straight off the
+        # index instead of sorting every row into a temp b-tree.
+        _x = "COALESCE(d_actual, d_original, d_digitized)"
+        db.execute(f"CREATE INDEX IF NOT EXISTS idx_files_date_sort ON files(({_x} IS NULL), {_x}, rel_path)")
+        db.execute(f"CREATE INDEX IF NOT EXISTS idx_files_date_sort_desc ON files(({_x} IS NULL), {_x} DESC, rel_path)")
         db.commit()
     except Exception:
         pass
@@ -883,6 +922,14 @@ def _same_source_upload(existing_rel, orig_name):
         return bool(existing_raw) and existing_raw.strip().lower() == orig_name.strip().lower()
     return not existing_raw
 
+def _library_sha256(rel_path):
+    """! @brief The stored sha256 of a library file (the `files` row), or None."""
+    try:
+        row = _db().execute("SELECT sha256 FROM files WHERE rel_path=?", (rel_path,)).fetchone()
+        return row["sha256"] if row and row["sha256"] else None
+    except Exception:
+        return None
+
 def _existing_upload(pred_rel, orig_name):
     """! @brief The library file an upload is a re-send of: the one stored under its
     predicted name, or under the '<base>_<n>' the upload took because a different
@@ -1022,6 +1069,10 @@ def _date_clause(cols: tuple, op: str | None, literal: str) -> tuple[str, list]:
 # may hold spaces (location:"north carolina").
 _SEARCH_TOKEN_RE = re.compile(r'(?:[^\s"]+|"[^"]*"?)+')
 
+def _like_escape(s: str) -> str:
+    """! @brief `s` as a literal inside a LIKE pattern using ESCAPE '\\'."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 def _parse_search(search: str) -> tuple[str, list, list, list]:
     """! @brief Split structured tokens (width:, is:, date:, sort:, module tokens, ...)
     from free text. A token may quote a value with spaces: key:"a b".
@@ -1051,11 +1102,21 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
             neg = low.startswith('-')
             name = tok.split(':', 1)[1].strip()
             if name:
-                # tags is a JSON list; unconfirmed tags start with '?'
-                where.append(("NOT " if neg else "") +
-                             "EXISTS (SELECT 1 FROM json_each(files.tags) "
-                             "WHERE lower(ltrim(json_each.value,'?'))=?)")
-                params.append(name.lower())
+                # tags is a JSON list; unconfirmed tags start with '?'. The LIKE
+                # is a cheap prefilter (a substring test per row instead of a
+                # json_each table per row): a row whose text lacks the name can't
+                # match, so json_each only runs on candidates. Only for names the
+                # stored JSON holds verbatim (json.dumps escapes non-ASCII, '"'
+                # and '\'); a negation needs no prefilter.
+                exists = ("EXISTS (SELECT 1 FROM json_each(files.tags) "
+                          "WHERE lower(ltrim(json_each.value,'?'))=?)")
+                plain = name.isascii() and name.isprintable() and not any(c in name for c in '"\\')
+                if neg or not plain:
+                    where.append(("NOT " if neg else "") + exists)
+                    params.append(name.lower())
+                else:
+                    where.append("(files.tags LIKE ? ESCAPE '\\' AND " + exists + ")")
+                    params += ["%" + _like_escape(name) + '"%', name.lower()]
                 structured.append(("tag", name, neg))
             continue
         if low.startswith('sort:'):
@@ -1133,6 +1194,25 @@ def _files_where(search: str, folder: str = '', album: str = '', recursive: bool
     where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     return where_sql, p, text, structured
 
+def _files_count(where_sql: str, params: list) -> int:
+    """! @brief COUNT(*) FROM files{where_sql}, cached until the DB changes."""
+    db = _db()
+    # per connection: data_version and total_changes are connection-local counters
+    key = (id(db), where_sql, tuple(params))
+    stamp = _db_stamp(db)
+    with _count_cache_lock:
+        hit = _count_cache.get(key)
+        if hit is not None and hit[0] == stamp:
+            _count_cache.move_to_end(key)
+            return hit[1]
+    n = db.execute(f"SELECT COUNT(*) FROM files{where_sql}", params).fetchone()[0]
+    with _count_cache_lock:
+        _count_cache[key] = (stamp, n)
+        _count_cache.move_to_end(key)
+        while len(_count_cache) > _COUNT_CACHE_MAX:
+            _count_cache.popitem(last=False)
+    return n
+
 def _query_files(search: str, offset: int, limit: int,
                  folder: str = '', album: str = '') -> tuple[list, int]:
     """! @brief One gallery page: module results (books, comics: one tile each) first,
@@ -1159,8 +1239,7 @@ def _query_files(search: str, offset: int, limit: int,
                 access_logger.error(f"search provider failed: {e}")
     nc = len(comic_entries)
 
-    total_files = _db().execute(
-        f"SELECT COUNT(*) FROM files{where_sql}", p).fetchone()[0]
+    total_files = _files_count(where_sql, p)
     total = nc + total_files
 
     entries = []
@@ -1240,7 +1319,7 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
         is_bare      = data[:2] == b'\xff\x0a'
         is_container = data[4:8] == b'JXL '
         if is_bare or is_container:
-            img = imagecodecs.jpegxl_decode(data)
+            img = mt.jxl_decode(data)
         elif mt.is_raw(path):
             # a camera raw found on disk is shown in place (indexed only with rawpy)
             img = mt.decode_raw(path)
@@ -1644,10 +1723,13 @@ def _read_mm_tag(xmp_path, tag):
         if not os.path.exists(xmp_path):
             return None
         text = _read_text_loose(xmp_path) or ""
-        m = re.search(rf'<mm:{tag}>(.*?)</mm:{tag}>', text, re.DOTALL)
+        # element form as written here, or attribute form (mm:tag="...") as exiv2
+        # writes it back after any EXIF / XMP patch to the sidecar
+        m = (re.search(rf'<mm:{tag}>(.*?)</mm:{tag}>', text, re.DOTALL)
+             or re.search(rf'\bmm:{tag}\s*=\s*"([^"]*)"', text))
         if not m:
             return None
-        return json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
+        return json.loads(base64.b64decode(m.group(1).strip()).decode("utf-8"))
     except Exception as e:
         access_logger.warning(f"_read_mm_tag({tag}) {xmp_path}: {e}")
         return None
@@ -2820,6 +2902,39 @@ def _foreign_xmp_xml(xmp_path: str) -> str:
             out.append(ET.tostring(child, encoding="unicode"))
     return "".join(out)
 
+def _display_dims(filepath):
+    """! @brief A picture's displayed (width, height): its files row, else a decode. (0, 0) when unknown."""
+    try:
+        r = _db().execute("SELECT width, height FROM files WHERE rel_path=?", (_rel(filepath),)).fetchone()
+        if r and r["width"] and r["height"]:
+            return int(r["width"]), int(r["height"])
+    except Exception:
+        pass
+    img = read_jxl(filepath)
+    return (int(img.shape[1]), int(img.shape[0])) if img is not None else (0, 0)
+
+def _settle_obb(filepath, regions):
+    """! @brief Regions holding an oriented box as (cx, cy, w, h, angle) - a detector's
+    xywhr - get its 4 corners (`obb`) and the axis-aligned bounds as their box, so the
+    box every reader draws is right and the rotation survives the sidecar."""
+    if not regions or not any(isinstance(b, dict) and b.get("angle") is not None and not b.get("obb")
+                              for b in regions):
+        return regions
+    W, H = _display_dims(filepath)
+    for b in regions:
+        # in place: the caller reads the uuids the writer fills in off these dicts
+        if not isinstance(b, dict) or b.get("angle") is None:
+            continue
+        if not b.get("obb") and W and H:
+            try:
+                corners = common.obb_corners(float(b["cx"]), float(b["cy"]), float(b["w"]),
+                                             float(b["h"]), float(b["angle"]), W, H)
+                b.update(common.points_bounds(corners), obb=corners)
+            except (KeyError, TypeError, ValueError):
+                pass
+        b.pop("angle", None)
+    return regions
+
 def write_metadata(filepath: str, tags: list, description: str, regions: list,
                    analysis: dict | None = None, flag: dict | None = None,
                    pose: dict | None = None, page_count: int | None = None,
@@ -2836,6 +2951,7 @@ def write_metadata(filepath: str, tags: list, description: str, regions: list,
                 _rel(filepath))
         except Exception:
             pass
+        regions = _settle_obb(filepath, regions)
         _sync_yolo(filepath, regions)
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
         if albums is None:
@@ -3762,6 +3878,11 @@ def _background_instances(img_bgr) -> list:
                 continue
             inst = {"class_name": name, "cx": h["cx"], "cy": h["cy"], "w": h["w"],
                     "h": h["h"], "conf": h.get("conf")} if "cx" in h else None
+            if inst is not None and h.get("angle") is not None:
+                # an oriented box: xywhr in, corners + bounds out (the region writer
+                # would settle it too, but the mask pass below wants the bounds now)
+                corners = common.obb_corners(h["cx"], h["cy"], h["w"], h["h"], float(h["angle"]), W, H)
+                inst.update(common.points_bounds(corners), obb=corners)
             if cap == "segment":
                 poly = h.get("mask") or []
                 if not poly:
@@ -3776,8 +3897,6 @@ def _background_instances(img_bgr) -> list:
     # polygons become mask_svg in the segmentation module; without it, boxes only
     for _ in module_host.emit("regions.masks", instances=out, width=W, height=H):
         pass
-    for inst in out:
-        inst.pop("polygon", None)
     return out
 
 def _fold_background(insts, person_regions, out):
@@ -3793,12 +3912,15 @@ def _fold_background(insts, person_regions, out):
                     best, best_iou = r, iou
             if best is not None and best_iou >= 0.5:
                 best["mask_svg"] = inst["mask_svg"]
+                if inst.get("polygon"):
+                    best["polygon"] = inst["polygon"]
                 continue
         reg = {"class_name": inst.get("class_name", "object"), "region_name": "",
                "cx": inst["cx"], "cy": inst["cy"], "w": inst["w"], "h": inst["h"],
                "confirmed": False, "region_tags": [], "region_description": ""}
-        if inst.get("mask_svg"):
-            reg["mask_svg"] = inst["mask_svg"]
+        for k in ("mask_svg", "conf", "polygon", "obb"):
+            if inst.get(k) is not None:
+                reg[k] = inst[k]
         (person_regions if reg["class_name"] == "person" else out).append(reg)
 
 def _folder_scope_clause(column: str, folder: str, recursive: bool = False) -> tuple[list, list]:
@@ -3814,6 +3936,28 @@ def _folder_scope_clause(column: str, folder: str, recursive: bool = False) -> t
             return [f"{column} LIKE ?"], [f + '/%']
         return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
     return [], []
+
+def _library_section(rel_path: str) -> tuple:
+    """! @brief (section_id, username, inner_rel) of a path in a registered library
+    section (host.register_library_section), else (None, None, None)."""
+    return mt.library_section(rel_path)
+
+def _section_folders(section_id: str) -> list:
+    """! @brief The section's folders that exist on disk: ["music", "users/ann/music", ...]."""
+    return mt.section_folders(section_id, MEDIA_DIR)
+
+def _section_clause(section_id: str, column: str = "rel_path") -> tuple:
+    """! @brief (sql, params) selecting the rows of `column` inside a section."""
+    return mt.section_clause(section_id, column)
+
+def _sections_reply() -> list:
+    """! @brief The registered sections for GET /api/sections: [{id, label, kinds, folders}]."""
+    out = []
+    for sid, spec in sorted(mt.library_sections().items()):
+        out.append({"id": sid, "label": spec["label"], "kinds": sorted(spec["kinds"]),
+                    "sidecars": sorted(spec.get("sidecars") or ()),
+                    "per_user": bool(spec["per_user"]), "folders": _section_folders(sid)})
+    return out
 
 def _recursive_arg() -> bool:
     """! @brief The request's `recursive=1` (folder scope includes subfolders); False outside a request."""
@@ -4388,6 +4532,13 @@ def branding_logo():
                 return send_file(os.path.join(brand_dir, name))
     return ("", 404)
 
+@app.route("/api/sections")
+def api_sections():
+    """! @brief The library sections modules registered (music, movies, tv): id, label,
+    the media kinds each accepts and its folders on disk. Read-only; any signed-in
+    user (the page's tabs and upload.py --dest use it)."""
+    return jsonify({"success": True, "sections": _sections_reply()})
+
 @app.route("/api/folders")
 @_auth.require_feature("tab.gallery")
 def api_folders():
@@ -4843,6 +4994,9 @@ def _process_spooled_inline(spool_path, orig_name, folder, metadata):
     except OSError as e:
         # spool gone: transient; queueing will notice too
         return "retry", {"error": f"spool missing: {e}"}, 503
+    # the sha of the bytes as sent: a client that deletes its copy after a
+    # receipt (upload.py --delete-source) compares it with its own
+    source_sha = hashlib.sha256(data).hexdigest()
 
     # the queue worker's pipeline, keeping its full JSON receipt
     ctx = app.test_request_context("/api/upload", method="POST",
@@ -4858,6 +5012,9 @@ def _process_spooled_inline(spool_path, orig_name, folder, metadata):
         try: os.remove(spool_path)
         except OSError: pass
         payload.setdefault("queued", False)
+        payload.setdefault("source_sha256", source_sha)
+        if payload.get("duplicate") and payload.get("existing_file"):
+            payload.setdefault("existing_sha256", _library_sha256(payload["existing_file"]))
         return "done", payload, code
 
     ecode = payload.get("error_code") or ""
@@ -4868,6 +5025,7 @@ def _process_spooled_inline(spool_path, orig_name, folder, metadata):
         existing = payload.get("existing_file") or payload.get("filename")
         return "done", {"success": True, "queued": False, "duplicate": True,
                         "filename": existing, "existing_file": existing,
+                        "existing_sha256": _library_sha256(existing), "source_sha256": source_sha,
                         "error_code": ecode}, 200
     if ecode in _TERMINAL_UPLOAD_CODES:
         # bad file: final
@@ -4901,7 +5059,7 @@ def api_upload():
         return jsonify({"success": False, "error_code": "bad_folder",
                         "error": "Folder path is outside media directory."}), 400
 
-    orig_name = mt.clean_filename(file.filename) or "upload.bin"
+    orig_name = mt.clean_filename(file.filename, folder=folder) or "upload.bin"
     metadata  = request.form.get("metadata", "{}") or "{}"
     pred      = _predicted_rel(tdir, orig_name)
 
@@ -4920,7 +5078,8 @@ def api_upload():
     existing = _existing_upload(pred, orig_name)
     if existing:
         return jsonify({"success": True, "queued": False, "duplicate": True,
-                        "filename": existing, "existing_file": existing}), 200
+                        "filename": existing, "existing_file": existing,
+                        "existing_sha256": _library_sha256(existing)}), 200
 
     # always spool first: inline stays crash-safe and can fall back to the queue
     try:
@@ -5089,7 +5248,7 @@ def _run_upload():
                         "error": f"Folder path is outside media directory."}), 400
     os.makedirs(tdir, exist_ok=True)
 
-    fname    = mt.clean_filename(file.filename)
+    fname    = mt.clean_filename(file.filename, folder=folder)
     in_ext   = os.path.splitext(fname)[1].lower()
     unknown_type = in_ext not in mt.UPLOAD_EXTS
     # the original extension when the content said otherwise
@@ -5103,6 +5262,25 @@ def _run_upload():
         # an archive (.zip .rar .7z .tar...) is unpacked and its contents uploaded one by one
         if media_encoding.is_archive_name(fname):
             return _expand_uploaded_archive(orig, fname, folder)
+
+        # inside a library section a sidecar (a movie's .nfo, its subtitles, an album's
+        # .cue) or any file of a type the app does not handle is stored as sent next to
+        # its item, never converted or rejected: another app's library imports whole.
+        # The section's module reads what it wants (upload.stored).
+        sid = mt.library_section(f"{folder}/{fname}" if folder else fname)[0]
+        if sid and (in_ext in (mt.library_sections().get(sid) or {}).get("sidecars", ())
+                    or (unknown_type and mt.sniff_ext(orig) is None)):
+            out = os.path.join(tdir, fname)
+            if os.path.exists(out):
+                rel_path = _rel(out)
+                return jsonify({"success": True, "queued": False, "duplicate": True,
+                                "filename": rel_path, "existing_file": rel_path,
+                                "existing_sha256": _sha256(out)}), 200
+            shutil.move(orig, out)
+            rel_path = _rel(out)
+            module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
+            return jsonify({"success": True, "queued": False, "filename": rel_path,
+                            "sidecar": True, "sha256": _sha256(out)}), 200
 
         # Always check the extension against the bytes: a JPEG named .png has a
         # valid-looking extension and would make cjxl fail.
@@ -6115,7 +6293,7 @@ def api_upload_session_create():
     if not tdir:
         return jsonify({"success": False, "error_code": "bad_folder",
                         "error": "Folder path is outside media directory."}), 400
-    orig_name = mt.clean_filename(str(d.get("filename") or "")) or "upload.bin"
+    orig_name = mt.clean_filename(str(d.get("filename") or ""), folder=folder) or "upload.bin"
     for reason in module_host.emit("upload.check", folder=folder, filename=orig_name, size=size):
         if reason:
             return jsonify({"success": False, "error_code": "refused", "error": str(reason)}), 413
@@ -7056,6 +7234,103 @@ def _meta_set(db, key, value):
     else:
         db.execute("INSERT OR REPLACE INTO cim_meta(key, value) VALUES (?, ?)", (key, str(value)))
 
+# -- background jobs for bulk requests ---------------------------------------
+# A bulk request (box 300 files, tag 2000) used to run to completion inside the
+# WSGI thread: one of the few request threads gone for minutes, the browser's
+# fetch hanging, and a model lock held the whole time. Past a small inline
+# budget the work now runs on its own thread and the request answers at once
+# with a job the client polls at /api/job/<id>.
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
+JOBS_KEEP = 50          # finished jobs remembered
+BULK_INLINE_MAX = 3     # at most this many files run inside the request
+
+def job_status(job_id: str) -> dict | None:
+    """! @brief A copy of a job's state, or None."""
+    with _jobs_lock:
+        j = _jobs.get(job_id)
+        return dict(j, errors=list(j["errors"])) if j else None
+
+def run_bulk(label: str, items: list, work, *, inline_max: int | None = None,
+             audit_action: str | None = None, errors: list | None = None) -> dict:
+    """! @brief Run `work(item, job)` over `items` inline (few items) or on a background
+    thread (many), and return the reply body for the request.
+    @param work    fn(item, job) -> True when the item counted as done; raise or
+                   return False to count an error. It may add to job["errors"] and
+                   bump job["counts"][k]. Resolve anything that needs the request
+                   (paths through get_safe_path, the user) BEFORE calling run_bulk:
+                   the worker has no request context.
+    @param label   shown in the header status line.
+    @param errors  failures known before the job starts (files that didn't resolve).
+    @return {"success": True, "background": False, done, errors, counts, total} when
+            run inline, else {"success": True, "background": True, "job": {...}}.
+    """
+    inline_max = BULK_INLINE_MAX if inline_max is None else inline_max
+    job = {"id": uuid.uuid4().hex[:12], "label": label, "total": len(items), "done": 0,
+           "errors": list(errors or []), "counts": {}, "running": True, "started": time.time(),
+           "finished": None}
+
+    def _one(item):
+        try:
+            ok = work(item, job)
+        except Exception as e:
+            access_logger.error(f"{label} {item!r}: {e}")
+            ok = False
+            job["errors"].append(f"{item}: {e}" if not isinstance(item, (tuple, list)) else
+                                 f"{item[0]}: {e}")
+        if ok:
+            job["done"] += 1
+
+    if len(items) <= inline_max:
+        for it in items:
+            _one(it)
+        job["running"] = False
+        job["finished"] = time.time()
+        return {"success": True, "background": False, "done": job["done"],
+                "errors": list(job["errors"]), "counts": dict(job["counts"]),
+                "total": job["total"]}
+
+    actor = None
+    if audit_action:
+        actor = cimlogger_actor()  # captured now: the worker thread has no request
+
+    with _jobs_lock:
+        _jobs[job["id"]] = job
+        for old in sorted((j for j in _jobs.values() if not j["running"]),
+                          key=lambda j: j["finished"] or 0)[:-JOBS_KEEP]:
+            _jobs.pop(old["id"], None)
+
+    def _run():
+        try:
+            for i, it in enumerate(items):
+                _one(it)
+                if i % 10 == 9 or i == len(items) - 1:
+                    module_host.set_status(f"{label}: {i + 1}/{len(items)}")
+        finally:
+            job["running"] = False
+            job["finished"] = time.time()
+            bad = len(job["errors"])
+            module_host.set_status(f"{label}: done ({job['done']} ok" + (f", {bad} failed)" if bad else ")"))
+            if audit_action:
+                audit(audit_action, f"user={actor!r} files={len(items)} ok={job['done']} failed={bad}")
+            _db_close()  # the worker's per-thread connection
+
+    threading.Thread(target=_run, name=f"cim-job-{job['id']}", daemon=True).start()
+    return {"success": True, "background": True, "job": job_status(job["id"])}
+
+def cimlogger_actor() -> str:
+    """! @brief The requesting username for an audit line written off the request thread."""
+    return (getattr(g, "user", None) or {}).get("username", "") if has_request_context() else "system"
+
+@app.route("/api/job/<job_id>")
+@_auth.require_feature("tab.gallery")
+def api_job(job_id):
+    """! @brief A bulk job's progress: {id, label, total, done, errors, counts, running, started, finished}."""
+    j = job_status(job_id)
+    if j is None:
+        return jsonify({"success": False, "error": "no such job"}), 404
+    return jsonify({"success": True, "job": j})
+
 def sync_status() -> dict:
     """! @brief A copy of the sync job's state (see /api/sync/status)."""
     with _sync_lock:
@@ -7320,6 +7595,25 @@ def api_confirm_all_tags():
     update_file(fp, set={"tags": out}, meta=meta)
     return jsonify({"success": True, "tags": out, "confirmed": len(out)})
 
+def _resolve_bulk(filenames) -> tuple[list, list]:
+    """! @brief Resolve a bulk request's filenames inside the request (access policies
+    need it). @return ([(fn, abs_path)], [missing fn])."""
+    items, errors = [], []
+    for fn in filenames or []:
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            errors.append(fn)
+        else:
+            items.append((fn, fp))
+    return items, errors
+
+def _bulk_reply(res: dict) -> dict:
+    """! @brief run_bulk's inline reply with `updated` (what older clients read) as an
+    alias of `done`; a background reply is passed through."""
+    if not res.get("background"):
+        res["updated"] = res["done"]
+    return res
+
 @app.route("/api/bulk_tag", methods=["POST"])
 @_auth.require_feature("annot.tags", level="write")
 def bulk_tag():
@@ -7328,22 +7622,17 @@ def bulk_tag():
     new_tags  = [t.strip() for t in request.json.get("tags", []) if t.strip()]
     if not filenames or not new_tags:
         return jsonify({"success": False, "error": "Need filenames and tags."})
-    updated = 0
-    errors  = []
-    for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
-        try:
-            # add= confirms an existing suggestion
-            if not update_file(fp, add={"tags": [make_tag(tag_name(t), confirmed=True)
-                                                 for t in new_tags]}).get("success"):
-                raise RuntimeError("write failed")
-            updated += 1
-        except Exception as e:
-            errors.append(fn)
-            access_logger.error(f"bulk_tag {fn}: {e}")
-    return jsonify({"success": True, "updated": updated, "errors": errors})
+    items, errors = _resolve_bulk(filenames)
+    tags = [make_tag(tag_name(t), confirmed=True) for t in new_tags]
+
+    def work(item, job):
+        fn, fp = item
+        # add= confirms an existing suggestion
+        if not update_file(fp, add={"tags": list(tags)}).get("success"):
+            raise RuntimeError("write failed")
+        return True
+
+    return jsonify(_bulk_reply(run_bulk("Tagging", items, work, audit_action="bulk_tag", errors=errors)))
 
 @app.route("/api/bulk_untag", methods=["POST"])
 @_auth.require_feature("annot.tags", level="write")
@@ -7353,18 +7642,13 @@ def bulk_untag():
     drop = {tag_name(t).lower() for t in request.json.get("tags", []) if t.strip()}
     if not filenames or not drop:
         return jsonify({"success": False, "error": "Need filenames and tags."})
-    updated, errors = 0, []
-    for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
-        try:
-            if "tags" in update_file(fp, remove={"tags": list(drop)}).get("changed", []):
-                updated += 1
-        except Exception as e:
-            errors.append(fn)
-            access_logger.error(f"bulk_untag {fn}: {e}")
-    return jsonify({"success": True, "updated": updated, "errors": errors})
+    items, errors = _resolve_bulk(filenames)
+
+    def work(item, job):
+        fn, fp = item
+        return "tags" in update_file(fp, remove={"tags": list(drop)}).get("changed", [])
+
+    return jsonify(_bulk_reply(run_bulk("Untagging", items, work, audit_action="bulk_untag", errors=errors)))
 
 @app.route("/api/bulk_delete", methods=["POST"])
 @_auth.require_feature("data.delete", level="write")
@@ -7566,58 +7850,55 @@ def bulk_box():
             detect = modules.broker.request("detect")
         except Exception as e:
             return jsonify({"success": False, "error": f"No detection model: {e}"})
-    done, boxed, errors = 0, 0, []
-    total = len(filenames)
-    for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
-        try:
-            img = read_jxl(fp)
-            if img is None:
-                errors.append(fn); continue
-            new = []
-            if method == "detect":
-                for b in (detect(_to_bgr(img), conf=modules.broker.variant("detect")["conf"]) or []):
-                    cb = _clamp_box({"cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"]})
+    items, errors = _resolve_bulk(filenames)
+
+    def work(item, job):
+        fn, fp = item
+        img = read_jxl(fp)
+        if img is None:
+            raise RuntimeError("decode failed")
+        new = []
+        if method == "detect":
+            for b in (detect(_to_bgr(img), conf=modules.broker.variant("detect")["conf"]) or []):
+                cb = _clamp_box({"cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"]})
+                if cb:
+                    new.append({"class_name": b.get("class_name") or "object", "cx": cb["cx"], "cy": cb["cy"],
+                                "w": cb["w"], "h": cb["h"], "confirmed": False})
+        elif method == "yolo":
+            res = yolo(img, verbose=False, conf=0.25)
+            if res and res[0].boxes:
+                for box in res[0].boxes:
+                    cid = int(box.cls[0].item()); name = res[0].names[cid]
+                    cx, cy, w, h = box.xywhn[0].tolist()
+                    cb = _clamp_box({"cx":cx,"cy":cy,"w":w,"h":h})
                     if cb:
-                        new.append({"class_name": b.get("class_name") or "object", "cx": cb["cx"], "cy": cb["cy"],
+                        new.append({"class_name": name, "cx": cb["cx"], "cy": cb["cy"],
                                     "w": cb["w"], "h": cb["h"], "confirmed": False})
-            elif method == "yolo":
-                res = yolo(img, verbose=False, conf=0.25)
-                if res and res[0].boxes:
-                    for box in res[0].boxes:
-                        cid = int(box.cls[0].item()); name = res[0].names[cid]
-                        cx, cy, w, h = box.xywhn[0].tolist()
-                        cb = _clamp_box({"cx":cx,"cy":cy,"w":w,"h":h})
-                        if cb:
-                            new.append({"class_name": name, "cx": cb["cx"], "cy": cb["cy"],
-                                        "w": cb["w"], "h": cb["h"], "confirmed": False})
-            else:
-                svc = module_host.get_service("llm")
-                boxes = svc["call"](prompt, _to_bgr(img), "boxes") if svc else []
-                for b in boxes:
-                    try:
-                        new.append({"class_name": b.get("class_name", "object"),
-                                    "cx": float(b["cx"]), "cy": float(b["cy"]),
-                                    "w": float(b["w"]), "h": float(b["h"]),
-                                    "confirmed": False})
-                    except Exception:
-                        pass
-            if new:
-                for n in new:
-                    if n["class_name"] not in state["classes"]:
-                        state["classes"].append(n["class_name"])
-                save_classes()
-                update_file(fp, add={"regions": new})
-                boxed += 1
-            done += 1
-            state["status_text"] = f"AI Box: {done}/{total} ({boxed} boxed)..."
-        except Exception as e:
-            errors.append(fn)
-            access_logger.error(f"bulk_box {fn}: {e}")
-    state["status_text"] = "Ready."
-    return jsonify({"success": True, "done": done, "boxed": boxed, "errors": errors})
+        else:
+            svc = module_host.get_service("llm")
+            boxes = svc["call"](prompt, _to_bgr(img), "boxes") if svc else []
+            for b in boxes:
+                try:
+                    new.append({"class_name": b.get("class_name", "object"),
+                                "cx": float(b["cx"]), "cy": float(b["cy"]),
+                                "w": float(b["w"]), "h": float(b["h"]),
+                                "confirmed": False})
+                except Exception:
+                    pass
+        if new:
+            for n in new:
+                if n["class_name"] not in state["classes"]:
+                    state["classes"].append(n["class_name"])
+            save_classes()
+            update_file(fp, add={"regions": new})
+            job["counts"]["boxed"] = job["counts"].get("boxed", 0) + 1
+        return True
+
+    res = run_bulk("AI Box", items, work, audit_action="bulk_box", errors=errors)
+    if res.get("background"):
+        return jsonify(res)
+    return jsonify({"success": True, "done": res["done"], "boxed": res["counts"].get("boxed", 0),
+                    "errors": res["errors"]})
 
 def _bodies():
     """! @brief The bodies module's service, or None."""
@@ -7709,33 +7990,39 @@ def api_ai_run():
     if not files:
         return jsonify({"success": False, "error": "No file."})
     bulk = "filenames" in d
-    out, done, errors = None, 0, []
-    for fn in files:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(f"{fn}: not found"); continue
+    items, missing = _resolve_bulk(files)
+    errors = [f"{fn}: not found" for fn in missing]
+    action_id = str(a["id"])
+
+    def _run_one(fp):
+        img = read_jxl(fp)
+        if img is None:
+            raise RuntimeError("Decode failed")
+        meta = read_metadata(fp)
+        return meta, (g["run"](action_id, fp, _to_bgr(img), meta) or {})
+
+    if not bulk:  # the editor applies single runs itself
+        if not items:
+            return jsonify({"success": False, "error": errors[0] if errors else "failed"})
+        fn, fp = items[0]
         try:
-            img = read_jxl(fp)
-            if img is None:
-                raise RuntimeError("Decode failed")
-            meta = read_metadata(fp)
-            res = g["run"](str(a["id"]), fp, _to_bgr(img), meta) or {}
-            if bulk:  # the editor applies single runs itself
-                add = {k: res[k] for k in ("tags", "regions", "description") if res.get(k)}
-                upd = update_file(fp, add=add, set={"flag": res["flag"]} if res.get("flag") else None,
-                                  meta=meta)
-                if not upd.get("success"):
-                    raise RuntimeError(upd.get("error") or "write failed")
-            else:
-                out = res
-            done += 1
+            _meta, out = _run_one(fp)
         except Exception as e:
-            errors.append(f"{fn}: {e}")
-    if bulk:
-        return jsonify({"success": True, "done": done, "errors": errors})
-    if out is None:
-        return jsonify({"success": False, "error": errors[0] if errors else "failed"})
-    return jsonify({"success": True, **out})
+            return jsonify({"success": False, "error": f"{fn}: {e}"})
+        return jsonify({"success": True, **out})
+
+    def work(item, job):
+        fn, fp = item
+        meta, res = _run_one(fp)
+        add = {k: res[k] for k in ("tags", "regions", "description") if res.get(k)}
+        upd = update_file(fp, add=add, set={"flag": res["flag"]} if res.get("flag") else None,
+                          meta=meta)
+        if not upd.get("success"):
+            raise RuntimeError(upd.get("error") or "write failed")
+        return True
+
+    return jsonify(_bulk_reply(run_bulk(f"AI: {a.get('label') or action_id}", items, work,
+                                        audit_action="ai_run", errors=errors)))
 
 
 @app.route("/api/box_labels")
@@ -7802,8 +8089,11 @@ def _inject_tailwind():
 # Everything a module needs from the core, as one namespace handed over on
 # host.core. Add here instead of letting modules import manager.
 _core_api = SimpleNamespace(
+    run_bulk=run_bulk, resolve_bulk=_resolve_bulk, bulk_reply=_bulk_reply,
     detect_boxes=_detect_obb_or_box, refresh_model_groups=populate_model_selector,
     meta_cache_drop=_meta_cache_drop, folder_scope_clause=_folder_scope_clause,
+    library_section=_library_section, section_folders=_section_folders,
+    section_clause=_section_clause, library_sections=mt.library_sections,
     api_upload=api_upload, auth=_auth, authmgr=_authmgr, features=features, save_classes=save_classes,
     model_key=_yolo_key, merge_regions=_merge_regions,
     read_image=read_jxl, to_bgr=_to_bgr, resolve_media=_resolve_media, rel=_rel,
@@ -8001,7 +8291,11 @@ module_registry.register_all(module_host)
 @app.after_request
 def _asset_cache_headers(resp):
     p = request.path
-    if p.startswith("/static/") or (p.startswith("/modules/") and "/static/" in p):
+    if p.startswith("/static/build/"):
+        pass  # content-hashed bundles: set by static_build()
+    elif p.startswith("/static/") and request.args.get("v"):
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"  # ?v= busts it
+    elif p.startswith("/static/") or (p.startswith("/modules/") and "/static/" in p):
         resp.headers["Cache-Control"] = "no-cache"
     return resp
 
@@ -8044,26 +8338,93 @@ except Exception as _e:
     access_logger.error(f"apply_db_tables: {_e}")
 
 
-@app.route("/api/module_assets")
-def api_module_assets():
-    """! @brief Asset URLs of enabled modules for the page to load: [{url, kind, module_id}]."""
+def _module_assets_list() -> list:
+    """! @brief The enabled modules' assets in load order: [{url, kind, module_id, path}]."""
     out = []
     for a in module_host.assets:
         if not module_registry.is_enabled(a["module_id"]):
             continue
         fn = a["filename"]
+        lm = module_registry._plugins.get(a["module_id"])
+        folder = lm.path if lm is not None and lm.path else os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "modules", a["module_id"])
         out.append({
             "url": fn if fn.startswith("/") else f"/modules/{a['module_id']}/static/{fn}",
             "kind": a["kind"],
             "module_id": a["module_id"],
+            "path": os.path.join(os.path.dirname(os.path.abspath(__file__)), fn.lstrip("/"))
+                    if fn.startswith("/") else os.path.join(folder, "static", fn),
         })
-    return jsonify({"assets": out})
+    return out
+
+## @brief The bundles assets.build() made at startup ({} = serve the files one by one).
+_bundles: dict = {}
+
+def _page_module_assets() -> list:
+    """! @brief What the page loads for the modules: the two bundles, else every file."""
+    if _bundles:
+        return [{"url": _bundles[k], "kind": kind, "module_id": "*"}
+                for k, kind in (("modules_css", "css"), ("modules_js", "js")) if _bundles.get(k)]
+    return [{k: a[k] for k in ("url", "kind", "module_id")} for a in _module_assets_list()]
+
+def _build_bundles():
+    """! @brief Bundle the page's scripts and the modules' assets (see assets.py)."""
+    global _bundles
+    _bundles = {}
+    if "--no-bundle" in sys.argv[1:]:
+        access_logger.info("bundles: --no-bundle, serving the individual files")
+        return
+    try:
+        _bundles = {k: v for k, v in _assets.build(_module_assets_list(), access_logger).items() if v}
+    except Exception as e:
+        access_logger.warning(f"bundles: build failed, serving individual files: {e}")
+        _bundles = {}
+
+@app.route("/api/module_assets")
+def api_module_assets():
+    """! @brief Asset URLs of enabled modules for the page to load: [{url, kind, module_id}]
+    (the modules bundle when bundling is on)."""
+    return jsonify({"assets": _page_module_assets()})
+
+@app.route("/static/build/<path:filename>")
+def static_build(filename):
+    """! @brief A content-hashed bundle: cached for a year, gzip-precompressed."""
+    fp = get_safe_path(_assets.BUILD_DIR, filename)
+    if not fp or not os.path.isfile(fp) or filename.endswith(".gz"):
+        return ("not found", 404)
+    mime = "application/javascript" if filename.endswith(".js") else "text/css"
+    if "gzip" in (request.headers.get("Accept-Encoding") or "") and os.path.isfile(fp + ".gz"):
+        resp = send_file(fp + ".gz", mimetype=mime, conditional=True)
+        resp.headers["Content-Encoding"] = "gzip"
+        resp.headers["Vary"] = "Accept-Encoding"
+    else:
+        resp = send_file(fp, mimetype=mime, conditional=True)
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
+
+def _module_ui() -> dict:
+    """! @brief The declared UI of the enabled modules (host.add_button, add_settings_section,
+    register_left_pane / register_controls_pane tabs, add_tile_badge) for the page's module_ui.js."""
+    return {k: [dict(e) for e in v if not e["module_id"] or module_registry.is_enabled(e["module_id"])]
+            for k, v in module_host.ui.items()}
+
+@app.route("/api/module_ui")
+def api_module_ui():
+    return jsonify(_module_ui())
+
+@app.context_processor
+def _inject_page_assets():
+    """! @brief core_js_urls: the page's scripts (one bundle, or each file);
+    module_assets: what modules.js injects (saves the /api/module_assets round trip)."""
+    core = [_bundles["core_js"]] if _bundles.get("core_js") else [f"/static/{f}" for f in _assets.CORE_JS]
+    return {"core_js_urls": core, "module_assets": _page_module_assets(), "module_ui": _module_ui()}
 
 
 if __name__=='__main__':
     from waitress import serve
     thread_manager.set_activity_source(lambda: _last_activity)
     model_registry.set_memory_hook(lambda cost_mb, gpu: thread_manager.reserve_model(cost_mb, gpu))
+    modules.model_broker.set_lease_hook(model_registry.lease)  # a model stays resident while a call runs
     model_registry.log_backend(access_logger)
     model_registry.standardize_onnx(access_logger)  # every onnxruntime session uses onnx_providers()
 
@@ -8073,6 +8434,7 @@ if __name__=='__main__':
         access_logger.error(f"launch check: {e}")
     access_logger.info("Compiling Tailwind stylesheet...")
     _build_tailwind()
+    _build_bundles()
     access_logger.info("Starting storage tiering worker...")
     ## @brief Tier config lives in app_config.json (state["tiers"]).
     def _load_tiers_cfg():

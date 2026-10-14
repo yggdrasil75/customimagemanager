@@ -35,6 +35,7 @@ the released model keeps working on animations until 1.0 is trained.
 """
 
 import io
+import math
 import numpy as np
 import os
 import time
@@ -642,7 +643,7 @@ class DupCNN:
 
         def bound(fr):
             h, w = fr[0].shape[:2]
-            s = (clip_pixels / float(len(fr) * h * w)) ** 0.5
+            s = math.sqrt(clip_pixels / float(len(fr) * h * w))
             if s >= 1:
                 return fr
             size = (max(STRIDE, int(w * s)), max(STRIDE, int(h * s)))

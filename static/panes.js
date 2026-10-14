@@ -42,16 +42,20 @@ window.addEventListener('popstate', (e) => {
 // modules.
 window._leftTabs = window._leftTabs || {};   // id -> {label,feature,paneId,onShow}
 
+// A tab is declared in Python (host.register_left_pane(tab_id=, label=...)) and
+// arrives with the page; a module's JS registers only what needs code, so a
+// later call with the same id MERGES (e.g. {id, onShow}) instead of replacing.
 function registerLeftTab(spec) {
   if (!spec || !spec.id) return;
+  const cur = window._leftTabs[spec.id] || {};
   window._leftTabs[spec.id] = {
-    label: spec.label || spec.id,
-    feature: spec.feature || ('tab.' + spec.id),
-    paneId: spec.paneId || (spec.id + '_pane'),
-    onShow: typeof spec.onShow === 'function' ? spec.onShow : null,
+    label: spec.label || cur.label || spec.id,
+    feature: spec.feature || cur.feature || ('tab.' + spec.id),
+    paneId: spec.paneId || cur.paneId || (spec.id + '_pane'),
+    onShow: typeof spec.onShow === 'function' ? spec.onShow : (cur.onShow || null),
     // controlsTab: while this left tab is active, show that controls tab
     // (and hide the per-image metadata tabs); leaving restores them.
-    controlsTab: spec.controlsTab || null,
+    controlsTab: spec.controlsTab || cur.controlsTab || null,
   };
   _renderLeftTabButtons();
 }
@@ -62,15 +66,18 @@ function _renderLeftTabButtons() {
   if (!bar) return;
   const off = 'flex-1 px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-750';
   for (const id in window._leftTabs) {
-    if (bar.querySelector(`[data-ltab="${id}"]`)) continue;
     const t = window._leftTabs[id];
-    const btn = document.createElement('button');
-    btn.dataset.ltab = id;
-    btn.className = off;
+    let btn = bar.querySelector(`[data-ltab="${id}"]`);
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.dataset.ltab = id;
+      btn.className = off;
+      btn.addEventListener('click', () => setPane(id));
+      bar.appendChild(btn);
+    }
+    // a merged registration may have brought the label / feature after the button was made
     if (t.feature) btn.setAttribute('data-feature', t.feature);
     btn.textContent = t.label;
-    btn.addEventListener('click', () => setPane(id));
-    bar.appendChild(btn);
   }
   if (window.applyFeatureVisibility) applyFeatureVisibility(bar);
 }

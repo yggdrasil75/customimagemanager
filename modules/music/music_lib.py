@@ -6,6 +6,7 @@ k-means clustering and shuffle-by. The routes, indexer and UI wiring are in
 module.py; nothing here touches the app.
 """
 from __future__ import annotations
+import os
 import struct
 import numpy as np
 from optional_deps import optional_import
@@ -48,6 +49,7 @@ DDL = """
             emb          BLOB,
             emb_sig      TEXT,
             cluster      INTEGER DEFAULT -1,
+            has_cover    INTEGER,        -- 1 / 0 once checked, NULL until indexed
             created      REAL
         );
         CREATE INDEX IF NOT EXISTS idx_music_artist  ON music(artist);
@@ -154,6 +156,142 @@ def write_audio_metadata(abs_path: str, meta: dict) -> bool:
         return True
     except Exception:
         return False
+
+# -- cover art -------------------------------------------------------------------
+# Folder images a ripper / tagger leaves beside the tracks, best first.
+_FOLDER_COVERS = ("cover", "folder", "front", "album", "albumart", "albumartsmall")
+_IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".jxl", ".avif")
+# description formats whose text is read straight into the API reply
+_TEXT_EXTS = (".txt", ".md", ".nfo")
+
+
+def _sniff_mime(data: bytes) -> str:
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:3] == b"GIF":
+        return "image/gif"
+    return "application/octet-stream"
+
+
+def _embedded_cover(abs_path: str):
+    """! @brief (bytes, mime) of the art embedded in the file, or None. The front
+    cover is preferred where the container says which picture is which."""
+    try:
+        mf = MutagenFile(abs_path)
+    except Exception:
+        return None
+    if mf is None:
+        return None
+    pics = []
+    for p in getattr(mf, "pictures", None) or []:            # FLAC
+        pics.append((getattr(p, "type", 0), p.data))
+    tags = getattr(mf, "tags", None)
+    if tags is not None:
+        try:
+            keys = list(tags.keys())
+        except Exception:
+            keys = []
+        for k in keys:
+            ks = str(k)
+            try:
+                v = tags[k]
+            except Exception:
+                continue
+            if ks.startswith("APIC"):                         # ID3
+                pics.append((getattr(v, "type", 0), v.data))
+            elif ks == "covr":                                # MP4
+                for c in (v or []):
+                    pics.append((3, bytes(c)))
+            elif ks.lower() == "metadata_block_picture":      # Ogg / Opus
+                try:
+                    import base64
+                    from mutagen.flac import Picture
+                    for b in (v if isinstance(v, list) else [v]):
+                        p = Picture(base64.b64decode(b))
+                        pics.append((p.type, p.data))
+                except Exception:
+                    pass
+    pics = [(t, d) for t, d in pics if d]
+    if not pics:
+        return None
+    pics.sort(key=lambda p: 0 if p[0] == 3 else 1)            # 3 = front cover
+    data = bytes(pics[0][1])
+    return data, _sniff_mime(data)
+
+
+def folder_image(abs_dir: str, any_image: bool = False):
+    """! @brief The image that stands for a folder: cover.jpg / folder.png / front.* ...
+    first; with `any_image` (an album or artist folder in a music section, laid out
+    like Plex) any image in it, by name. None when there is none."""
+    try:
+        entries = sorted(os.listdir(abs_dir))
+    except OSError:
+        return None
+    names = {n.lower(): n for n in entries}
+    for stem in _FOLDER_COVERS:
+        for ext in _IMG_EXTS:
+            n = names.get(stem + ext)
+            if n:
+                return os.path.join(abs_dir, n)
+    if any_image:
+        for n in entries:
+            if not n.startswith(".") and os.path.splitext(n)[1].lower() in _IMG_EXTS:
+                return os.path.join(abs_dir, n)
+    return None
+
+
+def folder_cover_path(abs_path: str, any_image: bool = False):
+    """! @brief A cover image beside the track (cover.jpg, folder.png, ...), or None."""
+    return folder_image(os.path.dirname(abs_path), any_image)
+
+
+def folder_description(abs_dir: str, book_exts):
+    """! @brief The description file of an album / artist folder: the first book-kind
+    file in it by name (`book_exts`: lower-case extensions with the dot, the book
+    media kind's), or None."""
+    try:
+        entries = sorted(os.listdir(abs_dir))
+    except OSError:
+        return None
+    exts = set(book_exts or ())
+    for n in entries:
+        if not n.startswith(".") and os.path.splitext(n)[1].lower() in exts:
+            return os.path.join(abs_dir, n)
+    return None
+
+
+def read_description(abs_path: str, limit: int = 4000) -> str | None:
+    """! @brief The text of a plain-text description (.txt / .md / .nfo), up to `limit`
+    characters; None for any other format (the file is still linked by path)."""
+    if os.path.splitext(abs_path)[1].lower() not in _TEXT_EXTS:
+        return None
+    try:
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(limit).strip()
+    except OSError:
+        return None
+
+
+def read_cover(abs_path: str, any_image: bool = False):
+    """! @brief (bytes, mime) of a track's cover: the embedded art, else the folder's
+    cover image (any image in the folder with `any_image`); None when it has
+    neither. Never raises."""
+    try:
+        emb = _embedded_cover(abs_path) if HAVE_MUTAGEN else None
+        if emb:
+            return emb
+        fp = folder_cover_path(abs_path, any_image)
+        if fp:
+            with open(fp, "rb") as f:
+                data = f.read()
+            return data, _sniff_mime(data)
+    except Exception:
+        pass
+    return None
 
 # -- embedding ------------------------------------------------------------------
 def _pack_emb(vec: np.ndarray) -> bytes:

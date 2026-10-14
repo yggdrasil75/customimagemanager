@@ -76,7 +76,7 @@ def register(host):
     host.add_route("/api/comics/write", cc.api_comics_write, methods=["POST"], feature="comics.edit", level="write", action="comic_meta", fields=("target",))
     host.add_asset("comic.js")
     host.register_centre_pane("comic_pane.html")
-    host.register_controls_pane("comic", "comic_editor.html", feature="comics.edit")
+    host.register_controls_pane("comic", "comic_editor.html", feature="comics.edit", label="Comic", mode_tab=True)
 
     # Pages of a comic folder never appear in the flat gallery / folder counts.
     host.register_gallery_filter("(comic_folder IS NULL OR comic_folder='')")

@@ -14,7 +14,6 @@ MANIFEST = {
     "requires":    [],
     "pip":         [],  # vtracer fits smoother SVG paths; OpenCV contours otherwise
     "pip_optional": ["vtracer"],
-    "assets":      ["segmentation.js"],
 }
 
 
@@ -24,7 +23,12 @@ def register(host):
                           section_label="AI Tooling", default="write")
     host.add_route("/api/bulk_segment", sc.bulk_segment, methods=["POST"], feature="ai.segment", level="write")
     host.add_route("/api/segment", sc.api_segment, methods=["POST"], feature="ai.segment", level="write")
-    host.add_asset("segmentation.js")
+    host.add_button("ai_tools", "segment", "Segment", url="/api/segment", feature="ai.segment",
+                    busy="Segmenting...", on_done="apply",
+                    title="Run the picked segmenter (Models > Segmentation) on this image and add masked regions for the whitelisted classes.")
+    host.add_button("gallery_bulk", "segment", "Segment", url="/api/bulk_segment", needs="selection",
+                    feature="ai.segment", busy="Segmenting...", on_done="reload",
+                    title="Run the picked segmenter on every selected image, adding masked regions for the whitelisted classes")
 
     # Pipeline: the segment node's box-masking hook (run_pipeline seg_fn).
     host.register_pipeline_stage("segment_boxes", sc._segment_boxes, label="Segment (masks)")
@@ -61,4 +65,4 @@ def register(host):
         "mask_to_svg_paths": sc.mask_svg.mask_to_svg_paths,
         "svg_d_to_points": sc.mask_svg.svg_d_to_points, "rasterize": sc.mask_svg.rasterize,
     })
-    host.logger.info("segmentation module: routes, pipeline stage, action target, masks hook")
+    host.logger.info("segmentation module: routes, pipeline stage, action target, masks hook")

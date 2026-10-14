@@ -1,0 +1,31 @@
+/* upscale.css - the Upscale dialog and progress panel (modules/upscale). */
+.ups-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--cim-scrim, rgba(0, 0, 0, .6));
+}
+.ups-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 999;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  border: 1px solid var(--cim-gray-700, #374151);
+}
+.ups-bar {
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--cim-gray-700, #374151);
+}
+.ups-bar > div {
+  height: 100%;
+  background: var(--cim-accent-500, #3b82f6);
+  transition: width .3s;
+}

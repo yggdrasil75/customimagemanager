@@ -134,6 +134,8 @@ module registers: `read_image`,
 `upload_spool_dir`, `upload_workers_wake`, `api_upload`, `auth`, `features`,
 `object_grouping`, `files_where` (the gallery's WHERE for a `q` / folder /
 album: `(where_sql, params, text, structured)`, so a view lists what the grid would),
+`library_section(rel)` / `section_folders(id)` / `section_clause(id, column=)` (see
+"Library sections"),
 `file_data(rel, key=None)` / `set_file_data(rel, key, value)` (per-file module
 data in the file's XMP, see "Where data lives"), `start_sync(mode)` /
 `sync_status()` (the library sync job), `image_adjust(abs_path)` -> `{orientation,
@@ -168,6 +170,9 @@ touching `media_types.py`.
 | `host.on_setting_change(key, fn)` | side effect when a setting changes |
 | `host.add_settings_field(key=, label=, kind=, pane=, section=, options=, columns=, help=)` | a settings-UI widget bound to a key |
 | `host.add_settings_tab(id, label, icon, admin_only, group=)` | your own Settings tab (fields with `pane=<id>` render in it; gets the permission `settings.<id>`) |
+| `host.add_button(area, id, label, url=, needs=, feature=, options=, on_done=)` | a button the core draws that POSTs to one of your routes (see "Declared UI") |
+| `host.add_settings_section(pane, id, status_url=, actions=, text=, mount=)` | a status + action block in a settings pane, drawn by the core from your routes |
+| `host.add_tile_badge(field, text, tone=)` | a badge on gallery tiles from a file enricher's field |
 | `host.add_user_setting(key, label=, kind=, default=, validate=, options=, feature=)` / `host.user_setting(key)` | a per-user setting in Settings -> User settings / its value for the current user |
 | `host.add_account_field(key, label, options=, scopes=)` | a field an admin sets per account / group in Settings -> Users (`g.user["account"][key]`) |
 | `host.register_feature(key, label, section=, default=, role_defaults=)` | an auth permission; gate routes with `host.require_feature` / `core.auth.require_feature` |
@@ -178,9 +183,10 @@ touching `media_types.py`.
 | `host.register_pipeline_stage(name, fn, label=)` | an AI-pipeline node type |
 | `host.register_action_target(name, fn)` | an AI-action target (`fn(fp, bgr, meta, action)`) |
 | `host.register_gallery_filter(clause)` | hide container members (comic pages) from the flat gallery |
+| `host.register_library_section(id, label=, kinds=, per_user=True)` | own a top-level library folder with a fixed meaning (music, movies, tv); see "Library sections" |
 | `host.extend_media_type(kind, exts=, mime_map=)` | add extensions to a kind another module owns (comics -> book) |
 | `host.add_worker_source(name, claim, handle, ...)` | a background worker source |
-| `host.register_controls_pane(tab_id, template, feature=)` / `register_left_pane` / `register_centre_pane` / `register_app_modal` | server-rendered UI partials from your `templates/` |
+| `host.register_controls_pane(tab_id, template, feature=, label=, mode_tab=, loader=)` / `register_left_pane(template, tab_id=, label=, feature=, controls_tab=)` / `register_centre_pane` / `register_app_modal` | server-rendered UI partials from your `templates/`; with a label / tab_id the tab that shows the pane is declared too |
 | `host.provide_service(name, obj, priority=0)` / `get_service(name)` | publish / consume module-to-module APIs |
 | `host.register_login_check(fn)` | a step between a correct password and the session: `fn(user_row, login_data)` -> None, or `(json, status)` to answer the login instead (2FA) |
 | `host.on(event, fn)` / `host.emit(event, **kw)` | subscribe to / raise core events |
@@ -234,7 +240,7 @@ The core emits, modules react; the core never names a module.
 | `library.reconcile` | - | after the image index scan (and after every sync) |
 | `library.sync` | `direction, rel_paths` | a sync (Sync button, `/api/sync`): `"push"` = write what only your tables hold into the files (rel_paths None); `"pull"` = rebuild your mirrored tables from the files, for `rel_paths` (the re-indexed files) or every file when None (a full sync) |
 | `file.index` | `rel_path, abs_path, force` -> truthy if handled | index a file of a kind you own; core skips its image path |
-| `upload.check` | `folder, filename, size` -> a reason string to refuse | veto an upload before it is written (quotas); the client gets 413. A chunked upload (`POST /api/upload/session`) asks once, with the full size, before any byte arrives |
+| `upload.check` | `folder, filename, size` -> a reason string to refuse | veto an upload before it is written (quotas); the client gets 413. A chunked upload (`POST /api/upload/session`) asks once, with the full size, before any byte arrives. |
 | `upload.duplicate_check` | `sha, filename` -> existing rel_path or None | veto an upload as a duplicate |
 | `upload.before_convert` | `spool_path, filename, rel_path` | the spooled original before it is converted (and `rel_path` it will be stored as); keep what conversion drops (motion photos extract their video) |
 | `upload.stored` | `rel_path, filename` | index a file you own after upload |
@@ -251,6 +257,59 @@ The core emits, modules react; the core never names a module.
 
 `emit()` returns every non-None handler result; the books module answers
 `upload.duplicate_check`, dedup answers `file.deleted`.
+
+### Library sections
+
+A library section is a top-level folder with a fixed meaning: public at
+`<media>/<id>` and, per user, at `<media>/users/<name>/<id>` (the ownership
+module's personal folders). The module that owns a kind of library declares it
+once, in `register(host)`:
+
+```python
+host.register_library_section("music", label="Music", kinds={"audio", "video", "image", "book"},
+                              sidecars={".cue", ".log", ".m3u", ".m3u8", ".nfo"})
+#   id: the folder name (lower-case letters, digits, underscore)
+#   kinds: the media kinds (input_kind names: audio, image, video, book) the module
+#          indexes as its items; informational, nothing is refused
+#   sidecars: non-media extensions that belong beside the items
+#   per_user=False: no users/<name>/<id> folders
+```
+
+Nothing uploaded into a section is refused: the point is that a library kept by
+another app (Plex) imports as it is. A sidecar, or a file of a type the app does
+not handle, is stored as sent next to its item (never converted, never rejected;
+`upload.stored` tells the module), and a filename keeps its spaces and brackets
+inside a section because the layout is the name. Media of another kind is stored
+and indexed by the core as usual (a video in `music/` is a music video, a plain
+library file, not a track). With the module off, the folder is an ordinary folder.
+
+What the core does with it:
+
+- one gallery filter hides every registered section's rows from the plain
+  gallery grid and the folder list (the section's own tab shows them); the files
+  are still indexed, served and searched as usual, so a section module never
+  registers a gallery filter of its own;
+- `GET /api/sections` -> `{"sections": [{"id", "label", "kinds", "sidecars",
+  "per_user", "folders"}]}` lists them for the page and `upload.py --dest <section>`;
+- `host.core.library_section(rel)` -> `(section_id, username, inner_rel)`: the
+  section a path is in, its owner for a `users/<name>/<id>` path (None for the
+  public one) and the path relative to the section folder
+  (`"Artist/Album/01.flac"`); `(None, None, None)` outside every section;
+- `host.core.section_folders(id)` -> `["music", "users/ann/music", ...]`, the
+  section's folders that exist on disk (what an indexer walks);
+- `host.core.section_clause(id, column="rel_path")` -> `(sql, params)`, the rows
+  of a table inside the section (public and per-user), exact on path segments.
+
+The music module is the reference: audio counts as a track only inside a music
+section (a `.flac` elsewhere is claimed by `file.index` but not indexed, a
+video never is), `index_all` walks `section_folders("music")`, and the folders
+of the Plex layout (`Artist/Album/01 - Track.flac`) carry the album art (any
+image in the album folder, `cover.jpg` / `folder.jpg` first), the artist picture
+(an image in the artist folder) and descriptions (a book-kind file in either),
+exposed on `/api/music/albums` (`folder`, `art_rel`, `description_rel`,
+`description`) and `/api/music/artists` (`folder`, `picture_rel`,
+`description_rel`, `description`). Movies and TV are laid out the same way
+(`Title (Year)/Title (Year).mkv`, `Show (Year)/Season 01/Show - s01e01 - Title.mkv`).
 
 ### Services
 
@@ -479,13 +538,66 @@ fly; `host.declare_capability(id, summary=, input=, output=, label=,
 background=)` documents its I/O contract - the first module to declare an id
 owns it.
 
+## Declared UI:
+
+```python
+# A button in a control area, posting to one of the module's own routes: {"filename"}
+# (needs="file"), {"filenames"} ("selection"), {"album"} ("album") or {} (None), plus
+# "option" when options= is set. The reply's message / note is a toast, error a failure;
+# with on_done="apply" its regions / tags / description / flag go into the open editor,
+# a "job" (run_bulk) is followed, a send_file() reply is downloaded.
+host.add_button("ai_tools", "ocr", "OCR", url="/api/ocr", feature="ai.ocr", on_done="apply",
+                busy="Reading...", title="Read the text in this image")
+host.add_button("gallery_bulk", "export", "Export", url="/api/export", needs="selection",
+                options=[{"value": "jpg", "label": "jpg"}, {"value": "png", "label": "png"}])
+#   run=fn(body) instead of url= makes the route for you (/api/ui/<module>/button/<id>/run)
+
+# A block in a settings pane (your tab's id, or a core pane such as "storage", optionally
+# inside one of its elements with mount=): a status view read from a GET route of the
+# module - its reply, or its "view" key, holds any of
+#   {"lines": [...], "rows": [{"label", "value", "tone"?}], "list": [{"text", "tone"?}],
+#    "table": {"head": [...], "rows": [[...] | {"cells": [...], "tone"?}]},
+#    "log": [{"at": epoch, "text"}], "busy": bool, "note": str}      tone: ok | warn | danger | muted
+# - re-read after every action and every `poll` seconds while busy, and action buttons
+# that POST to routes of the module (their reply's message is shown).
+host.add_settings_section("email", "tools", status_url="/api/email/status", text="Save first.",
+                          actions=[{"id": "test", "label": "Send test email", "url": "/api/email/test"}])
+#   status=fn() / "run": fn(body) make the routes for you
+
+# A pane (templates/ of the module) with the tab that shows it. The page registers the
+# tab; JS adds behaviour only where there is any: registerLeftTab({id: "music", onShow})
+# merges into the declared tab (same for registerControlsTab).
+host.register_left_pane("music_pane.html", tab_id="music", label="Music", feature="tab.music")
+host.register_controls_pane("comic", "comic_pane.html", feature="comics.edit", label="Comic", mode_tab=True)
+# a pane holding an editor object: its .load(filename) runs when the tab shows
+host.register_controls_pane("exif", "exif_editor.html", feature="meta.exif", label="EXIF", loader="exifEditor")
+
+# A badge on every tile whose row (from your file enricher) has the field.
+host.add_tile_badge("motion", "LIVE", title="Motion photo", tone="accent")
+
+# A library importer's tab (the fetch module's shared importer UI): the tab, its intro
+# and its source fields, all here; /api/import/<fetcher>/... is what it talks to.
+host.add_import_tab("immich_import", "Immich import", fetcher="immich", title="Import from Immich",
+                    intro="...", fields=[{"key": "url", "label": "Immich URL", "kind": "text"}])
+```
+
+A status view may also carry `"pre"` (a log block: text or lines), `"link"`
+(`{"url", "label"}`) and `"live": true` (keep re-reading every `poll` seconds while
+the pane is on screen); an action with `"options_from": "<view key>"` gets a select
+filled from that key's `[{"value", "label"}]` and posts its value as `option`.
+
+`modules/example_hello`, `email`, `storage_alerts`, `personal_iqa`, `ocr`,
+`barcodes`, `export`, `segmentation`, `ftp`, `kobold`, the metadata editors' tabs
+and the three library importers are written this way. The descriptors are inlined in the
+page (`window.CIM_MODULE_UI`, also `/api/module_ui`); only enabled modules' are.
+
 ## Front-end
 
 Assets are served at `/modules/<id>/static/<file>` and injected on page load.
 
-- **Controls-pane tab**: `registerControlsTab({id, label, feature, onShow})`
-  in your JS plus `host.register_controls_pane(id, "pane.html")` for the
-  server-rendered pane.
+- **Controls-pane tab**: `host.register_controls_pane(id, "pane.html", label=...)`
+  declares pane and tab; `registerControlsTab({id, onShow})` in your JS adds
+  behaviour to it if there is any.
 - **Buttons**: `registerControlButton("ai_tools", {label, onclick, variant, id, feature, title})`
   (areas: `ai_tools`, `viewer_toggles`, `gallery_bulk`, ...). The object is a
   `cimButton()` spec: the core builds the button (`cim-btn cim-btn-<variant>
@@ -495,10 +607,11 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   Buttons you render yourself use `cimButton({...})` too. Raw HTML is still
   accepted for non-button controls (a select, a checkbox); wrap several
   elements in one element, an area appends a registration's first element.
-- **Left tab / centre pane**: `registerLeftTab({id, label, feature, paneId, onShow, controlsTab})`
-  (`controlsTab` names a `registerControlsTab({..., modeTab: true})` tab that only
-  shows while your left tab is active - the Trainer does this)
-  pairs with `host.register_left_pane`; a module that takes over the centre
+- **Left tab / centre pane**: `host.register_left_pane("pane.html", tab_id=, label=,
+  feature=, controls_tab=)` declares pane and tab (`controls_tab` names a
+  `mode_tab=True` controls pane shown only while your left tab is active - the
+  Trainer does this); `registerLeftTab({id, onShow})` in your JS adds behaviour;
+  a module that takes over the centre
   (a reader, a person's mesh) pairs `host.register_centre_pane` with
   `registerMediaMode({id, centreId, controlsTab})` and calls `setMediaMode(id)`.
 - **Gallery views**: `registerGalleryView({id, label, title, feature, mount(host, ctx),

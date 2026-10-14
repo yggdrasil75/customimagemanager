@@ -24,3 +24,11 @@ android/keystore/
 imports/
 static/tailwind.css
 tools/
+# native_build.py output (compiled helper modules); the .py files are the source
+*.so
+*.pyd
+/*.c
+/modules/**/*.c
+/build/
+/data/native_manifest.json
+/static/build/

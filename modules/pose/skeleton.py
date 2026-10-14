@@ -77,6 +77,113 @@ def topology(n_kp: int):
     return TOPOLOGIES.get(n_kp, ("body", [f"kp{i}" for i in range(n_kp)], []))
 
 
+# -- skeleton <-> region linking ----------------------------------------------
+## @brief Keypoints that say where the body is (the matcher ignores face and hand
+# detail, which would otherwise pull a whole-body skeleton onto a face box).
+_BODY_POINTS = {17: range(17), 33: range(33), 133: range(17), 543: range(33)}
+## @brief Region kinds a body skeleton never belongs to.
+_NOT_A_BODY_TYPES = {"face", "barcode", "focus", "body part"}
+
+
+def _body_like(region) -> bool:
+    if region.get("debug"):
+        return False
+    rtype = str(region.get("region_type") or "").strip().lower()
+    cls = str(region.get("class_name") or "").strip().lower()
+    return rtype not in _NOT_A_BODY_TYPES and cls not in ("face", "barcode", "qr") \
+        and not cls.startswith("text:")
+
+
+def _box_iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2, a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
+    bx1, by1, bx2, by2 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2, b["cx"] + b["w"] / 2, b["cy"] + b["h"] / 2
+    iw, ih = max(0.0, min(ax2, bx2) - max(ax1, bx1)), max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = iw * ih
+    union = a["w"] * a["h"] + b["w"] * b["h"] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _skeleton_fit(keypoints, region, vis_thresh=0.2):
+    """! @brief How well a skeleton fits a region: (fraction of its visible body points
+    inside the region, how much of the region's height or width the points span,
+    IoU of their bounds with the region); zeros with fewer than 3 visible points."""
+    idx = _BODY_POINTS.get(len(keypoints), range(len(keypoints)))
+    pts = [(float(keypoints[i]["x"]), float(keypoints[i]["y"])) for i in idx
+           if i < len(keypoints) and float(keypoints[i].get("v", 1.0)) >= vis_thresh]
+    if len(pts) < 3:
+        return 0.0, 0.0, 0.0
+    try:
+        box = {k: float(region[k]) for k in ("cx", "cy", "w", "h")}
+    except (KeyError, TypeError, ValueError):
+        return 0.0, 0.0, 0.0
+    if box["w"] <= 0 or box["h"] <= 0:
+        return 0.0, 0.0, 0.0
+    x1, y1 = box["cx"] - box["w"] / 2, box["cy"] - box["h"] / 2
+    x2, y2 = box["cx"] + box["w"] / 2, box["cy"] + box["h"] / 2
+    inside = sum(1 for x, y in pts if x1 <= x <= x2 and y1 <= y <= y2) / len(pts)
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    kw, kh = max(xs) - min(xs), max(ys) - min(ys)
+    cover = min(1.0, max(kw / box["w"], kh / box["h"]))
+    kb = {"cx": (min(xs) + max(xs)) / 2, "cy": (min(ys) + max(ys)) / 2,
+          "w": max(kw, 1e-4), "h": max(kh, 1e-4)}
+    return inside, cover, _box_iou(kb, box)
+
+
+def link_regions(regions, pose, min_inside=0.6, min_cover=0.4):
+    """! @brief Attach each skeleton of an image-level pose dict to the body region it
+    belongs to (region["pose"]), best fits first, one skeleton per region. The run
+    is authoritative: skeletons from an earlier run are taken off every region.
+    @param pose  {people: [{keypoints, conf?}], kind?, model?, provider?}.
+    @return (new region list, number of skeletons linked).
+    """
+    out = []
+    for r in regions or []:
+        r = dict(r)
+        r.pop("pose", None)
+        out.append(r)
+    people = (pose or {}).get("people") or []
+    meta = {k: pose[k] for k in ("kind", "model", "provider") if (pose or {}).get(k)}
+    cands = []
+    for pi, person in enumerate(people):
+        kps = person.get("keypoints") or []
+        for ri, r in enumerate(out):
+            if not _body_like(r):
+                continue
+            inside, cover, iou = _skeleton_fit(kps, r)
+            # a side-on body is thin (low IoU) but spans its box's height; a group
+            # box holds the skeleton too, but the person's own box fits it closer
+            if inside >= min_inside and cover >= min_cover:
+                cands.append((inside * (cover + iou) / 2, pi, ri))
+    used_p, used_r = set(), set()
+    for _, pi, ri in sorted(cands, reverse=True):
+        if pi in used_p or ri in used_r:
+            continue
+        used_p.add(pi)
+        used_r.add(ri)
+        person = people[pi]
+        out[ri]["pose"] = {**meta, "keypoints": person.get("keypoints") or [],
+                           **({"conf": person["conf"]} if person.get("conf") is not None else {})}
+    return out, len(used_p)
+
+
+def drop_person(pose, keypoints):
+    """! @brief The image-level pose without the person whose skeleton is `keypoints`
+    (the nearest one, if it is within rounding of it); {"clear": True} when none is left."""
+    people = list((pose or {}).get("people") or [])
+
+    def dist(p):
+        a = p.get("keypoints") or []
+        if len(a) != len(keypoints) or not a:
+            return float("inf")
+        return sum(abs(float(u["x"]) - float(v["x"])) + abs(float(u["y"]) - float(v["y"]))
+                   for u, v in zip(a, keypoints)) / len(a)
+    if people:
+        best = min(range(len(people)), key=lambda i: dist(people[i]))
+        if dist(people[best]) < 0.02:
+            people.pop(best)
+    return {**pose, "people": people} if people else {"clear": True}
+
+
 # -- default tokens for learners (personal_iqa etc.) -------------------------
 # COCO-17 segments whose lengths / torso length are the pose-independent
 # body proportions. First 17 points of wholebody-133 are the same COCO points.

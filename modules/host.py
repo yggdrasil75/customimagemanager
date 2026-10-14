@@ -10,7 +10,7 @@ import os
 import re
 import time
 
-from flask import g, has_request_context, jsonify
+from flask import Response, g, has_request_context, jsonify, request
 
 ## @brief The kinds a table can be (see add_table): rebuildable, an index of the
 # files, or data that exists only in the DB.
@@ -89,6 +89,9 @@ class Host:
         self.action_targets = {}  # AI-action target -> fn(fp, bgr, meta, action)
         self.ai_action_groups = []  # see register_ai_actions
         self.gallery_filters = []  # SQL clauses that hide rows from the flat gallery
+        # the one gallery filter hiding every registered library section's rows
+        # (register_library_section rebuilds it; sections never register their own)
+        self._section_filter = None
         # see register_access_policy
         self.access_policies = []
         # left-column pane partials
@@ -101,6 +104,10 @@ class Host:
         self.sort_keys = {}
         # {name: {"obj", "module_id", "priority"}}
         self.services = {}
+        # declarative UI (see "Declared UI" below): the core's module_ui.js renders
+        # these; a module needs no JS of its own for them
+        self.ui = {"buttons": [], "sections": [], "left_tabs": [], "controls_tabs": [],
+                   "tile_badges": [], "import_tabs": []}
         # the module being registered, so contributions are attributed to it
         self._current_module = None
 
@@ -366,19 +373,158 @@ class Host:
                     + (f" - {help}" if help else ""),
             "module_id": self._current_module}
 
-    def register_left_pane(self, template):
-        """! @brief Add a left-column pane partial; pair it with a left tab of the same pane id."""
-        self.left_panes.append({"template": template,
-                                "module_id": self._current_module})
+    def register_left_pane(self, template, *, tab_id=None, label=None, feature=None,
+                           pane_id=None, controls_tab=None):
+        """! @brief Add a left-column pane partial and, with `tab_id`, the tab that shows it
+        (the page registers it; a module's JS adds behaviour with registerLeftTab({id, onShow})).
+        @param feature      permission gating the tab (default tab.<tab_id>).
+        @param pane_id      the pane element's id (default <tab_id>_pane).
+        @param controls_tab a controls tab shown only while this tab is active."""
+        self.left_panes.append({"template": template, "module_id": self._current_module})
+        if tab_id:
+            self.ui["left_tabs"].append({"id": tab_id, "label": label or tab_id, "feature": feature,
+                                         "pane_id": pane_id, "controls_tab": controls_tab,
+                                         "module_id": self._current_module})
 
-    def register_controls_pane(self, tab_id, template, *, feature=None):
-        """! @brief Add a controls-pane partial, rendered server-side as #controls_pane_<tab_id>.
+    def register_controls_pane(self, tab_id, template, *, feature=None, label=None,
+                               mode_tab=False, loader=None):
+        """! @brief Add a controls-pane partial, rendered server-side as #controls_pane_<tab_id>,
+        and, with `label`, the tab that shows it (the page registers it; a module's JS adds
+        behaviour with registerControlsTab({id, onShow})).
         @param template  template in this module's templates/ folder.
-        @param feature   optional data-feature gate on the pane.
+        @param feature   optional data-feature gate on the pane and tab.
+        @param mode_tab  shown only while a left tab claims it (controls_tab=).
+        @param loader    name of a page global whose .load(filename) fills the pane when
+                         the tab shows (the metadata editors: "exifEditor").
         """
         self.controls_panes.append({
             "tab_id": tab_id, "template": template, "feature": feature,
             "module_id": self._current_module})
+        if label:
+            self.ui["controls_tabs"].append({"id": tab_id, "label": label, "feature": feature,
+                                             "mode_tab": bool(mode_tab), "loader": loader,
+                                             "module_id": self._current_module})
+
+    # -- Declared UI ------------------------------------------------------------
+    # Widgets a module describes in Python and the core renders (static/module_ui.js):
+    # a button in a control area that calls a Python function, a block in a settings
+    # pane with a status view and action buttons, a left / controls tab for a
+    # server-rendered pane, a badge on gallery tiles. The module ships no JS for
+    # these. Each is attributed to the registering module and shown only while it
+    # is enabled; the routes they need are created here.
+
+    def _ui_route(self, kind, uid, name, fn, *, feature, level, methods=("POST",)):
+        mod = self._current_module or "core"
+        rule = f"/api/ui/{mod}/{kind}/{uid}/{name}"
+
+        def view():
+            body = request.get_json(silent=True) or {}
+            try:
+                out = fn(body)
+            except Exception as e:  # a failing handler answers, it doesn't 500
+                self.logger.error(f"ui {mod} {kind}/{uid}/{name}: {e}")
+                return jsonify({"success": False, "error": str(e)})
+            if isinstance(out, Response) or (isinstance(out, tuple) and out and isinstance(out[0], Response)):
+                return out  # a file to download (send_file), passed through
+            if out is None:
+                out = {}
+            elif isinstance(out, str):
+                out = {"message": out}
+            out.setdefault("success", True)
+            return jsonify(out)
+        view.__name__ = f"ui_{kind}_{uid}_{name}"
+        self.add_route(rule, view, feature=feature, level=level, methods=list(methods))
+        return rule
+
+    def add_button(self, area, uid, label, *, url=None, run=None, needs="file", feature=None,
+                   level="write", variant="secondary", title=None, confirm=None, on_done=None,
+                   busy=None, options=None):
+        """! @brief A button in a control area (`ai_tools`, `viewer_toggles`, `gallery_bulk`,
+        `gallery_tools`, `album_tools`, ...) that POSTs to `url` (one of the module's
+        routes, usually) or to a route made here for `run`.
+        The body carries `filename` (needs "file"), `filenames` ("selection"), `album`
+        ("album") or nothing (None), plus `option` when `options` is set. The reply:
+        `message` (or `note`) is shown as a toast, `error` as a failure; with on_done
+        "apply", `regions`, `tags`, `description` and `flag` go into the open editor; a
+        `job` (from run_bulk) is followed to its end; a send_file() response is
+        downloaded.
+        @param run      fn(body) -> dict | str | None | Response, when no route exists yet.
+        @param options  [{"value", "label"}]: a select next to the button; its value is `option`.
+        @param on_done  "apply" (editor fields), "refile" (reload the open file),
+                        "reload" (the gallery) or None.
+        @param confirm  a question asked before running.
+        @param busy     the label while running (default: label + "...").
+        """
+        if url is None:
+            url = self._ui_route("button", uid, "run", run, feature=feature, level=level)
+        self.ui["buttons"].append({
+            "area": area, "id": uid, "label": label, "url": url, "needs": needs,
+            "feature": feature, "variant": variant, "title": title, "confirm": confirm,
+            "on_done": on_done, "busy": busy, "options": list(options or []),
+            "module_id": self._current_module})
+
+    def add_settings_section(self, pane, uid, *, title=None, text=None, status_url=None,
+                             status=None, actions=(), poll=None, feature=None, order=100,
+                             mount=None):
+        """! @brief A block in a settings pane: `text`, a status view and action buttons.
+        @param pane        a module tab's id, or a core pane ("storage", "general", ...).
+        @param mount       id of an element inside the pane to render into (unhidden);
+                           default: appended to the pane.
+        @param status_url  a GET route of the module whose reply holds the view, either
+                           at top level or under "view" (so the route keeps its other
+                           fields): any of
+                           {"lines": [str], "rows": [{"label", "value", "tone"?}],
+                            "list": [{"text", "tone"?}], "table": {"head": [...], "rows": [[...]]},
+                            "log": [{"at": epoch, "text"}], "busy": bool, "note": str}
+                           (tone: "ok" | "warn" | "danger" | "muted"). Re-read after an
+                           action, and every `poll` seconds while `busy`.
+        @param status      fn() -> that view, when no route exists yet.
+        @param actions     [{"id", "label", "url" (POST) | "run": fn(body), "variant"?,
+                            "title"?, "confirm"?, "level"?, "options_from"?}]; the reply's
+                            `message` (or `note`) is shown, `error` is a failure.
+                            options_from names a view key holding [{"value", "label"}]: a
+                            select next to the button, its value posted as `option`.
+                           The view may also carry "pre" (a log: text or lines), "link"
+                           ({"url", "label"}) and "live": true (re-read every `poll`
+                           seconds while the pane is on screen).
+        @param feature     gate; defaults to the pane's settings.<pane> permission.
+        """
+        feature = feature or f"settings.{pane}"
+        if status is not None:
+            status_url = self._ui_route("section", uid, "status", lambda body: status(),
+                                        feature=feature, level="read", methods=("GET",))
+        acts = []
+        for a in actions:
+            url = a.get("url") or self._ui_route("section", uid, "action_" + a["id"], a["run"],
+                                                 feature=feature, level=a.get("level", "write"))
+            acts.append({k: a.get(k) for k in ("id", "label", "variant", "title", "confirm", "options_from")} | {"url": url})
+        self.ui["sections"].append({
+            "pane": pane, "id": uid, "title": title, "text": text, "poll": poll, "order": order,
+            "feature": feature, "status_url": status_url, "actions": acts, "mount": mount,
+            "module_id": self._current_module})
+
+    def add_import_tab(self, tab_id, label, *, fetcher, title, fields, intro="", sources_label="Sources",
+                       add_label="Add", icon="\U0001f4e5", admin_only=True, common=True):
+        """! @brief A library-importer settings tab (Immich, Takeout, iCloud...): the tab plus
+        the shared importer UI of the fetch module (its ImportKit), described here.
+        @param fetcher  the fetch source id (/api/import/<fetcher>/...).
+        @param fields   [{"key", "label", "kind": text|number|toggle|select|path, "default"?,
+                         "help"?, "secret"?, "placeholder"?, "options"?: [[value, label]]}].
+        @param intro    HTML shown above the sources.
+        @param common   add the shared schedule fields.
+        """
+        self.add_settings_tab(tab_id, label, icon=icon, admin_only=admin_only)
+        self.ui["import_tabs"].append({
+            "tab": tab_id, "fetcher": fetcher, "title": title, "intro": intro, "fields": list(fields),
+            "sourcesLabel": sources_label, "addLabel": add_label, "common": common,
+            "module_id": self._current_module})
+
+    def add_tile_badge(self, field, text, *, title=None, tone="accent", feature=None, when=None):
+        """! @brief A badge on every gallery tile whose row has `field` (a file enricher's
+        field) truthy, or equal to `when`. `text` may hold {value}."""
+        self.ui["tile_badges"].append({"field": field, "text": text, "title": title,
+                                       "tone": tone, "feature": feature, "when": when,
+                                       "module_id": self._current_module})
 
     def add_worker_source(self, name, claim, handle, key_of=None, cost_of=None):
         """! @brief Register a thread-manager work source (see thread_manager.register_source)."""
@@ -624,6 +770,42 @@ class Host:
     def register_gallery_filter(self, clause):
         """! @brief Hide matching rows from the flat gallery (a SQL condition on files)."""
         self.gallery_filters.append(clause)
+
+    def register_library_section(self, section_id, *, label, kinds, per_user=True, sidecars=()):
+        """! @brief Declare a library section this module owns: a top-level folder with a
+        fixed meaning, `<media>/<section_id>` and, with per_user, every account's
+        `<media>/users/<name>/<section_id>`. Its files stay out of the plain gallery
+        (one core filter covers every section) and GET /api/sections lists it. Nothing
+        is refused: another app's library imports as it is. Inside a section the core
+        stores a file of an unknown type (and the declared `sidecars`) as sent, next to
+        the item it belongs to, and keeps uploaded names as they are (the layout is the
+        name). With the module off, the folder is an ordinary folder.
+        @param section_id  the folder name: lower-case letters, digits, underscore.
+        @param label       shown in the UI ("Music").
+        @param kinds       media kinds the module indexes as its items, e.g. {"audio", "video"}.
+        @param sidecars    non-media extensions beside the items (".nfo", ".srt", ".cue").
+        @param per_user    also under each user's personal folder.
+        @return the section record {"id", "label", "kinds", "per_user", "sidecars"}.
+        Read it back with host.core.library_section(rel) -> (id, username, inner_rel),
+        host.core.section_folders(id) and host.core.section_clause(id, column).
+        """
+        rec = self.media.register_library_section(section_id, label=label, kinds=kinds,
+                                                  per_user=per_user, sidecars=sidecars)
+        rec = dict(rec, module_id=self._current_module)
+        self._refresh_section_filter()
+        return rec
+
+    def _refresh_section_filter(self):
+        """! @brief Rebuild the one gallery filter from the registered sections."""
+        if self._section_filter in self.gallery_filters:
+            self.gallery_filters.remove(self._section_filter)
+        self._section_filter = self.media.section_hide_clause("rel_path") or None
+        if self._section_filter:
+            self.gallery_filters.append(self._section_filter)
+
+    def library_sections(self):
+        """! @brief {id: {"id", "label", "kinds", "per_user"}} of every registered section."""
+        return self.media.library_sections()
 
     def register_ai_actions(self, source, list_fn, run_fn, *, feature=None):
         """! @brief Add actions to the editor's AI picker and the bulk bar.

@@ -40,7 +40,6 @@ MANIFEST = {
     "core":        False,
     "requires":    ["metadata"],
     "pip":         [],
-    "assets":      ["export.js"],
 }
 
 FORMATS = ("jpg", "png", "original", "jxl")
@@ -127,13 +126,17 @@ def register(host):
 
     def api_export():
         data = request.get_json(force=True, silent=True) or {}
-        fmt = (data.get("format") or "jpg").lower()
+        return _export(data.get("format"), data.get("album"), data.get("files"))
+
+    def _export(fmt, album, files):
+        """! @brief The exported file (or zip) as a response, or a JSON error."""
+        fmt = (fmt or "jpg").lower()
         if fmt == "jpeg":
             fmt = "jpg"
         if fmt not in FORMATS:
             return jsonify({"success": False, "error": f"format must be one of {FORMATS}"}), 400
-        album = data.get("album") or ""
-        files = list(data.get("files") or [])
+        album = album or ""
+        files = list(files or [])
         if album:
             files = [r[0] for r in host.db().execute(
                 "SELECT rel_path FROM album_members WHERE album=? ORDER BY added",
@@ -168,4 +171,15 @@ def register(host):
             shutil.rmtree(tmp, ignore_errors=True)
 
     host.add_route("/api/export", api_export, methods=["POST"])
-    host.add_asset("export.js")
+
+    # The export control, declared: [format][Export] on the open image, the
+    # selection and the open album. Each button posts {option, filename |
+    # filenames | album}; api_export's reply (a file) is downloaded as is.
+    def _button(body):
+        return _export(body.get("option"), body.get("album"),
+                       body.get("filenames") or ([body["filename"]] if body.get("filename") else []))
+    opts = [{"value": "jpg", "label": "jpg"}, {"value": "png", "label": "png"},
+            {"value": "original", "label": "original"}, {"value": "jxl", "label": "jxl+xmp"}]
+    for area, needs in (("viewer_toggles", "file"), ("gallery_bulk", "selection"), ("album_tools", "album")):
+        host.add_button(area, "export_" + needs, "\u2b07 Export", run=_button, needs=needs, variant="ok",
+                        options=opts, title="Download in the picked format (several files: a zip)")

@@ -20,10 +20,33 @@ backend (`resource`) aren't serialized.
 """
 
 import threading
+import contextlib
 
 # "fg" (button / pipeline) or "bg" (background sweep), set while request() binds,
 # so a loader reading variant() gets the pick of the run it serves.
 _ROLE = threading.local()
+
+# fn(*registry_keys) -> context manager that pins those models resident for the
+# duration of a call (model_registry.lease); None until the app wires it. Without
+# it a budget eviction triggered by another load can unload a model mid-forward.
+_LEASE = None
+
+
+def set_lease_hook(fn):
+    """! @brief Install the registry lease used around every model call."""
+    global _LEASE
+    _LEASE = fn
+
+
+def _leased(model):
+    """! @brief A context holding `model`'s registry entry resident, or a no-op."""
+    key = getattr(model, "registry_key", None)
+    if _LEASE is None or not key:
+        return contextlib.nullcontext()
+    try:
+        return _LEASE(key)
+    except Exception:
+        return contextlib.nullcontext()
 
 
 class BrokerError(Exception):
@@ -49,12 +72,12 @@ class Guarded:
         object.__setattr__(self, "_lock", lock)
         if hasattr(model, "batch"):
             def batch(*args, **kwargs):
-                with lock:
+                with lock, _leased(model):
                     return model.batch(*args, **kwargs)
             object.__setattr__(self, "batch", batch)
 
     def __call__(self, *args, **kwargs):
-        with self._lock:
+        with self._lock, _leased(self._model):
             return self._model(*args, **kwargs)
 
     def __getattr__(self, name):
@@ -197,11 +220,8 @@ class Provider:
         lock = None if self.resource is not None else self._call_lock
 
         def run(*args, **kwargs):
-            if lock is None:
+            with (lock or contextlib.nullcontext()), _leased(model):
                 raw = model(*args, **kwargs) if callable(model) else model
-            else:
-                with lock:
-                    raw = model(*args, **kwargs) if callable(model) else model
             return transform(raw, *args, **kwargs) if transform else raw
         run.model = model  # raw handle, for callers that need it
         run.provider = self
@@ -496,9 +516,11 @@ class ModelBroker:
                     [p for pid, p in provs.items() if pid != sel]
             for p in order:
                 if p.available() and p.handles(model_path):
-                    # the loader's own function, so .batch survives
+                    # the loader's own function (so .batch survives), serialized
+                    # like every other handle: the box consumers (faces, persons,
+                    # panels, video) run from several worker threads at once.
                     try:
-                        return p._loader()
+                        return p.guard(p._loader())
                     except Exception:
                         return None
         return None

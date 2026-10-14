@@ -39,7 +39,6 @@ MANIFEST = {
     "core":        False,
     "requires":    ["fetch"],
     "pip":         ["requests"],
-    "assets":      ["immich_import.js"],
 }
 
 PAGE = 250
@@ -318,7 +317,24 @@ def to_item(client, a, albums, tags, cfg):
 
 def register(host):
     fetch = host.get_service("fetch")
-    host.add_settings_tab("immich_import", "Immich import", icon="\U0001f4e5", admin_only=True)
+    host.add_import_tab(
+        "immich_import", "Immich import", fetcher="immich", title="Import from Immich",
+        sources_label="Immich accounts", add_label="Add an Immich account",
+        intro="Copies an Immich library here: originals (checked against Immich's own checksums), albums, tags, "
+              "named people with their face boxes, favourites, archived items, dates with time zone and GPS. "
+              "Create an API key in Immich under <i>Account settings → API keys</i>. With a check interval it "
+              "keeps syncing: each run only asks Immich for what changed since the last one, and adds new album "
+              "memberships to photos already imported.",
+        fields=[
+            {"key": "url", "label": "Immich URL", "kind": "text", "placeholder": "https://photos.example.com"},
+            {"key": "api_key", "label": "API key", "kind": "text", "secret": True},
+            {"key": "folder", "label": "Put files in", "kind": "text", "default": "immich/{year}",
+             "help": "keys: {year} {month} {folder} (Immich's own folder)"},
+            {"key": "include_archived", "label": "Include archived", "kind": "toggle", "default": True},
+            {"key": "include_videos", "label": "Include videos", "kind": "toggle", "default": True},
+            {"key": "include_live", "label": "Include the video part of live photos", "kind": "toggle", "default": True},
+            {"key": "include_tags", "label": "Import Immich tags", "kind": "toggle", "default": True},
+        ])
 
     def _validate(cfg, secrets, sid):
         url = str(cfg.get("url") or "").strip()
@@ -402,4 +418,3 @@ def register(host):
     fetch.register({"id": "immich", "label": "Immich", "available": lambda: True,
                     "handles": lambda t: str(t).startswith("immich:"), "target_key": lambda t: t,
                     "fetch": _fetch, "map_meta": map_meta})
-    host.add_asset("immich_import.js")

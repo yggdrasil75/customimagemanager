@@ -30,13 +30,29 @@ MANIFEST = {
     "core":        False,
     "requires":    ["fetch"],
     "pip":         [],
-    "assets":      ["google_photos_import.js"],
 }
 
 
 def register(host):
     fetch = host.get_service("fetch")
-    host.add_settings_tab("google_photos_import", "Google Photos import", icon="\U0001f4e5", admin_only=True)
+    host.add_import_tab(
+        "google_photos_import", "Google Photos import", fetcher="google_photos", title="Import from Google Photos",
+        sources_label="Takeouts", add_label="Add a Takeout (or a folder Takeouts arrive in)",
+        intro="Google no longer lets apps read your Photos library through its API, so this imports <b>Google "
+              "Takeout</b>: takeout.google.com → deselect all → <i>Google Photos</i> → export as <b>.zip</b>, and put "
+              "every part (no need to unzip) in the import folder. Dates, GPS, descriptions, people's names, "
+              "favourites and albums come from Takeout's sidecars; a photo in several albums is imported once and "
+              "added to each.<br><b>Periodic:</b> Takeout can export every 2 months to Drive/Dropbox/OneDrive/Box. "
+              "Sync that into a folder here (rclone, a desktop client), choose the folder, and set a check "
+              "interval: new Takeouts import themselves and only what's new is added.",
+        fields=[
+            {"key": "path", "label": "Takeout zip or folder", "kind": "path"},
+            {"key": "folder", "label": "Put files in", "kind": "text", "default": "google-photos/{year}",
+             "help": "keys: {year} {month} {folder} (the Takeout folder, e.g. an album)"},
+            {"key": "edited", "label": "Edited copies (-edited)", "kind": "select", "default": "both", "options": [
+                ["both", "import both, tag the copy 'edited'"], ["original", "originals only"], ["edited", "edited copies only"]]},
+            {"key": "people_prefix", "label": "Tag people's names as", "kind": "text", "default": "people:"},
+        ])
 
     def _validate(cfg, secrets, sid):
         if not cfg.get("path"):
@@ -60,4 +76,3 @@ def register(host):
     fetch.register({"id": "google_photos", "label": "Google Takeout", "available": lambda: True,
                     "handles": lambda t: str(t).startswith("google_photos:"), "target_key": lambda t: t,
                     "fetch": _fetch, "map_meta": map_meta})
-    host.add_asset("google_photos_import.js")

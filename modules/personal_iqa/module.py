@@ -78,7 +78,6 @@ MANIFEST = {
     "core":        False,
     "requires":    ["rating"],
     "pip":         ["torch"],
-    "assets":      ["personal_iqa.js"],
 }
 
 _DDL = """
@@ -135,7 +134,6 @@ def _is_val(rel_path):
 def register(host):
     core = host.core
 
-    host.add_asset("personal_iqa.js")
     host.add_settings_tab("personal_iqa", "Personal IQA")
     host.add_table(_DDL, kind="cache")
     host.add_config_key("personal_iqa_base", default="nima")
@@ -704,21 +702,42 @@ def register(host):
             return jsonify({"success": False, "error": "training already running"})
         state["busy"] = True; state["text"] = "[Personal IQA] starting..."
         threading.Thread(target=_train, daemon=True).start()
-        return jsonify({"success": True})
+        return jsonify({"success": True, "message": "Training started."})
 
     def api_status():
         db = host.db()
         n = db.execute("SELECT COUNT(*) c FROM ratings WHERE user_stars IS NOT NULL").fetchone()["c"]
         size, d, depth = net.tier_for(n, net.parse_sizes(host.config.get("personal_iqa_sizes")))
-        metrics = _metrics() or None
+        m = _metrics() or None
+        pre = os.path.exists(os.path.join(os.path.dirname(ckpt_path), f"scorer_{size}.pt"))
+        f = lambda x: "-" if x is None else "%.3f" % float(x)
+        rows = [{"label": "User ratings", "value": f"{n} (min {MIN_RATINGS})"},
+                {"label": "Tier", "value": f"{size} (D={d} depth={depth}, "
+                 + ("pretrained ready)" if pre else f"no pretrained scorer_{size}.pt)")},
+                {"label": "Model", "value": (f"D={m['d']} depth={m['depth']}, trained "
+                 + time.strftime("%Y-%m-%d %H:%M", time.localtime(m["trained_at"]))) if m else "not trained yet"}]
+        if m:
+            rows.append({"label": f"Validation ({m['n_val']} imgs)",
+                         "value": f"spearman {f(m['val_spearman'])} / base {f(m['base_spearman'])}, "
+                                  f"mse {f(m['val_mse'])} / base {f(m['base_mse'])}"})
+        rows.append({"label": "Provider", "value": "enabled (beats base IQA on validation)" if _available() else "disabled",
+                     "tone": "ok" if _available() else "muted"})
+        view = {"rows": rows, "busy": state["busy"],
+                "list": ([{"text": "torch not installed", "tone": "danger"}] if not _HAVE_TORCH else [])
+                        + ([{"text": state["text"]}] if state["text"] else [])}
         return jsonify({"success": True, "ratings": n, "min_ratings": MIN_RATINGS,
-                        "tier": {"size": size, "d": d, "depth": depth,
-                                 "pretrained": os.path.exists(os.path.join(os.path.dirname(ckpt_path), f"scorer_{size}.pt"))},
-                        "metrics": metrics, "available": _available(), "busy": state["busy"],
-                        "text": state["text"], "torch": _HAVE_TORCH})
+                        "tier": {"size": size, "d": d, "depth": depth, "pretrained": pre},
+                        "metrics": m, "available": _available(), "busy": state["busy"],
+                        "text": state["text"], "torch": _HAVE_TORCH, "view": view})
 
     host.add_route("/api/personal_iqa/status", api_status)
     host.add_route("/api/personal_iqa/train", api_train, methods=["POST"], feature="ai.iqa", level="write")
+    host.add_settings_section("personal_iqa", "train", status_url="/api/personal_iqa/status", poll=2, feature="ai.iqa",
+                              text="Learns your taste from your star ratings. Rate images, retrain, then pick "
+                                   "\"Personal\" as the IQA model. Base model, encoder and grow/rebuild are set in "
+                                   "the Models tab under the Personal provider.",
+                              actions=[{"id": "retrain", "label": "Retrain", "url": "/api/personal_iqa/train", "variant": "primary"}])
+
     def _file_deleted(rel_path):
         host.update_file(rel_path, table="personal_iqa_cache", remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)

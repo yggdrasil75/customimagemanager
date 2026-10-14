@@ -450,7 +450,7 @@ function renderGallery(files){
   // Books and comics are not part of the image multi-select / bulk-op set:
   // "confirm all boxes" or "run pose" over an epub is meaningless, and letting
   // them into galleryFiles would put them in range of every bulk action.
-  galleryFiles = files.filter(x=>x.kind!=='comic' && x.kind!=='book');
+  galleryFiles = files.filter(x=>x.kind!=='comic' && x.kind!=='book' && x.kind!=='audio');
   const grid=document.getElementById('gallery_grid');
   grid.querySelectorAll('.gallery-item').forEach(el=>io.unobserve(el));
   grid.innerHTML='';
@@ -471,6 +471,12 @@ function renderGallery(files){
         <span class="label">${_esc(item.title)}</span>`;
       grid.appendChild(div);
       if(cover) io.observe(div);
+      return;
+    }
+    if(item.kind==='audio'){
+      // A track (music module): plays in the centre-pane player, like a book
+      // opens in the reader. The module draws its own tile.
+      if(typeof window.musicGalleryTile==='function') grid.appendChild(window.musicGalleryTile(item));
       return;
     }
     if(item.kind==='book'){
@@ -746,6 +752,11 @@ async function selectFile(fn, opts){
     if(typeof openBook==='function') openBook(fn);
     return;
   }
+  // A track goes to the music player, for the same reason.
+  if(typeof window.isAudioFile==='function' && window.isAudioFile(fn) && typeof window.musicOpenFile==='function'){
+    window.musicOpenFile(fn);
+    return;
+  }
   if(typeof autosaveTO!=='undefined' && autosaveTO && window.currentFile && window.currentFile!==fn){
     clearTimeout(autosaveTO); autosaveTO=null;
     try{ await saveMetadata(); }catch(e){ /* keep navigating even if save failed */ }
@@ -933,9 +944,10 @@ async function applyBulkTag(){
   const files = [...selectedFiles];
   const btn = document.querySelector('#bulk_bar button');
   document.getElementById('bulk_tag_input').value='';
-  const d = await fetch('/api/bulk_tag',{method:'POST',
+  let d = await fetch('/api/bulk_tag',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filenames:files,tags})}).then(r=>r.json());
+  d = await awaitBulk(d, j=>showToast(`Tagging ${j.done}/${j.total}...`));
   if(d.success){
     showToast(`Tagged ${d.updated} file(s) with: ${tags.join(', ')}`);
     // If current file is in the set, refresh its tag display
@@ -958,9 +970,10 @@ async function applyBulkUntag(){
   const tags=raw.split(',').map(s=>s.trim()).filter(Boolean);
   const files=[...selectedFiles];
   inp.value='';
-  const d=await fetch('/api/bulk_untag',{method:'POST',
+  let d=await fetch('/api/bulk_untag',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filenames:files,tags})}).then(r=>r.json());
+  d=await awaitBulk(d, j=>showToast(`Untagging ${j.done}/${j.total}...`));
   if(d.success){
     showToast(`Removed ${tags.join(', ')} from ${d.updated} file(s)`);
     if(window.currentFile && selectedFiles.has(window.currentFile)) selectFile(window.currentFile);

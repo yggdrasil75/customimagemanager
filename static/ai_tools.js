@@ -57,8 +57,10 @@ async function comicBoxAll(){
   if(!comicState.pages.length) return;
   const bm=_boxMethod();
   showToast(`Boxing ${comicState.pages.length} page(s)...`);
-  const d=await fetch('/api/bulk_box',{method:'POST',headers:{'Content-Type':'application/json'},
+  let d=await fetch('/api/bulk_box',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filenames:comicState.pages, method:bm.method, model:bm.model})}).then(r=>r.json());
+  d=await awaitBulk(d, j=>showToast(`Boxing ${j.done}/${j.total} page(s)...`));
+  if(d.background) d.boxed=(d.counts||{}).boxed||0;
   if(d.success) showToast(`Boxed ${d.boxed}/${d.done} page(s). Open a page to confirm boxes.`);
   else alert('Box all failed: '+(d.error||''));
 }
@@ -66,8 +68,10 @@ async function bulkBox(){
   const files=[...selectedFiles]; if(!files.length) return;
   const bm=_boxMethod();
   showToast(`Boxing ${files.length} image(s)...`);
-  const d=await fetch('/api/bulk_box',{method:'POST',headers:{'Content-Type':'application/json'},
+  let d=await fetch('/api/bulk_box',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filenames:files, method:bm.method, model:bm.model})}).then(r=>r.json());
+  d=await awaitBulk(d, j=>showToast(`Boxing ${j.done}/${j.total} image(s)...`));
+  if(d.background) d.boxed=(d.counts||{}).boxed||0;
   if(d.success){
     showToast(`Boxed ${d.boxed}/${d.done} image(s)${d.errors.length?', '+d.errors.length+' errors':''}.`);
     if(window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);

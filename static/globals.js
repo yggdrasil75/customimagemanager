@@ -105,7 +105,7 @@ function _extKey(html){
 // that suits the area.
 const _CIM_AREA_SIZE = {ai_tools: 'block', gallery_bulk: 'sm', gallery_tools: 'sm', search_tools: 'xs', comic_tools: 'sm',
                         viewer_toggles: 'sm', editor_actions: 'xs', popout_tools: 'sm', review_actions: 'xs', description_tools: 'xs',
-                        book_tools: 'xs', music_tools: 'xs', ai_tooling_links: 'sm'};
+                        book_tools: 'xs', music_tools: 'xs', ai_tooling_links: 'sm', album_tools: 'xs'};
 function cimButton(o){
   o = o || {};
   const a = [`type="button"`, `class="cim-btn cim-btn-${o.variant || 'primary'} cim-btn-${o.size || 'sm'}${o.cls ? ' ' + o.cls : ''}"`];
@@ -458,6 +458,25 @@ function showToast(msg){
   t.innerText=msg; t.style.opacity='1';
   clearTimeout(t._to);
   t._to=setTimeout(()=>t.style.opacity='0', 2500);
+}
+
+// -- Background bulk jobs ------------------------------------------------------
+/** @brief Resolve a bulk endpoint's reply to a finished result. A reply with
+ * `background: true` carries a job; this polls /api/job/<id> until it ends and
+ * returns {success, done, errors, counts, total, updated}, so callers treat the
+ * inline and background cases alike. */
+async function awaitBulk(d, onProgress){
+  if(!d || !d.background || !d.job) return d;
+  let job=d.job;
+  while(job.running){
+    if(onProgress) onProgress(job);
+    await new Promise(r=>setTimeout(r, Math.min(2000, 300+job.total*5)));
+    const r=await fetch(`/api/job/${encodeURIComponent(job.id)}`).then(r=>r.json()).catch(()=>null);
+    if(!r || !r.success){ return {success:false, error:'job lost'}; }
+    job=r.job;
+  }
+  return {success:true, background:true, done:job.done, updated:job.done, errors:job.errors||[],
+          counts:job.counts||{}, total:job.total, label:job.label};
 }
 
 // -- Global keyboard shortcuts ----------------------------------------------

@@ -40,10 +40,7 @@ function _fmtBytes(n) {
 // book has) and the format tab (EPUB/MOBI/PDF/...: what the file itself carries,
 // read-only), shown only when the open book has any.
 let _bookFmtAvailable = false;
-if (window.registerControlsTab) {
-  registerControlsTab({ id: 'book', label: 'Book', modeTab: true });
-  registerControlsTab({ id: 'book_fmt', label: 'Format', modeTab: true });
-}
+// the Book / Format controls tabs and the Books left tab are declared in module.py
 registerMediaMode({ id: 'book', centreId: 'book_reader', controlsTab: 'book',
                     tabs: () => _bookFmtAvailable ? ['book_fmt'] : [] });
 
@@ -890,7 +887,7 @@ async function triageDecideAll(ext, reason, decision) {
   function reg() {
     if (!window.registerLeftTab) { setTimeout(reg, 100); return; }
     registerLeftTab({
-      id: "books", label: "Books", feature: "tab.books", paneId: "books_pane",
+      id: "books",
       onShow: () => {
         if (typeof booksRefreshStatus === "function") booksRefreshStatus();
         const l = document.getElementById("books_shelf");

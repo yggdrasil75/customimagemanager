@@ -33,6 +33,14 @@ _auth = None
 _db, state, MEDIA_DIR, get_safe_path, read_jxl, _to_bgr, mt, thread_manager, _index_file, _enumerate_library, _getmtime_loose, tiering, _thumb_drop, _delete_file_row, _purge_file_everywhere, audit, access_logger, _db_release_pool = (None,) * 18
 
 
+# The core helpers _bind() fills in (declared so the names exist at module level:
+# a compiler sees them as globals rather than undeclared names).
+_HOST = _db = state = MEDIA_DIR = get_safe_path = read_jxl = _to_bgr = mt = None
+thread_manager = _index_file = _enumerate_library = _getmtime_loose = tiering = None
+_thumb_drop = _delete_file_row = _purge_file_everywhere = audit = access_logger = None
+_db_release_pool = read_metadata = update_file = None
+
+
 def _bind(host):
     """! @brief Bind the core helpers the endpoint bodies reference (all handed over
     by the app via host / host.core) into this module's globals."""

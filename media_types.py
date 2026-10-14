@@ -120,6 +120,139 @@ def media_group(kind, group):
     return _MEDIA_TYPES.get(kind, {}).get("groups", {}).get(group, set())
 
 
+# -- library sections -----------------------------------------------------------
+# A library section is a top-level folder with a fixed meaning (music, movies,
+# tv): public at <media>/<id>, and per user at <media>/users/<name>/<id> (the
+# ownership module's personal folders). Files inside a section belong to the
+# module that registered it and stay out of the plain gallery.
+# {id: {"label", "kinds", "per_user"}}
+_LIBRARY_SECTIONS = {}
+## @brief The personal-folder root (modules/ownership USER_ROOT).
+SECTION_USER_ROOT = "users"
+_SECTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def register_library_section(section_id, *, label, kinds, per_user=True, sidecars=()):
+    """! @brief Register a library section (called through host.register_library_section).
+    @param section_id  the folder name, lower-case letters / digits / underscore.
+    @param kinds       media kinds the section's module indexes as its items (input_kind
+                       names: audio, image, video, book); other kinds are stored and
+                       indexed by the core as usual, nothing is refused.
+    @param per_user    the section also exists under users/<name>/<section_id>.
+    @param sidecars    non-media extensions stored as sent beside the items (".nfo",
+                       ".srt", ".cue"...); any unknown file type inside a section is
+                       stored as sent too, so an export of another app imports whole.
+    @return the section's record.
+    """
+    sid = str(section_id or "").strip().lower()
+    if not _SECTION_ID.match(sid) or sid == SECTION_USER_ROOT:
+        raise ValueError(f"bad section id {section_id!r}")
+    _LIBRARY_SECTIONS[sid] = {"id": sid, "label": str(label or sid), "kinds": set(kinds or ()),
+                              "per_user": bool(per_user),
+                              "sidecars": {str(e).lower() for e in sidecars or ()}}
+    return _LIBRARY_SECTIONS[sid]
+
+
+def unregister_library_section(section_id):
+    _LIBRARY_SECTIONS.pop(str(section_id or "").lower(), None)
+
+
+def library_sections():
+    """! @brief {id: {"id", "label", "kinds", "per_user"}} of every registered section (a copy)."""
+    return {k: dict(v, kinds=set(v["kinds"]), sidecars=set(v["sidecars"])) for k, v in _LIBRARY_SECTIONS.items()}
+
+
+def library_section(rel_path):
+    """! @brief Which section a library path is in.
+    @return (section_id, username, inner_rel): the section, the owner for a
+            users/<name>/<section> path (None for the public section) and the path
+            relative to the section folder ("" for the folder itself); (None, None, None)
+            outside every section.
+    """
+    parts = [p for p in str(rel_path or "").replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts:
+        return None, None, None
+    head = parts[0].lower()
+    spec = _LIBRARY_SECTIONS.get(head)
+    if spec is not None:
+        return head, None, "/".join(parts[1:])
+    if head == SECTION_USER_ROOT and len(parts) >= 3:
+        sid = parts[2].lower()
+        spec = _LIBRARY_SECTIONS.get(sid)
+        if spec is not None and spec["per_user"]:
+            return sid, parts[1], "/".join(parts[3:])
+    return None, None, None
+
+
+def section_folders(section_id, media_dir):
+    """! @brief The section's folders that exist on disk, relative to media_dir:
+    ["music", "users/ann/music", ...] (the public one first)."""
+    sid = str(section_id or "").lower()
+    spec = _LIBRARY_SECTIONS.get(sid)
+    if spec is None:
+        return []
+    out = []
+    if os.path.isdir(os.path.join(media_dir, sid)):
+        out.append(sid)
+    if spec["per_user"]:
+        root = os.path.join(media_dir, SECTION_USER_ROOT)
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            names = []
+        for name in names:
+            if name.startswith("."):
+                continue
+            if os.path.isdir(os.path.join(root, name, sid)):
+                out.append(f"{SECTION_USER_ROOT}/{name}/{sid}")
+    return out
+
+
+def _section_sql(sid, column, per_user, literal):
+    """! @brief The SQL matching rows inside one section, exact on path segments
+    (LIKE would let `_` and `%` in an id match more). Per-user: the segment after
+    users/<name>/ is compared with substr/instr."""
+    pub = f"{sid}/"
+    n = len(pub)
+    ur = f"{SECTION_USER_ROOT}/"
+    un = len(ur)
+    params = []
+
+    def val(v):
+        # ids are [a-z0-9_] and the user root a plain word: safe to inline
+        if literal:
+            return repr(v) if isinstance(v, str) else str(v)
+        params.append(v)
+        return "?"
+
+    sql = f"lower(substr({column}, 1, {val(n)})) = {val(pub)}"
+    if per_user:
+        rest = f"substr({column}, {un + 1})"
+        sql += (f" OR (lower(substr({column}, 1, {val(un)})) = {val(ur)} AND instr({rest}, '/') > 0"
+                f" AND lower(substr({column}, instr({rest}, '/') + {val(un + 1)}, {val(n)})) = {val(pub)})")
+    return f"({sql})", params
+
+
+def section_clause(section_id, column="rel_path"):
+    """! @brief (sql, params): the rows of `column` inside a section (public and per-user).
+    An unknown section matches nothing."""
+    sid = str(section_id or "").lower()
+    spec = _LIBRARY_SECTIONS.get(sid)
+    if spec is None:
+        return "0", []
+    return _section_sql(sid, column, spec["per_user"], literal=False)
+
+
+def section_hide_clause(column="rel_path"):
+    """! @brief A parameter-free SQL condition true for rows outside every registered
+    section (the core's gallery filter); "" when no section is registered."""
+    if not _LIBRARY_SECTIONS:
+        return ""
+    parts = [_section_sql(sid, column, spec["per_user"], literal=True)[0]
+             for sid, spec in _LIBRARY_SECTIONS.items()]
+    return "NOT (" + " OR ".join(parts) + ")"
+
+
 def unregister_media_type(kind):
     _MEDIA_TYPES.pop(kind, None)
 
@@ -237,6 +370,132 @@ def is_library_file(path: str) -> bool:
 def is_animated_input(path: str) -> bool:
     return _ext(path) in ANIMATED_INPUT_EXTS
 
+# -- JXL without decoding: the codestream header, and threaded decodes --------
+
+# libjxl worker threads per decode. imagecodecs decodes on ONE thread unless
+# told otherwise; a 12 MP photo takes ~0.4 s that way and ~0.1 s with four.
+# Several requests may decode at once, so this stays well under the core count.
+JXL_DECODE_THREADS = max(2, min(4, (os.cpu_count() or 4) // 2))
+
+
+def jxl_decode(data, index=None):
+    """! @brief imagecodecs.jpegxl_decode with the app's thread count."""
+    return imagecodecs.jpegxl_decode(data, index, numthreads=JXL_DECODE_THREADS)
+
+
+class _JxlBits:
+    """! @brief LSB-first bit reader over a JXL codestream (ISO/IEC 18181-1 A.2)."""
+    def __init__(self, data):
+        self.d = data
+        self.pos = 0
+
+    def u(self, n):
+        v = 0
+        for i in range(n):
+            v |= ((self.d[self.pos >> 3] >> (self.pos & 7)) & 1) << i
+            self.pos += 1
+        return v
+
+    def u32(self, *sel):   # U32(d0..d3): an int is a constant, a tuple is (bits, offset)
+        s = sel[self.u(2)]
+        if isinstance(s, int):
+            return s
+        return s[1] + self.u(s[0])
+
+    def bool(self):
+        return self.u(1) == 1
+
+
+def _jxl_codestream(data):
+    """! @brief The codestream bytes of a bare or container JXL (jxlc / jxlp boxes), or None."""
+    if data[:2] == b"\xff\x0a":
+        return data
+    if data[4:8] != b"JXL ":
+        return None
+    pos, parts = 0, []
+    while pos + 8 <= len(data):
+        size, typ = struct.unpack(">I4s", data[pos:pos + 8])
+        hdr = 8
+        if size == 1:
+            size = struct.unpack(">Q", data[pos + 8:pos + 16])[0]
+            hdr = 16
+        if size == 0:
+            size = len(data) - pos
+        body = data[pos + hdr:pos + size]
+        if typ == b"jxlc":
+            return body
+        if typ == b"jxlp":
+            parts.append(body[4:])   # 4-byte part index first
+        pos += size
+    return b"".join(parts) if parts else None
+
+
+_JXL_RATIOS = ((1, 1), (12, 10), (4, 3), (3, 2), (16, 9), (5, 4), (2, 1))
+
+
+def _jxl_size_header(b):
+    if b.bool():   # small: multiples of 8 up to 256
+        ysize = (b.u(5) + 1) * 8
+        ratio = b.u(3)
+        xsize = (b.u(5) + 1) * 8 if ratio == 0 else None
+    else:
+        ysize = b.u32((9, 1), (13, 1), (18, 1), (30, 1))
+        ratio = b.u(3)
+        xsize = b.u32((9, 1), (13, 1), (18, 1), (30, 1)) if ratio == 0 else None
+    if ratio:
+        num, den = _JXL_RATIOS[ratio - 1]
+        xsize = ysize * num // den
+    return xsize, ysize
+
+
+def _jxl_preview_header(b):
+    div8 = b.bool()
+    if div8:
+        dim = lambda: b.u32(16, 32, (5, 1), (9, 33))
+    else:
+        dim = lambda: b.u32((6, 1), (8, 65), (10, 321), (12, 1345))
+    dim()               # ysize
+    if b.u(3) == 0:     # ratio
+        dim()           # xsize
+
+
+def jxl_header(data) -> dict | None:
+    """! @brief A JXL's SizeHeader + the first ImageMetadata fields, read from its
+    first bytes without touching a pixel (microseconds; a decode is hundreds of ms).
+    @param data  the file's first few KB (bare codestream or container).
+    @return {"xsize", "ysize", "animated", "orientation"} or None when it is not a JXL.
+    """
+    cs = _jxl_codestream(data)
+    if not cs or cs[:2] != b"\xff\x0a":
+        return None
+    try:
+        b = _JxlBits(cs)
+        b.u(16)
+        xsize, ysize = _jxl_size_header(b)
+        out = {"xsize": xsize, "ysize": ysize, "animated": False, "orientation": 1}
+        if b.bool():              # ImageMetadata.all_default
+            return out
+        if b.bool():              # extra_fields
+            out["orientation"] = b.u(3) + 1
+            if b.bool():          # have_intrinsic_size
+                _jxl_size_header(b)
+            if b.bool():          # have_preview
+                _jxl_preview_header(b)
+            out["animated"] = b.bool()
+        return out
+    except (IndexError, ValueError):
+        return None
+
+
+def jxl_header_of(path: str) -> dict | None:
+    """! @brief jxl_header() of a file (reads its first 64 KB), or None."""
+    try:
+        with open(path, "rb") as f:
+            return jxl_header(f.read(65536))
+    except OSError:
+        return None
+
+
 # Animation info read from the JXL header (decoding every frame was a stall),
 # cached on (path, mtime).
 _anim_cache: dict = {}
@@ -271,12 +530,17 @@ def jxl_anim_info(path: str) -> dict:
         else:
             with open(path, 'rb') as f:
                 data = f.read()
-            arr = imagecodecs.jpegxl_decode(data)
+            hdr = jxl_header(data[:65536])
             n = None
-            if arr.ndim == 4:
-                n = int(arr.shape[0])
-            elif arr.ndim == 3 and arr.shape[2] > 16:
-                n = int(arr.shape[0])
+            if hdr is not None and not hdr["animated"]:
+                n = 1                      # a still: settled from the header alone
+            else:
+                # animated (or an unreadable header): decode to count the frames
+                arr = jxl_decode(data)
+                if arr.ndim == 4:
+                    n = int(arr.shape[0])
+                elif arr.ndim == 3 and arr.shape[2] > 16:
+                    n = int(arr.shape[0])
         if n is not None:
             result['n_frames'] = n
             result['animated'] = n > 1
@@ -329,7 +593,7 @@ def jxl_decode_frames(path: str, indices=None, rgba=False):
         else:
             with open(path, 'rb') as f:
                 data = f.read()
-            arr = imagecodecs.jpegxl_decode(data)
+            arr = jxl_decode(data)
     except Exception:
         return []
     # normalise to (frames, h, w, c) RGB uint8
@@ -463,9 +727,14 @@ def _trim_name(name, fits):
     return stem + ext
 
 
-def clean_filename(name: str, prefs=None) -> str:
-    """! @brief Clean an uploaded filename per the filename_cleanup setting."""
+def clean_filename(name: str, prefs=None, folder: str = "") -> str:
+    """! @brief Clean an uploaded filename per the filename_cleanup setting.
+    @param folder  the destination folder: inside a library section the name keeps
+                   its spaces and brackets (the Plex layout, "Title (2020).mkv", is
+                   the name), so only bad characters and the storage rules apply."""
     p = prefs or _FILENAME_PREFS
+    if folder and library_section(folder)[0]:
+        p = dict(p, web=False)
     name = unicodedata.normalize('NFC', str(name or '')).replace('\x00', '')
     name = name.replace('\\', '/').rsplit('/', 1)[-1]
     if p.get('bad'):

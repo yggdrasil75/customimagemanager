@@ -77,8 +77,10 @@ def register(host):
     host.add_route("/api/training_log", tc.get_training_log, feature="ai.trainer")
     host.add_asset("trainer.js")
     host.add_asset("trainer.css", kind="css")
-    host.register_left_pane("trainer_pane.html")
-    host.register_controls_pane("trainer", "controls_pane_trainer.html", feature="tab.trainer")
+    host.register_left_pane("trainer_pane.html", tab_id="trainer", label="Trainer", feature="tab.trainer",
+                            controls_tab="trainer")
+    host.register_controls_pane("trainer", "controls_pane_trainer.html", feature="tab.trainer",
+                                label="Trainer", mode_tab=True)
     def _file_deleted(rel_path):
         host.update_file(rel_path, table="training_set_members", remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)

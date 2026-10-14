@@ -25,7 +25,12 @@ def test_hello_route(client, app):
     assert j["page_size_seen_from_module"] == app.state["page_size"]
 
 
-def test_contributes_asset_and_settings_tab(client, host):
-    assets = client.get("/api/module_assets").get_json()["assets"]
-    assert any(a["module_id"] == "example_hello" and a["url"].endswith("/hello.js") for a in assets)
+def test_contributes_settings_tab_and_declared_section(client, host):
     assert any(t.get("id") == "example_hello" for t in getattr(host, "settings_tabs", []))
+    ui = client.get("/api/module_ui").get_json()
+    sec = next(s for s in ui["sections"] if s["module_id"] == "example_hello")
+    assert sec["pane"] == "example_hello" and sec["actions"][0]["id"] == "ping"
+    assert sec["status_url"] == "/api/hello" and sec["actions"][0]["url"] == "/api/hello"
+    st = client.get(sec["status_url"]).get_json()
+    assert any(r["label"] == "Page size" for r in st["view"]["rows"])
+    assert client.post(sec["actions"][0]["url"], json={}).get_json()["message"]

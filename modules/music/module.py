@@ -6,11 +6,21 @@ Audio is stored natively (no lossless shrink), organised and tagged in
 place. This module owns:
   - the 'audio' media kind (extensions, mimes) - core stores/serves audio
     without knowing what it is;
+  - the `music` library section (<media>/music and users/<name>/music, laid
+    out Artist/Album/01 - Track.flac as Plex expects): audio counts as music
+    only inside it, a video never does; an image in an album folder is the
+    album art, one in the artist folder the artist picture, a book-kind file
+    (txt / md / pdf / epub ...) in either its description;
   - the `music` / `music_clusters` tables;
   - indexing: on the library walk (`file.index`), after upload
     (`upload.stored`), on delete (`file.deleted`) and on demand;
-  - /api/music/* and the Music tab (registerLeftTab + music_pane.html).
+  - /api/music/* and the Music tab (registerLeftTab + music_pane.html);
+  - the 'music' centre-pane media mode (music_player.html: cover, visualizer,
+    scrub bar, transport, up-next) and the Track controls tab
+    (music_editor.html), the same split books and comics use;
+  - gallery search results for tracks (one tile per track, like books).
 """
+import io
 import json
 import os
 import threading
@@ -20,7 +30,7 @@ import random
 import re
 
 import numpy as np
-from flask import request, jsonify, send_file
+from flask import request, jsonify, send_file, has_request_context
 
 from modules.model_broker import NoProviderError
 from . import music_lib as ml
@@ -51,11 +61,26 @@ def register(host):
     db = host.db
     log = host.logger
     host.register_media_type("audio", exts=AUDIO_EXTS, mime_map=_MIME)
-    host.add_table(ml.DDL, kind="mirrored")  # audio tags mirror the file; emb / cluster recompute
+    # the folders that hold music: tracks, their art and descriptions
+    host.register_library_section("music", label="Music", kinds={"audio", "video", "image", "book"},
+                                  sidecars={".cue", ".log", ".m3u", ".m3u8", ".nfo"})
+    def _migrate(conn):
+        # has_cover: 1 / 0 once known, NULL until the track is (re)indexed
+        try:
+            conn.execute("ALTER TABLE music ADD COLUMN has_cover INTEGER")
+            conn.commit()
+        except Exception:
+            pass
+    host.add_table(ml.DDL, kind="mirrored", check=_migrate)  # audio tags mirror the file; emb / cluster recompute
     host.register_feature("tab.music", "Music tab (read=listen, write=edit tags)",
                           section="gallery_tabs", section_label="Gallery tabs", default="read")
     host.add_asset("music.js")
-    host.register_left_pane("music_pane.html")
+    host.register_left_pane("music_pane.html", tab_id="music", label="Music", feature="tab.music")
+    # Same layout as books / comics: the browser on the left, the player in the
+    # centre (swapped in by the media-mode registry), the tag editor as a
+    # controls tab.
+    host.register_centre_pane("music_player.html")
+    host.register_controls_pane("music", "music_editor.html", label="Track", mode_tab=True)
 
     # progress shared with the UI
     state = {"indexing": False, "indexed": 0, "total": 0,
@@ -64,6 +89,19 @@ def register(host):
 
     def _is_audio(path):
         return os.path.splitext(path)[1].lower() in AUDIO_EXTS
+
+    def _in_section(rel_path):
+        """! @brief True inside a music section (public or a user's)."""
+        return host.core.library_section(rel_path)[0] == "music"
+
+    def _is_music(rel_path):
+        """! @brief A track: an audio file inside a music section. Audio elsewhere is
+        not music, and a video never is (AUDIO_EXTS leaves the video containers out)."""
+        return _is_audio(rel_path) and _in_section(rel_path)
+
+    def _book_exts():
+        """! @brief The book kind's extensions (empty without the books module)."""
+        return set(host.media.BOOK_EXTS)
 
     # -- the audio embedding pick (Models -> Audio embedding) ---------------
     ## @brief The librosa fingerprint is registered as the no-download fallback; the
@@ -119,6 +157,7 @@ def register(host):
             if row and abs(row["mtime"] - mtime) < 1e-6:
                 return False
         m = ml.read_audio_metadata(abs_path)
+        has_cover = 1 if ml.read_cover(abs_path, any_image=_in_section(rel_path)) else 0
         # Index row read from the file: DB only (the tags are already in it).
         host.update_file(rel_path, table="music", dont_write=True, commit=False,
                          defaults={"tags": "[]", "created": time.time()},
@@ -129,23 +168,33 @@ def register(host):
                               "artist": m["artist"], "album": m["album"],
                               "albumartist": m["albumartist"], "track": m["track"],
                               "disc": m["disc"], "year": m["year"], "genre": m["genre"],
-                              "composer": m["composer"], "comment": m["comment"]})
+                              "composer": m["composer"], "comment": m["comment"],
+                              "has_cover": has_cover})
         db().commit()
         return True
 
+    def _drop_outside():
+        """! @brief Forget rows of files that are not in a music section any more
+        (moved out, or indexed before sections existed)."""
+        sql, p = host.core.section_clause("music", "rel_path")
+        db().execute(f"DELETE FROM music WHERE NOT {sql}", p)
+        db().commit()
+
     def index_all(force=False):
-        """! @brief Walk the library for tracks. Resumable and self-guarding."""
+        """! @brief Walk the music sections for tracks. Resumable and self-guarding."""
         if state["indexing"]:
             return
         state.update(indexing=True, status="scanning")
         try:
             paths = []
-            for root, dirs, files in os.walk(host.media_dir):
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
-                for f in files:
-                    if _is_audio(f):
-                        ap = os.path.join(root, f)
-                        paths.append((host.core.rel(ap), ap))
+            for folder in host.core.section_folders("music"):
+                for root, dirs, files in os.walk(os.path.join(host.media_dir, folder)):
+                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+                    for f in files:
+                        if _is_audio(f):
+                            ap = os.path.join(root, f)
+                            paths.append((host.core.rel(ap), ap))
+            _drop_outside()
             state.update(total=len(paths), indexed=0)
             for rp, ap in paths:
                 try:
@@ -242,6 +291,12 @@ def register(host):
     def _file_index(rel_path, abs_path, force=False):
         if not _is_audio(abs_path):
             return None
+        if not _in_section(rel_path):
+            # audio outside a music section is not a track: a stale row goes and the
+            # core indexes the file like any other (a stub row, so it is still a
+            # library file: in the gallery, playable, taggable)
+            host.update_file(rel_path, table="music", remove=True, dont_write=True)
+            return None
         try:
             upsert(rel_path, abs_path, force=force)
         except Exception as e:
@@ -249,14 +304,37 @@ def register(host):
         return True                      # handled: core skips the image path
     host.on("file.index", _file_index)
     host.on("upload.stored", lambda rel_path, filename:
-            threading.Thread(target=index_all, daemon=True).start() if _is_audio(filename) else None)
-    host.on("file.renamed", lambda old_rel, new_rel:
-            host.update_file(table="music", where=("rel_path=?", (old_rel,)), set={"rel_path": new_rel},
-                             dont_write=True) if _is_audio(old_rel) else None)
+            threading.Thread(target=index_all, daemon=True).start() if _is_music(rel_path) else None)
+
+    def _file_renamed(old_rel, new_rel):
+        """! @brief A track keeps its row inside the sections; moved out it stops being
+        music, moved in it becomes one."""
+        if not _is_audio(old_rel) and not _is_audio(new_rel):
+            return None
+        if _is_music(new_rel):
+            if _is_music(old_rel):
+                host.update_file(table="music", where=("rel_path=?", (old_rel,)),
+                                 set={"rel_path": new_rel}, dont_write=True)
+            else:
+                ap = host.safe_path(host.media_dir, new_rel)
+                if ap and os.path.exists(ap):
+                    upsert(new_rel, ap, force=True)
+        else:
+            host.update_file(old_rel, table="music", remove=True, dont_write=True)
+        return None
+    host.on("file.renamed", _file_renamed)
 
     def _file_deleted(rel_path):
         host.update_file(rel_path, table="music", remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)
+
+    def _library_sync(direction, rel_paths=None):
+        """! @brief A full pull rebuilds the index from the sections (the core's
+        re-index reaches every track through file.index; this drops what is left
+        outside a section)."""
+        if direction == "pull" and rel_paths is None:
+            _drop_outside()
+    host.on("library.sync", _library_sync)
 
     # -- routes ------------------------------------------------------------
     def row_dict(r):
@@ -267,22 +345,116 @@ def register(host):
                 "duration": r["duration"], "bitrate": r["bitrate"],
                 "samplerate": r["samplerate"], "channels": r["channels"],
                 "cluster": r["cluster"], "tags": json.loads(r["tags"] or "[]"),
-                "has_emb": r["emb"] is not None}
+                "has_emb": r["emb"] is not None,
+                "has_cover": _has_cover(r), "size": r["size"], "created": r["created"]}
+
+    def _has_cover(r):
+        try:
+            v = r["has_cover"]
+        except (IndexError, KeyError):
+            v = None
+        return None if v is None else bool(v)
 
     _NAME = "COALESCE(NULLIF(albumartist,''),NULLIF(artist,''),'(unknown)')"
+    _ALB = "COALESCE(NULLIF(album,''),'(unknown)')"
+    _GEN = "COALESCE(NULLIF(genre,''),'(none)')"
+    # a representative track for a group's cover: one known to have art, else one
+    # not yet checked; NULL when every track is known to have none
+    _COVER = ("COALESCE(MIN(CASE WHEN has_cover=1 THEN rel_path END), "
+              "MIN(CASE WHEN has_cover IS NULL THEN rel_path END))")
+    # track order inside an album
+    _IN_ALBUM = "COALESCE(disc,0), COALESCE(track,0), title COLLATE NOCASE"
+
+    # sort keys: (primary expression - takes the direction, tie-breakers - always ascending)
+    _SONG_SORTS = {
+        "default":  (f"{_NAME} COLLATE NOCASE", f"{_ALB} COLLATE NOCASE, {_IN_ALBUM}"),
+        "artist":   (f"{_NAME} COLLATE NOCASE", f"{_ALB} COLLATE NOCASE, {_IN_ALBUM}"),
+        "album":    (f"{_ALB} COLLATE NOCASE", f"{_NAME} COLLATE NOCASE, {_IN_ALBUM}"),
+        "title":    ("title COLLATE NOCASE", f"{_NAME} COLLATE NOCASE"),
+        "track":    ("COALESCE(disc,0), COALESCE(track,0)", "title COLLATE NOCASE"),
+        "year":     ("(year IS NULL OR year=''), year",
+                     f"{_NAME} COLLATE NOCASE, {_ALB} COLLATE NOCASE, {_IN_ALBUM}"),
+        "genre":    (f"{_GEN} COLLATE NOCASE", f"{_NAME} COLLATE NOCASE, {_ALB} COLLATE NOCASE, {_IN_ALBUM}"),
+        "duration": ("COALESCE(duration,0)", "title COLLATE NOCASE"),
+        "added":    ("COALESCE(created,0)", f"{_ALB} COLLATE NOCASE, {_IN_ALBUM}"),
+        "bitrate":  ("COALESCE(bitrate,0)", "title COLLATE NOCASE"),
+        "size":     ("COALESCE(size,0)", "title COLLATE NOCASE"),
+        "path":     ("rel_path", ""),
+    }
+    _ALBUM_SORTS = {
+        "default": (f"{_NAME} COLLATE NOCASE", "year, album COLLATE NOCASE"),
+        "artist":  (f"{_NAME} COLLATE NOCASE", "year, album COLLATE NOCASE"),
+        "album":   ("album COLLATE NOCASE", "artist COLLATE NOCASE"),
+        "title":   ("album COLLATE NOCASE", "artist COLLATE NOCASE"),
+        "year":    ("(year IS NULL OR year=''), year", "artist COLLATE NOCASE, album COLLATE NOCASE"),
+        "tracks":  ("tracks", "album COLLATE NOCASE"),
+        "duration": ("duration", "album COLLATE NOCASE"),
+        "added":   ("added", "album COLLATE NOCASE"),
+        "genre":   ("genre COLLATE NOCASE", "artist COLLATE NOCASE, album COLLATE NOCASE"),
+    }
+    _GROUP_SORTS = {     # artists / genres
+        "default": ("name COLLATE NOCASE", ""),
+        "artist":  ("name COLLATE NOCASE", ""),
+        "title":   ("name COLLATE NOCASE", ""),
+        "genre":   ("name COLLATE NOCASE", ""),
+        "tracks":  ("tracks", "name COLLATE NOCASE"),
+        "albums":  ("albums", "name COLLATE NOCASE"),
+        "duration": ("duration", "name COLLATE NOCASE"),
+        "added":   ("added", "name COLLATE NOCASE"),
+    }
+
+    def _order(table, key, desc):
+        prim, tie = table.get((key or "default").lower(), table["default"])
+        d = " DESC" if desc else ""
+        # a leading "(x IS NULL ...)" flag keeps blanks last whichever way it runs
+        prim = ", ".join(p.strip() + ("" if p.strip().startswith("(") else d) for p in prim.split(", "))
+        return prim + (", " + tie if tie else "")
+
+    def _desc():
+        return request.args.get("dir", "").lower() in ("desc", "-", "1", "true")
+
+    def _filters(a, skip=()):
+        """! @brief The shared browse filters (text, artist, album, genre, year, cluster)
+        as (clauses, params), so every view narrows the same way."""
+        clauses, params = [], []
+        if "artist" not in skip and a.get("artist", "").strip():
+            clauses.append(_NAME + "=?"); params.append(a["artist"].strip())
+        if "album" not in skip and a.get("album", "").strip():
+            clauses.append(_ALB + "=?"); params.append(a["album"].strip())
+        if "genre" not in skip and a.get("genre", "").strip():
+            clauses.append(_GEN + "=?"); params.append(a["genre"].strip())
+        if a.get("year", "").strip():
+            clauses.append("substr(year,1,4)=?"); params.append(a["year"].strip()[:4])
+        if a.get("cluster", "").strip() != "":
+            try:
+                clauses.append("cluster=?"); params.append(int(a["cluster"]))
+            except ValueError:
+                pass
+        q = a.get("q", "").strip()
+        if q and not (q.lower().startswith("sem:") or q.startswith("~")):
+            for term in q.split():
+                like = f"%{term}%"
+                clauses.append("(title LIKE ? OR artist LIKE ? OR albumartist LIKE ? OR album LIKE ? "
+                               "OR genre LIKE ? OR composer LIKE ? OR year LIKE ? OR tags LIKE ? "
+                               "OR rel_path LIKE ?)")
+                params += [like] * 9
+        return clauses, params
 
     def status():
         _, space, embed_text = _try_audio_handle()
         w, wp = where()
-        c = db().execute("SELECT COUNT(*) tot, COUNT(DISTINCT artist) artists, "
-                         f"COUNT(DISTINCT album) albums FROM music{w}", wp).fetchone()
+        c = db().execute(f"SELECT COUNT(*) tot, COUNT(DISTINCT {_NAME}) artists, "
+                         f"COUNT(DISTINCT {_ALB} || char(0) || {_NAME}) albums, "
+                         f"COUNT(DISTINCT {_GEN}) genres, SUM(duration) secs FROM music{w}",
+                         wp).fetchone()
         w, wp = where(["emb IS NOT NULL", "emb_sig=?"], [space])
         emb = db().execute(f"SELECT COUNT(*) n FROM music{w}", wp).fetchone()["n"] if space else 0
         w, wp = where(["cluster>=0"])
         n = db().execute(f"SELECT COUNT(DISTINCT cluster) c FROM music{w}", wp).fetchone()["c"]
         return jsonify({"success": True, "state": state, "tracks": c["tot"] or 0,
                         "embedded": emb, "artists": c["artists"] or 0,
-                        "albums": c["albums"] or 0, "clusters": n,
+                        "albums": c["albums"] or 0, "genres": c["genres"] or 0,
+                        "hours": round((c["secs"] or 0) / 3600.0, 1), "clusters": n,
                         "provider": host.broker.selected_id("embed.audio"), "space": space,
                         "can_embed": bool(space), "text_search": embed_text is not None,
                         "can_cluster": bool(ml.HAVE_SKLEARN)})
@@ -342,19 +514,108 @@ def register(host):
         out.sort(key=lambda c: -c["size"])
         return jsonify({"success": True, "clusters": out})
 
+    # -- folder art and descriptions (the Plex layout inside a music section) -----
+    # Artist/Album/01 - Track.flac: an image in the album folder is the album art,
+    # one in the artist folder the artist picture, a book-kind file in either its
+    # description. Looked up per folder, cached by the folder's mtime.
+    _FOLDER_INFO = {}    # rel folder -> (dir mtime, {"image", "description_rel", "description"})
+
+    def _section_dirs(rel_path):
+        """! @brief (album folder, artist folder) of a track, as rel paths, by depth inside
+        the section: Artist/Album/x -> both; Artist/x -> the artist folder serves as
+        both; x -> neither. None where there is none."""
+        sid, user, inner = host.core.library_section(rel_path)
+        if sid != "music" or not inner:
+            return None, None
+        base = rel_path[:len(rel_path) - len(inner)].rstrip("/")
+        parts = inner.split("/")
+        if len(parts) < 2:
+            return None, None
+        album = f"{base}/{'/'.join(parts[:-1])}"
+        artist = f"{base}/{parts[0]}"
+        return album, artist
+
+    def _folder_info(rel_dir):
+        """! @brief {"image", "description_rel", "description"} of a section folder
+        (rel paths, the description's text for plain-text formats), from disk."""
+        empty = {"image": None, "description_rel": None, "description": None}
+        if not rel_dir:
+            return empty
+        ad = host.safe_path(host.media_dir, rel_dir)
+        try:
+            mtime = os.path.getmtime(ad) if ad else None
+        except OSError:
+            mtime = None
+        if mtime is None:
+            return empty
+        hit = _FOLDER_INFO.get(rel_dir)
+        if hit and hit[0] == mtime:
+            return hit[1]
+        img = ml.folder_image(ad, any_image=True)
+        desc = ml.folder_description(ad, _book_exts())
+        info = {"image": host.core.rel(img) if img else None,
+                "description_rel": host.core.rel(desc) if desc else None,
+                "description": ml.read_description(desc) if desc else None}
+        _FOLDER_INFO[rel_dir] = (mtime, info)
+        return info
+
+    def _album_extras(any_rel):
+        """! @brief The fields a folder adds to an album row."""
+        album_dir, _ = _section_dirs(any_rel or "")
+        info = _folder_info(album_dir)
+        return {"folder": album_dir, "art_rel": info["image"],
+                "description_rel": info["description_rel"], "description": info["description"]}
+
+    def _artist_extras(any_rel):
+        """! @brief The fields a folder adds to an artist row."""
+        _, artist_dir = _section_dirs(any_rel or "")
+        info = _folder_info(artist_dir)
+        return {"folder": artist_dir, "picture_rel": info["image"],
+                "description_rel": info["description_rel"], "description": info["description"]}
+
     def artists():
-        w, wp = where()
-        rows = db().execute(f"SELECT {_NAME} AS name, COUNT(*) AS tracks, COUNT(DISTINCT album) AS albums "
-                            f"FROM music{w} GROUP BY name ORDER BY name COLLATE NOCASE", wp).fetchall()
-        return jsonify({"success": True, "artists": [dict(r) for r in rows]})
+        a = request.args
+        cl, cp = _filters(a, skip=("artist",))
+        w, wp = where(cl, cp)
+        rows = db().execute(
+            f"SELECT {_NAME} AS name, COUNT(*) AS tracks, COUNT(DISTINCT {_ALB}) AS albums, "
+            f"SUM(COALESCE(duration,0)) AS duration, MAX(COALESCE(created,0)) AS added, "
+            f"{_COVER} AS cover_rel, MIN(rel_path) AS any_rel FROM music{w} GROUP BY {_NAME} "
+            f"ORDER BY {_order(_GROUP_SORTS, a.get('sort'), _desc())}", wp).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.update(_artist_extras(d.pop("any_rel")))
+            out.append(d)
+        return jsonify({"success": True, "artists": out})
 
     def albums():
-        artist = request.args.get("artist", "").strip()
-        w, params = where([_NAME + "=?"], [artist]) if artist else where()
-        rows = db().execute(f"SELECT COALESCE(NULLIF(album,''),'(unknown)') AS album, {_NAME} AS artist, "
-                            f"COUNT(*) AS tracks, MIN(year) AS year FROM music{w} "
-                            "GROUP BY album, artist ORDER BY year, album COLLATE NOCASE", params).fetchall()
-        return jsonify({"success": True, "albums": [dict(r) for r in rows]})
+        a = request.args
+        cl, cp = _filters(a, skip=("album",))
+        w, wp = where(cl, cp)
+        rows = db().execute(
+            f"SELECT {_ALB} AS album, {_NAME} AS artist, COUNT(*) AS tracks, "
+            f"MIN(NULLIF(substr(year,1,4),'')) AS year, MIN(NULLIF(genre,'')) AS genre, "
+            f"SUM(COALESCE(duration,0)) AS duration, MAX(COALESCE(created,0)) AS added, "
+            f"{_COVER} AS cover_rel, MIN(rel_path) AS any_rel FROM music{w} GROUP BY {_ALB}, {_NAME} "
+            f"ORDER BY {_order(_ALBUM_SORTS, a.get('sort'), _desc())}", wp).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.update(_album_extras(d.pop("any_rel")))
+            out.append(d)
+        return jsonify({"success": True, "albums": out})
+
+    def genres():
+        a = request.args
+        cl, cp = _filters(a, skip=("genre",))
+        w, wp = where(cl, cp)
+        rows = db().execute(
+            f"SELECT {_GEN} AS name, COUNT(*) AS tracks, COUNT(DISTINCT {_ALB}) AS albums, "
+            f"COUNT(DISTINCT {_NAME}) AS artists, SUM(COALESCE(duration,0)) AS duration, "
+            f"MAX(COALESCE(created,0)) AS added, {_COVER} AS cover_rel FROM music{w} "
+            f"GROUP BY {_GEN} ORDER BY {_order(_GROUP_SORTS, a.get('sort'), _desc())}", wp).fetchall()
+        return jsonify({"success": True, "genres": [dict(r) for r in rows]})
 
     def semantic_songs(query, limit=200):
         """! @brief Text -> tracks through the audio model's text tower ("sem:christmas").
@@ -399,27 +660,103 @@ def register(host):
             out, err = semantic_songs(q[4:].strip() if q.lower().startswith("sem:") else q[1:].strip())
             if err:
                 return jsonify({"success": False, "error": err})
+            # the other filters still narrow a semantic result
+            cl, cp = _filters(a)
+            if cl and out:
+                w, wp = where(cl + [f"rel_path IN ({','.join('?' * len(out))})"],
+                              cp + [s_["rel_path"] for s_ in out])
+                keep = {r["rel_path"] for r in db().execute(f"SELECT rel_path FROM music{w}", wp)}
+                out = [s_ for s_ in out if s_["rel_path"] in keep]
             return jsonify({"success": True, "total": len(out), "page": 0, "page_size": len(out),
                             "songs": out, "mode": "semantic"})
-        clauses, params = [], []
-        if a.get("artist", "").strip():
-            clauses.append(_NAME + "=?"); params.append(a["artist"].strip())
-        if a.get("album", "").strip():
-            clauses.append("COALESCE(NULLIF(album,''),'(unknown)')=?"); params.append(a["album"].strip())
-        if a.get("cluster", "").strip() != "":
-            clauses.append("cluster=?"); params.append(int(a["cluster"]))
-        if a.get("q", "").strip():
-            like = f"%{a['q'].strip()}%"
-            clauses.append("(title LIKE ? OR artist LIKE ? OR album LIKE ? OR genre LIKE ? OR tags LIKE ?)")
-            params += [like] * 5
-        w, params = where(clauses, params)
-        page, per = max(0, int(a.get("page", 0))), 200
+        cl, cp = _filters(a)
+        w, params = where(cl, cp)
+        try:
+            per = max(1, min(2000, int(a.get("per", 200))))
+            page = max(0, int(a.get("page", 0)))
+        except ValueError:
+            per, page = 200, 0
         total = db().execute(f"SELECT COUNT(*) FROM music{w}", params).fetchone()[0]
-        rows = db().execute(f"SELECT * FROM music{w} ORDER BY albumartist COLLATE NOCASE, "
-                            "album COLLATE NOCASE, disc, track, title COLLATE NOCASE LIMIT ? OFFSET ?",
-                            (*params, per, page * per)).fetchall()
+        secs = db().execute(f"SELECT SUM(duration) FROM music{w}", params).fetchone()[0] or 0
+        key = a.get("sort", "default")
+        if (key or "default") == "default" and a.get("album", "").strip():
+            key = "track"          # an album plays in track order
+        rows = db().execute(f"SELECT * FROM music{w} ORDER BY {_order(_SONG_SORTS, key, _desc())} "
+                            "LIMIT ? OFFSET ?", (*params, per, page * per)).fetchall()
         return jsonify({"success": True, "total": total, "page": page, "page_size": per,
-                        "songs": [row_dict(r) for r in rows]})
+                        "duration": secs, "songs": [row_dict(r) for r in rows]})
+
+    def track():
+        rp = request.args.get("rel_path", "")
+        if not rp or not host.check_path(rp):
+            return jsonify({"success": False, "error": "not found"}), 404
+        w, wp = where(["rel_path=?"], [rp])
+        r = db().execute(f"SELECT * FROM music{w}", wp).fetchone()
+        if r is None:
+            ap = host.safe_path(host.media_dir, rp)
+            if ap and os.path.exists(ap) and _is_music(rp):
+                upsert(rp, ap)
+                r = db().execute(f"SELECT * FROM music{w}", wp).fetchone()
+        if r is None:
+            return jsonify({"success": False, "error": "not found"}), 404
+        return jsonify({"success": True, "song": row_dict(r)})
+
+    _NO_COVER = {}     # rel_path -> mtime known to have no art (spares re-reading the file)
+
+    def cover(filename):
+        fp = host.safe_path(host.media_dir, filename)
+        if not fp or not os.path.exists(fp):
+            return jsonify({"success": False, "error": "not found"}), 404
+        mt = os.path.getmtime(fp)
+        if _NO_COVER.get(filename) == mt:
+            return jsonify({"success": False, "error": "no cover"}), 404
+        got = ml.read_cover(fp, any_image=_in_section(filename))
+        known = db().execute("SELECT has_cover FROM music WHERE rel_path=?", (filename,)).fetchone()
+        if known is not None and known["has_cover"] != (1 if got else 0):
+            host.update_file(filename, table="music", dont_write=True, set={"has_cover": 1 if got else 0})
+        if not got:
+            _NO_COVER[filename] = mt
+            return jsonify({"success": False, "error": "no cover"}), 404
+        data, mime = got
+        resp = send_file(io.BytesIO(data), mimetype=mime, conditional=False, max_age=3600)
+        resp.headers["Last-Modified"] = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(mt))
+        return resp
+
+    # -- gallery: one tile per track, beside books and comics ---------------
+    def query_music(text, folder, structured=None):
+        """! @brief Tracks for the gallery search (kind 'audio'). Structured tokens are
+        image properties (person:, width:, is:, ...) no track can satisfy, so any
+        of them leaves music out, as books do."""
+        if structured:
+            return []
+        recursive = False
+        try:
+            if has_request_context():
+                recursive = request.args.get("recursive", "").strip().lower() in ("1", "true", "yes", "on")
+        except Exception:
+            pass
+        clauses, params = host.core.folder_scope_clause("rel_path", folder, recursive)
+        if text:
+            if text.lower().startswith("sem:") or text.startswith("~"):
+                return []
+            for term in text.split():
+                like = f"%{term}%"
+                clauses.append("(title LIKE ? OR artist LIKE ? OR albumartist LIKE ? OR album LIKE ? "
+                               "OR genre LIKE ? OR tags LIKE ? OR rel_path LIKE ?)")
+                params += [like] * 7
+        w, wp = where(clauses, params)
+        try:
+            rows = db().execute(f"SELECT rel_path, title, artist, albumartist, album, duration, tags, "
+                                f"has_cover FROM music{w} ORDER BY rel_path", wp).fetchall()
+        except Exception:
+            return []
+        return [{"kind": "audio", "filename": r["rel_path"], "rel_path": r["rel_path"],
+                 "title": r["title"] or r["rel_path"].rsplit("/", 1)[-1],
+                 "artist": r["albumartist"] or r["artist"] or "", "album": r["album"] or "",
+                 "duration": r["duration"] or 0, "has_cover": r["has_cover"] != 0,
+                 "tags": json.loads(r["tags"] or "[]"), "iqa_score": None,
+                 "width": 1, "height": 1} for r in rows]
+    host.register_search_provider(query_music)
 
     _TAG_KEYS = ("title", "artist", "album", "albumartist", "track", "disc",
                  "year", "genre", "composer", "comment")
@@ -721,6 +1058,8 @@ def register(host):
         ("/api/music/embed", embed, ["POST"], W), ("/api/music/cluster", cluster, ["POST"], W),
         ("/api/music/clusterlist", clusterlist, ["GET"], R), ("/api/music/artists", artists, ["GET"], R),
         ("/api/music/albums", albums, ["GET"], R), ("/api/music/songs", songs, ["GET"], R),
+        ("/api/music/genres", genres, ["GET"], R), ("/api/music/track", track, ["GET"], R),
+        ("/api/music/cover/<path:filename>", cover, ["GET"], R),
         ("/api/music/meta", meta, ["POST"], W), ("/api/music/stream/<path:filename>", stream, ["GET"], R),
         ("/api/music/shuffle", shuffle, ["POST"], R), ("/api/music/similar", similar, ["POST"], R),
         ("/api/music/radio/next", radio_next, ["POST"], R), ("/api/music/radio/played", radio_played, ["POST"], R),

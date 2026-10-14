@@ -1,0 +1,37 @@
+<!-- TV pane - the left-column browser for the tv section.
+
+     Shows (poster grid) > seasons > episodes, with breadcrumbs to go back up.
+     Picking an episode hands it to the core's viewer (selectFile): the video
+     plays in the centre as any clip does, with its subtitles attached as tracks. -->
+<div id="tv_pane" class="hidden flex-1 bg-gray-900 text-white flex flex-col overflow-hidden">
+
+  <div class="p-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-wrap flex-shrink-0">
+    <input id="tv_search" type="text" placeholder="Search shows..."
+      oninput="tvSearchDebounced()"
+      class="flex-1 min-w-[160px] bg-gray-700 rounded border border-gray-600 text-sm px-3 py-1">
+    <select id="tv_sort" onchange="tvSortChanged()" title="Sort"
+      class="bg-gray-700 rounded border border-gray-600 text-xs px-1 py-1">
+      <option value="title">Title</option>
+      <option value="year">Year</option>
+      <option value="added">Recently added</option>
+      <option value="path">Path</option>
+    </select>
+    <button id="tv_sort_dir" onclick="tvToggleDir()" title="Ascending"
+      class="bg-gray-700 hover:bg-gray-600 rounded border border-gray-600 text-xs px-2 py-1">&#8593;</button>
+  </div>
+
+  <div class="px-3 py-1.5 bg-gray-850 border-b border-gray-700 flex items-center gap-2 flex-wrap
+              flex-shrink-0 text-[10px]">
+    <span data-ext-area="tv_tools" class="flex items-center gap-1"></span>
+    <span id="tv_stat" class="text-gray-400">-</span>
+  </div>
+
+  <div id="tv_crumbs" class="hidden px-3 py-1.5 border-b border-gray-800 flex items-center gap-1.5 flex-wrap
+              flex-shrink-0 text-[11px]"></div>
+
+  <div id="tv_detail" class="hidden flex-shrink-0 border-b border-gray-800 p-3 text-xs"></div>
+
+  <div class="flex flex-1 overflow-hidden">
+    <div id="tv_list" class="flex-1 overflow-auto p-3"></div>
+  </div>
+</div>

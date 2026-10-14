@@ -36,7 +36,6 @@ MANIFEST = {
     "core":        False,
     "requires":    ["fetch"],
     "pip":         ["pyicloud", "rich"],
-    "assets":      ["apple_photos_import.js"],
 }
 
 
@@ -51,8 +50,41 @@ def _pyicloud():
 
 def register(host):
     fetch = host.get_service("fetch")
-    host.add_settings_tab("icloud_import", "iCloud Photos", icon="\U0001f4e5", admin_only=True)
-    host.add_settings_tab("apple_export_import", "Apple export import", icon="\U0001f4e5", admin_only=True)
+    host.add_import_tab(
+        "icloud_import", "iCloud Photos", fetcher="icloud", title="iCloud Photos",
+        sources_label="Apple IDs", add_label="Sign in with an Apple ID",
+        intro="Pulls your iCloud Photos library straight from iCloud - no Mac or iPhone app needed - and, with a "
+              "check interval, keeps pulling new photos. Needs two-factor authentication, and <i>Access iCloud "
+              "Data on the Web</i> switched on (iPhone: Settings → your name → iCloud). Your password is only used "
+              "to sign in and is not stored; the session lasts about two months, then this tab asks you to sign in "
+              "again.<br><b>Purge</b> removes photos from iCloud once they are safely in this library (imported, "
+              "file present, live-photo video included) and older than the days you keep - so the phone can shoot, "
+              "CIM keeps everything, and iCloud stays small. Removed photos wait in iCloud's <i>Recently Deleted</i> "
+              "for 30 days.",
+        fields=[
+            {"key": "apple_id", "label": "Apple ID", "kind": "text", "placeholder": "you@icloud.com"},
+            {"key": "password", "label": "Password (only to sign in)", "kind": "text", "secret": True},
+            {"key": "folder", "label": "Put files in", "kind": "text", "default": "icloud/{year}", "help": "keys: {year} {month}"},
+            {"key": "albums", "label": "Import album membership", "kind": "toggle", "default": True},
+            {"key": "include_hidden", "label": "Include the Hidden album", "kind": "toggle", "default": True},
+            {"key": "include_videos", "label": "Include videos", "kind": "toggle", "default": True},
+            {"key": "include_live", "label": "Include the video part of live photos", "kind": "toggle", "default": True},
+            {"key": "purge", "label": "Remove from iCloud once safely imported", "kind": "toggle", "default": False},
+            {"key": "keep_days", "label": "...but keep the last (days) in iCloud", "kind": "number", "default": 30},
+            {"key": "keep_favorites", "label": "...and never remove favourites", "kind": "toggle", "default": True},
+        ])
+    host.add_import_tab(
+        "apple_export_import", "Apple export import", fetcher="apple_export", title="Import Apple's data export",
+        sources_label="Exports", add_label="Add an export (or a folder exports arrive in)",
+        intro="Imports Apple's data export: privacy.apple.com → <i>Request a copy of your data</i> → <b>iCloud "
+              "Photos</b>. Put all the zips (no need to unzip) in the import folder. Favourites, hidden, albums, "
+              "shared albums, live photos and creation dates come along; Recently Deleted is skipped. A plain "
+              "folder of originals (for example from icloudpd) works too. For ongoing sync, use the iCloud Photos "
+              "tab instead.",
+        fields=[
+            {"key": "path", "label": "Export zip or folder", "kind": "path"},
+            {"key": "folder", "label": "Put files in", "kind": "text", "default": "apple-photos/{year}", "help": "keys: {year} {month} {folder}"},
+        ])
     host.add_config_key("icloud_session_dir", default="data/icloud",
                         validate=lambda v: str(v or "data/icloud").strip() or "data/icloud")
     _pending = {}                     # apple id -> signed-in-but-unverified session (awaiting the 2FA code)
@@ -176,5 +208,4 @@ def register(host):
     fetch.register({"id": "apple_export", "label": "Apple data export", "available": lambda: True,
                     "handles": lambda t: str(t).startswith("apple_export:"), "target_key": lambda t: t,
                     "fetch": _fetch_export, "map_meta": map_meta})
-    host.add_asset("apple_photos_import.js")
     host.provide_service("apple_photos_import", {"connect": _connect, "pending": _pending})

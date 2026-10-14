@@ -6,16 +6,18 @@
 #   ./install.sh cpu|cuda|rocm    force the backend
 #   ./install.sh cpu --minimal    backend wheels only; modules install their
 #                                 own deps when you enable them in Settings
+#   ./install.sh --no-compile     skip the native build of the Python modules
 #
 # Then: ./run.sh
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
-MODE=""; MINIMAL=0; SYSTEM=1
+MODE=""; MINIMAL=0; SYSTEM=1; COMPILE=1
 for a in "$@"; do case "$a" in
     ultralight|cpu|cuda|rocm) MODE="$a" ;;
     --minimal) MINIMAL=1 ;;
     --no-system) SYSTEM=0 ;;
+    --no-compile) COMPILE=0 ;;
     -h|--help) sed -n '2,${/^#/!q; s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
     *) echo "unknown arg '$a' (--help)" >&2; exit 1 ;;
 esac; done
@@ -87,6 +89,15 @@ done
 for f in drawflow.min.js drawflow.min.css; do      # pipeline_graph module (MIT)
     get "https://unpkg.com/drawflow@0.0.60/dist/$f" "static/vendor/$f"
 done
+
+# -- native build of the pure-Python helper modules (best effort) ------------
+# Cython compiles common.py, media_types.py, ... to extension modules next to
+# the sources (see native_build.py). No compiler or --no-compile: they stay
+# plain Python. Runs on every install/update, in the venv, no root needed.
+if [ "$COMPILE" = 1 ]; then
+    $PIP install -q "cython<3.2" 2>/dev/null || echo "warn: cython not installed; helper modules stay plain Python" >&2
+    venv/bin/python native_build.py || echo "warn: native build failed; helper modules stay plain Python" >&2
+fi
 
 mkdir -p media data logs models
 venv/bin/python - "$MODE" <<'PY'

@@ -418,10 +418,19 @@ def _apply_pipeline_result(fp, analysis):
                    "confirmed": False}
             if s.get("needs_review"):
                 reg["needs_review"] = True
+            if s.get("is_animal") is True:
+                reg["is_animal"] = True
+            if s.get("conf") is not None:
+                reg["conf"] = s["conf"]
             if s.get("mask_svg"):
                 reg["mask_svg"] = s["mask_svg"]   # fine SAM mask for this subject
+            if s.get("polygon"):
+                reg["polygon"] = s["polygon"]
             if s.get("pose"):
-                reg["pose"] = s["pose"]   # skeleton validated to THIS character
+                # skeleton validated to THIS character, with the run's topology
+                img_pose = analysis.get("pose") or {}
+                reg["pose"] = {**{k: img_pose[k] for k in ("kind", "model", "provider") if img_pose.get(k)},
+                               **s["pose"]}
             regions.append(reg)
         for sb in s.get("sub_boxes", []):       # clothing / face parts, etc.
             cbb = _clamp_box(sb)
@@ -441,9 +450,14 @@ def _apply_pipeline_result(fp, analysis):
         for ln in ocr["lines"]:
             cbb = _clamp_box(ln)
             if cbb and ln.get("text"):
-                regions.append({"class_name": ("text: " + ln["text"])[:48],
-                                "cx": cbb["cx"], "cy": cbb["cy"], "w": cbb["w"], "h": cbb["h"],
-                                "confirmed": False})
+                treg = {"class_name": ("text: " + ln["text"])[:48],
+                        "cx": cbb["cx"], "cy": cbb["cy"], "w": cbb["w"], "h": cbb["h"],
+                        "confirmed": False}
+                if len("text: " + ln["text"]) > 48:
+                    treg["region_description"] = ln["text"]     # the class keeps only the start
+                if ln.get("conf") is not None:
+                    treg["conf"] = ln["conf"]
+                regions.append(treg)
     desc = _compose_description(analysis, meta["description"])
     if ocr and ocr.get("text"):
         desc = (desc + "\n\nDetected text: " + ocr["text"]).strip()

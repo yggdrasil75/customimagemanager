@@ -1,57 +1,68 @@
+<!-- Music pane - the left-column browser for the music library.
+
+     Same shape as books_pane.html: toolbar (view pills, search, sort), a worker
+     bar, the list, a pager. Nothing plays here: picking a track calls
+     musicPlay(), which swaps the centre pane to the player (music_player.html)
+     and puts the controls pane on its Track tab (music_editor.html). -->
 <div id="music_pane" class="hidden flex-1 bg-gray-900 text-white flex flex-col overflow-hidden">
-      <!-- toolbar -->
-      <div class="p-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-wrap flex-shrink-0">
-        <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold ml-2">
-          <button id="mtab_artists" onclick="musicView('artists')" class="px-3 py-1 bg-blue-600">Artists</button>
-          <button id="mtab_albums" onclick="musicView('albums')"
-            class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Albums</button>
-          <button id="mtab_songs" onclick="musicView('songs')"
-            class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Songs</button>
-          <button id="mtab_clusters" onclick="musicView('clusters')"
-            class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Clusters</button>
-        </div>
-        <input id="music_search" type="text" placeholder="Search title / artist / album / genre / tag..."
-          oninput="musicSearchDebounced()"
-          class="flex-1 min-w-[180px] bg-gray-700 rounded border border-gray-600 text-sm px-3 py-1">
-        <button onclick="musicReindex()" title="Scan media folder for audio (resumable)"
-          class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Reindex</button>
-        <button onclick="musicEmbed()" title="Generate audio embeddings with the picked model (Settings → Models → Audio embedding) for similar / shuffle / sem: search"
-          class="text-xs bg-indigo-700 hover:bg-indigo-600 font-bold px-2 py-1.5 rounded">Embed</button>
-        <button onclick="musicCluster()" title="Cluster tracks by sound"
-          class="text-xs bg-indigo-800 hover:bg-indigo-700 font-bold px-2 py-1.5 rounded">Cluster</button>
-        <span id="music_stat" class="text-xs text-gray-400">-</span>
-      </div>
 
-      <div class="flex flex-1 overflow-hidden">
-        <!-- list -->
-        <div id="music_list" class="flex-1 overflow-auto p-3"></div>
-        <!-- detail / editor -->
-        <div id="music_detail" class="w-[360px] border-l border-gray-700 bg-gray-850 overflow-auto p-4 hidden">
-        </div>
-      </div>
-
-      <!-- player bar -->
-      <div id="music_player_bar"
-        class="hidden flex-shrink-0 bg-gray-800 border-t border-gray-700 p-2 flex items-center gap-3">
-        <div class="flex-1 min-w-0">
-          <div id="np_title" class="text-sm font-bold truncate">-</div>
-          <div id="np_sub" class="text-xs text-gray-400 truncate">-</div>
-        </div>
-        <button onclick="playPrev()" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">⏮</button>
-        <button onclick="playNext()" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">⏭</button>
-        <button id="shuffle_song_btn" onclick="shuffleByCurrent('song')" title="Shuffle by this song's sound"
-          class="text-xs bg-green-700 hover:bg-green-600 font-bold px-2 py-1 rounded">Shuffle by song</button>
-        <button id="shuffle_artist_btn" onclick="shuffleByCurrent('artist')" title="Shuffle by this artist's sound"
-          class="text-xs bg-green-800 hover:bg-green-700 font-bold px-2 py-1 rounded">Shuffle by artist</button>
-        <button onclick="similarToCurrent()" title="List the tracks that sound most like this one"
-          class="text-xs bg-indigo-700 hover:bg-indigo-600 font-bold px-2 py-1 rounded">Similar</button>
-        <button id="radio_btn" onclick="toggleRadio()"
-          title="Play the whole library as one route through embedding space (rock → blues → jazz → classical ...), round after round. Seasonal tracks stay out; low-rated ones sit rounds out; loved ones may come round twice."
-          class="text-xs bg-gray-700 hover:bg-gray-600 font-bold px-2 py-1 rounded">Radio</button>
-        <span id="music_radio_pos" class="text-[11px] text-gray-500"></span>
-        <button id="auto_similar_btn" onclick="toggleAutoSimilar()"
-          title="When a track ends, play the most similar unplayed track instead of the next in the list"
-          class="text-xs bg-gray-700 hover:bg-gray-600 font-bold px-2 py-1 rounded">Auto-similar</button>
-        <audio id="audio_el" controls class="h-8"></audio>
-      </div>
+  <!-- toolbar -->
+  <div class="p-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-wrap flex-shrink-0">
+    <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold">
+      <button id="mtab_albums" onclick="musicView('albums')" class="px-3 py-1 bg-blue-600">Albums</button>
+      <button id="mtab_artists" onclick="musicView('artists')"
+        class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Artists</button>
+      <button id="mtab_songs" onclick="musicView('songs')"
+        class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Songs</button>
+      <button id="mtab_genres" onclick="musicView('genres')"
+        class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Genres</button>
+      <button id="mtab_clusters" onclick="musicView('clusters')"
+        class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Clusters</button>
     </div>
+
+    <input id="music_search" type="text" placeholder="Search title / artist / album / genre / tag..."
+      oninput="musicSearchDebounced()"
+      class="flex-1 min-w-[160px] bg-gray-700 rounded border border-gray-600 text-sm px-3 py-1">
+
+    <select id="music_sort" onchange="musicSortChanged()" title="Sort"
+      class="bg-gray-700 rounded border border-gray-600 text-xs px-1 py-1"></select>
+    <button id="music_sort_dir" onclick="musicToggleDir()" title="Ascending"
+      class="bg-gray-700 hover:bg-gray-600 rounded border border-gray-600 text-xs px-2 py-1">&#8593;</button>
+  </div>
+
+  <!-- worker bar -->
+  <div class="px-3 py-1.5 bg-gray-850 border-b border-gray-700 flex items-center gap-2 flex-wrap
+              flex-shrink-0 text-[10px]">
+    <button onclick="musicReindex()" title="Scan the media folder for audio (resumable)"
+      class="bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1 rounded">Reindex</button>
+    <button onclick="musicEmbed()"
+      title="Generate audio embeddings with the picked model (Settings → Models → Audio embedding) for similar / shuffle / radio / sem: search"
+      class="bg-indigo-700 hover:bg-indigo-600 font-bold px-2 py-1 rounded">Embed</button>
+    <button onclick="musicCluster()" title="Cluster tracks by sound"
+      class="bg-indigo-800 hover:bg-indigo-700 font-bold px-2 py-1 rounded">Cluster</button>
+    <button onclick="toggleRadio()" id="radio_btn_pane"
+      title="Play the whole library as one route through embedding space, round after round"
+      class="bg-gray-700 hover:bg-gray-600 font-bold px-2 py-1 rounded">Radio</button>
+    <span id="music_stat" class="text-gray-400">-</span>
+    <!-- now playing: reopens the player when the centre shows something else -->
+    <button id="music_np_chip" onclick="musicShowPlayer()" title="Show the player"
+      class="hidden ml-auto max-w-[45%] truncate bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-gray-200">
+      <span id="music_np_chip_icon">♪</span> <span id="music_np_chip_text"></span>
+    </button>
+  </div>
+
+  <!-- active drill-down filters -->
+  <div id="music_crumbs" class="hidden px-3 py-1.5 border-b border-gray-800 flex items-center gap-1.5 flex-wrap
+              flex-shrink-0 text-[11px]"></div>
+
+  <div class="flex flex-1 overflow-hidden">
+    <div id="music_list" class="flex-1 overflow-auto p-3"></div>
+  </div>
+
+  <div id="music_pager"
+    class="hidden flex-shrink-0 bg-gray-800 border-t border-gray-700 p-2 flex items-center justify-center gap-3 text-xs">
+    <button onclick="musicPage(-1)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">‹ Prev</button>
+    <span id="music_page_label" class="text-gray-400">-</span>
+    <button onclick="musicPage(1)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Next ›</button>
+  </div>
+</div>

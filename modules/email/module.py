@@ -34,7 +34,6 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "assets":      ["email.js"],
 }
 
 TAB = "email"
@@ -222,8 +221,15 @@ def register(host):
 
     def api_status():
         rows = host.db().execute("SELECT at, kind, subject, detail FROM email_log ORDER BY id DESC LIMIT 20").fetchall()
-        return jsonify({"success": True, "configured": configured(), "recipients": admin_recipients(),
-                        "log": [dict(r) for r in rows]})
+        rcpts = admin_recipients()
+        return jsonify({"success": True, "configured": configured(), "recipients": rcpts,
+                        "log": [dict(r) for r in rows],
+                        "view": {"rows": [{"label": "SMTP account", "value": "saved" if configured() else "none saved",
+                                           "tone": "ok" if configured() else "warn"},
+                                          {"label": "Admin recipients", "value": ", ".join(rcpts) or "none",
+                                           "tone": None if rcpts else "warn"}],
+                                 "log": [{"at": r["at"], "text": f"{r['kind']}: {r['subject']}"
+                                          + (f" - {r['detail']}" if r["kind"] == "error" else "")} for r in rows]}})
 
     def api_test():
         """! @brief Send a test mail to the admin recipients with the settings as saved."""
@@ -233,11 +239,15 @@ def register(host):
                          "This is a test message from %s. Mail from the server reaches this address." % brand)
         except Exception as e:
             return jsonify({"success": False, "error": str(e)})
-        return jsonify({"success": True, "recipients": rcpts})
+        return jsonify({"success": True, "recipients": rcpts, "message": "Test mail sent to " + ", ".join(rcpts)})
 
     host.add_route("/api/email/status", api_status, feature="settings." + TAB)
     host.add_route("/api/email/test", api_test, methods=["POST"], feature="settings." + TAB, level="write")
-    host.add_asset("email.js")
+    host.add_settings_section(TAB, "tools", status_url="/api/email/status",
+                              text="Uses the settings as saved: press Save first after changing the account.",
+                              actions=[{"id": "test", "label": "Send test email", "url": "/api/email/test",
+                                        "title": "Send a test mail to the admin recipients with the saved settings (save first)"}])
+
     host.provide_service("email", {"send": send, "configured": configured,
                                    "admin_recipients": admin_recipients})
     log.info("email module registered")

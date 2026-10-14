@@ -46,7 +46,7 @@ def _bind(host):
 
 def _segment_boxes(img, boxes: list) -> list:
     """! @brief Masks for boxes via the picked segmenter (broker 'segment.box'). Returns
-    instance dicts {class_name, cx, cy, w, h, mask_svg}; [] if none/failed."""
+    instance dicts {class_name, cx, cy, w, h, mask_svg, polygon}; [] if none/failed."""
     if not boxes:
         return []
     try:
@@ -71,7 +71,8 @@ def _segment_boxes(img, boxes: list) -> list:
         out.append({"class_name": h.get("class_name", "object"),
                     "cx": (min(xs) + max(xs)) / 2, "cy": (min(ys) + max(ys)) / 2,
                     "w": max(xs) - min(xs), "h": max(ys) - min(ys),
-                    "mask_svg": _polygon_mask_svg(poly, W, H)})
+                    "mask_svg": _polygon_mask_svg(poly, W, H),
+                    "polygon": [[float(x), float(y)] for x, y in poly]})
     return out
 
 def _attach_masks(img, regions: list) -> None:
@@ -84,6 +85,7 @@ def _attach_masks(img, regions: list) -> None:
                 best, best_iou = r, iou
         if best is not None and best_iou >= 0.5 and inst.get("mask_svg"):
             best["mask_svg"] = inst["mask_svg"]
+            best["polygon"] = inst["polygon"]
 
 
 def _polygon_mask_svg(poly, W, H):
@@ -102,7 +104,7 @@ def _polygon_mask_svg(poly, W, H):
 def _segment_image(img_bgr, classes=None) -> list:
     """! @brief Run the picked fixed-class segmenter (broker 'segment', foreground pick)
     and return region dicts {class_name, cx, cy, w, h, confirmed, mask_svg,
-    score}. classes: whitelist (None = the capability's picker whitelist;
+    conf, polygon}. classes: whitelist (None = the capability's picker whitelist;
     [] = keep all). Raises NoProviderError when nothing serves it."""
     run = HOST.broker.request("segment")
     v = HOST.broker.variant("segment")
@@ -124,7 +126,7 @@ def _segment_image(img_bgr, classes=None) -> list:
         out.append({"class_name": name, "cx": (min(xs) + max(xs)) / 2,
                     "cy": (min(ys) + max(ys)) / 2, "w": max(xs) - min(xs),
                     "h": max(ys) - min(ys), "confirmed": False, "mask_svg": svg,
-                    "score": h.get("conf")})
+                    "conf": h.get("conf"), "polygon": [[float(x), float(y)] for x, y in poly]})
     return out
 
 
@@ -148,7 +150,8 @@ def _segment_regions(bgr, query):
                 insts.append({"class_name": h.get("class_name") or query,
                               "cx": (min(xs) + max(xs)) / 2, "cy": (min(ys) + max(ys)) / 2,
                               "w": max(xs) - min(xs), "h": max(ys) - min(ys),
-                              "mask_svg": _polygon_mask_svg(poly, W, H)})
+                              "mask_svg": _polygon_mask_svg(poly, W, H), "conf": h.get("conf"),
+                              "polygon": [[float(x), float(y)] for x, y in poly]})
     except NoProviderError as e:
         access_logger.warning(f"segment: {e}")
     except Exception as e:
@@ -161,7 +164,8 @@ def _segment_regions(bgr, query):
                     "cx": inst["cx"], "cy": inst["cy"],
                     "w": inst["w"], "h": inst["h"],
                     "confirmed": False, "region_tags": [],
-                    "region_description": "", "mask_svg": inst["mask_svg"]})
+                    "region_description": "", "mask_svg": inst["mask_svg"],
+                    **{k: inst[k] for k in ("conf", "polygon", "obb") if inst.get(k) is not None}})
     for n in new:
         if n["class_name"] not in state["classes"]:
             state["classes"].append(n["class_name"])
@@ -174,40 +178,38 @@ def bulk_segment():
     """! @brief Run the picked segmenter (Models tab -> Segmentation) over many files,
     writing masked regions (mask_svg in each region's Extensions) UNCONFIRMED.
     Body: {filenames, classes?} - classes overrides the saved whitelist."""
-    filenames = request.json.get("filenames", [])
     sel = request.json.get("classes")
     try:
         HOST.broker.request("segment")
     except NoProviderError as e:
         return jsonify({"success": False, "error": f"Segmentation unavailable: {e}"})
-    done, segmented, errors = 0, 0, []
-    total = len(filenames)
-    for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
-        try:
-            img = read_jxl(fp)
-            if img is None:
-                errors.append(fn); continue
-            new = [{k: r[k] for k in ("class_name", "cx", "cy", "w", "h", "confirmed", "mask_svg")}
-                   for r in _segment_image(_to_bgr(img), sel)]
-            if new:
-                meta = read_metadata(fp)
-                for n in new:
-                    if n["class_name"] not in state["classes"]:
-                        state["classes"].append(n["class_name"])
-                save_classes()
-                update_file(fp, set={"regions": _merge_regions(meta["regions"], new)}, meta=meta)
-                segmented += 1
-            done += 1
-            HOST.set_status(f"Segment: {done}/{total} ({segmented} done)...")
-        except Exception as e:
-            errors.append(fn)
-            access_logger.error(f"bulk_segment {fn}: {e}")
-    HOST.set_status("Ready.")
-    return jsonify({"success": True, "done": done, "segmented": segmented,
-                    "errors": errors})
+    items, errors = HOST.core.resolve_bulk(request.json.get("filenames", []))
+
+    def work(item, job):
+        fn, fp = item
+        img = read_jxl(fp)
+        if img is None:
+            raise RuntimeError("decode failed")
+        new = [{k: r[k] for k in ("class_name", "cx", "cy", "w", "h", "confirmed", "mask_svg")}
+               for r in _segment_image(_to_bgr(img), sel)]
+        if new:
+            meta = read_metadata(fp)
+            for n in new:
+                if n["class_name"] not in state["classes"]:
+                    state["classes"].append(n["class_name"])
+            save_classes()
+            update_file(fp, set={"regions": _merge_regions(meta["regions"], new)}, meta=meta)
+            job["counts"]["segmented"] = job["counts"].get("segmented", 0) + 1
+        return True
+
+    # past a few files this runs on a job thread and the page follows it (run_bulk)
+    res = HOST.core.run_bulk("Segment", items, work, audit_action="bulk_segment", errors=errors)
+    if res.get("background"):
+        return jsonify(res)
+    seg = res["counts"].get("segmented", 0)
+    return jsonify({"success": True, "done": res["done"], "segmented": seg, "errors": res["errors"],
+                    "message": f"Segmented {seg}/{res['done']} image(s)"
+                               + (f", {len(res['errors'])} errors" if res["errors"] else "") + "."})
 
 def api_segment():
     """! @brief Run the selected YOLO-seg (background) model on one image on demand and
@@ -236,6 +238,6 @@ def api_segment():
         HOST.set_status("Ready.")
         return jsonify({"success": False, "error": f"Segment failed: {e}"})
     HOST.set_status("Ready.")
-    return jsonify({"success": True, "regions": regions,
-                    "model": HOST.broker.selected_id("segment"),
-                    "count": len(regions), "note": "" if regions else "No objects segmented."})
+    return jsonify({"success": True, "regions": [{**r, "confirmed": False} for r in regions],
+                    "model": HOST.broker.selected_id("segment"), "count": len(regions),
+                    "note": f"Segment: {len(regions)} region(s) added." if regions else "No objects segmented."})

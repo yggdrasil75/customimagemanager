@@ -20,7 +20,7 @@ No koboldcpp installed? The tab downloads the official Linux build for the
 selected GPU flavour (koboldai.org short links) into models/kobold/bin/ and
 points the executable setting at it.
 
-Routes (Settings -> Kobold tab, kobold.js): /api/kobold/status, /start,
+Routes (Settings -> Kobold tab, a declared section): /api/kobold/status, /start,
 /stop, /download.
 """
 
@@ -48,7 +48,6 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "assets":      ["kobold.js"],
 }
 
 _PROC = None
@@ -177,7 +176,7 @@ def register(host):
         ("cpu", "CPU only (--usecpu)"))]
     for key, default, kind, label, help_ in keys:
         host.add_config_key(key, default=default)
-        host.add_settings_field(key=key, label=label, kind=kind, pane="module", help=help_ or None,
+        host.add_settings_field(key=key, label=label, kind=kind, pane="kobold", help=help_ or None,
                                 options=backends if kind == "select" else None)
 
     def _cmd():
@@ -234,13 +233,22 @@ def register(host):
         return "starting"
 
     def _status():
-        return {"running": _alive(), "ready": _alive() and _ready(cfg),
+        alive, ready = _alive(), _alive() and _ready(cfg)
+        state = ("downloading koboldcpp..." if _DL["busy"] else "stopped" if not alive
+                 else f"ready at {_url(cfg)}" + (" | VLM endpoint set" if (cfg.get("oai_endpoint") or "").startswith(_url(cfg)) else "")
+                 if ready else f"starting (pid {_PROC.pid})...")
+        return {"running": alive, "ready": ready,
                 "downloading": _DL["busy"], "exe": cfg.get("kobold_exe") or "",
                 "builds": [{"value": k, "label": v[1]} for k, v in _BUILDS.items()],
                 "releases_url": RELEASES_URL,
-                "pid": _PROC.pid if _alive() else None, "url": _url(cfg),
+                "pid": _PROC.pid if alive else None, "url": _url(cfg),
                 "endpoint_applied": (cfg.get("oai_endpoint") or "").startswith(_url(cfg)),
-                "log": list(_LOG)[-80:]}
+                "log": list(_LOG)[-80:],
+                # the settings tab's block (host.add_settings_section)
+                "view": {"rows": [{"label": "koboldcpp", "value": state, "tone": "ok" if ready else None}],
+                         "link": {"url": RELEASES_URL, "label": "all releases"},
+                         "pre": list(_LOG)[-80:], "live": True, "busy": _DL["busy"],
+                         "builds": [{"value": k, "label": v[1]} for k, v in _BUILDS.items()]}}
 
     def api_status():
         return jsonify({"success": True, **_status()})
@@ -258,7 +266,7 @@ def register(host):
 
     def api_download():
         from flask import request
-        variant = (request.json or {}).get("variant") or "cu12"
+        variant = (request.json or {}).get("variant") or (request.json or {}).get("option") or "cu12"
         if variant not in _BUILDS:
             return jsonify({"success": False, "error": "unknown build"})
         if _DL["busy"]:
@@ -274,7 +282,11 @@ def register(host):
     host.add_route("/api/kobold/stop", api_stop, methods=["POST"], feature="settings.kobold",
                    level="write", action="kobold_stop")
     host.add_settings_tab("kobold", "Kobold", admin_only=True)
-    host.add_asset("kobold.js")
+    host.add_settings_section("kobold", "server", status_url="/api/kobold/status", poll=2, order=0,
+                              actions=[{"id": "start", "label": "\u25b6 Start", "url": "/api/kobold/start", "variant": "ok"},
+                                       {"id": "stop", "label": "\u25a0 Stop", "url": "/api/kobold/stop", "variant": "danger"},
+                                       {"id": "download", "label": "\u2b07 Download build", "url": "/api/kobold/download",
+                                        "variant": "neutral", "options_from": "builds", "title": "No koboldcpp? Fetch a release build"}])
     host.provide_service("kobold", {"start": start, "stop": stop, "status": _status})
 
     if cfg.get("kobold_autostart") and cfg.get("kobold_model"):

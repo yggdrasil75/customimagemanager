@@ -12,7 +12,7 @@ JS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "js")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # GET endpoints the page calls while booting; their real responses become the
 # harness defaults so the frontend is exercised against the backend's shapes.
-SNAPSHOT = ["/api/state", "/api/modules", "/api/module_assets", "/api/auth/me",
+SNAPSHOT = ["/api/state", "/api/modules", "/api/module_assets", "/api/module_ui", "/api/auth/me",
             "/api/auth/config", "/api/models", "/api/ai/actions", "/api/box_labels",
             "/api/encoding/schema"]
 FILES = sorted(glob.glob(os.path.join(JS, "*.test.js"))) + \

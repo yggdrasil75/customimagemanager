@@ -97,15 +97,18 @@ def _run_yolo_path(model_path, feed, conf):
     bn/fuse-error unload+retry the old manager path had. Returns ultralytics
     results or None."""
     load = _loader_for(model_path)
+    key = f"yolo:{_canon(model_path)}"
     try:
-        return load()(feed, verbose=False, conf=conf)
+        with model_registry.lease(key):   # no budget eviction mid-forward
+            return load()(feed, verbose=False, conf=conf)
     except Exception as ex:
         if "bn" in str(ex) or "fuse" in str(ex).lower():
             try:
-                model_registry.unload(f"yolo:{_canon(model_path)}")
+                model_registry.unload(key)
             except Exception:
                 pass
-            return load()(feed, verbose=False, conf=conf)
+            with model_registry.lease(key):
+                return load()(feed, verbose=False, conf=conf)
         # Anything else (weights that don't exist upstream, a failed download,
         # a corrupt file) used to come back as None -> "no detections", which
         # read as "the model found nothing" instead of "the model never ran".
@@ -315,8 +318,12 @@ def _parse_yolo_result(r, H, W, keep_classes, as_obb):
             pts = obb.xyxyxyxy[i].cpu().numpy().reshape(-1, 2)
             x1, y1 = pts[:, 0].min() / W, pts[:, 1].min() / H
             x2, y2 = pts[:, 0].max() / W, pts[:, 1].max() / H
+            # the axis-aligned bounds are the box; the rotated corners and the
+            # confidence ride along so a stored region keeps them
             out.append({"class_name": name, "cx": (x1 + x2) / 2,
-                        "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1})
+                        "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1,
+                        "conf": float(obb.conf[i]) if obb.conf is not None else 0.0,
+                        "obb": [[round(float(x) / W, 6), round(float(y) / H, 6)] for x, y in pts]})
         return out
     if r.boxes is not None:
         names = r.names
