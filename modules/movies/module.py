@@ -19,7 +19,7 @@ This module owns:
   - a `movie_title` / `movie_year` enricher on file rows, a tile badge;
   - the Movies left tab (movies_pane.html + movies.js): the list, and playing a
     movie in the core's own video viewer (selectFile).
-The pure Plex helpers live in plex.py.
+The pure Plex helpers live in movie_import.py.
 """
 import json
 import os
@@ -109,7 +109,7 @@ def register(host):
         sid, _user, inner = host.core.library_section(rel_path)
         if sid != SECTION or not inner:
             return None, None
-        info = plex.parse_movie(inner)
+        info = movie_import.parse_movie(inner)
         if info is None:
             return None, None
         return info, rel_path[:len(rel_path) - len(inner)]
@@ -151,8 +151,8 @@ def register(host):
         own_names = names if own_abs == folder_abs else _listdir(own_abs)
         own_rel = os.path.dirname(rel_path)
         main_stem = info["folder"] if info["extra"] and info["folder"] else info["stem"]
-        sc = plex.sidecars(names, main_stem, in_folder=bool(info["folder"]), image_exts=_image_exts())
-        subs = [s for s in (plex.parse_subtitle(n, info["stem"]) for n in sorted(own_names)) if s]
+        sc = movie_import.sidecars(names, main_stem, in_folder=bool(info["folder"]), image_exts=_image_exts())
+        subs = [s for s in (movie_import.parse_subtitle(n, info["stem"]) for n in sorted(own_names)) if s]
         nfo_abs = os.path.join(folder_abs, sc["nfo"]) if sc["nfo"] and not info["extra"] else None
         mtime = _mtime(abs_path)
         sig = f"{mtime:.3f}|{_mtime(folder_abs):.3f}|{_mtime(own_abs):.3f}|{_mtime(nfo_abs):.3f}"
@@ -162,7 +162,7 @@ def register(host):
                 return False
         title, year, plot, genres, sortt = info["title"], info["year"], "", [], ""
         if nfo_abs:
-            nfo = plex.parse_nfo(_read_text(nfo_abs), roots=("movie",))
+            nfo = movie_import.parse_nfo(_read_text(nfo_abs), roots=("movie",))
             title = nfo.get("title") or title
             year = nfo.get("year") or year
             plot = nfo.get("plot") or ""
@@ -179,13 +179,13 @@ def register(host):
                          defaults={"created": time.time()},
                          set={"mtime": mtime, "sig": sig, "base": base_rel,
                               "folder": folder_rel if info["folder"] else "",
-                              "title": title, "sort_title": plex.sort_title(sortt or title),
+                              "title": title, "sort_title": movie_import.sort_title(sortt or title),
                               "year": year, "edition": info["edition"], "part": info["part"],
                               "extra": info["extra"], "label": info["label"], "plot": plot,
-                              "genres": plex.dumps(genres), "poster_rel": frel(sc["poster"]),
+                              "genres": movie_import.dumps(genres), "poster_rel": frel(sc["poster"]),
                               "fanart_rel": frel(sc["fanart"]),
                               "nfo_rel": frel(sc["nfo"]) if nfo_abs else None,
-                              "subtitles": plex.dumps(sub_rows)})
+                              "subtitles": movie_import.dumps(sub_rows)})
         db().commit()
         return True
 
@@ -306,9 +306,9 @@ def register(host):
         return {"rel_path": r["rel_path"], "base": r["base"], "folder": r["folder"], "title": r["title"],
                 "year": r["year"], "edition": r["edition"], "part": r["part"],
                 "extra": r["extra"], "label": r["label"], "plot": r["plot"],
-                "genres": plex.loads(r["genres"]), "poster_rel": r["poster_rel"],
+                "genres": movie_import.loads(r["genres"]), "poster_rel": r["poster_rel"],
                 "fanart_rel": r["fanart_rel"], "nfo_rel": r["nfo_rel"],
-                "subtitles": plex.loads(r["subtitles"]), "created": r["created"]}
+                "subtitles": movie_import.loads(r["subtitles"]), "created": r["created"]}
 
     def _key(r):
         """! @brief What groups the parts of one movie: its folder, or title + year
@@ -392,7 +392,7 @@ def register(host):
         w, wp = where(["extra IS NULL"])
         counts = {}
         for r in db().execute(f"SELECT genres FROM movies{w}", wp):
-            for g in plex.loads(r["genres"]):
+            for g in movie_import.loads(r["genres"]):
                 counts[g] = counts.get(g, 0) + 1
         return jsonify({"success": True, "genres": [{"name": g, "count": n}
                                                     for g, n in sorted(counts.items(), key=lambda x: x[0].lower())]})
@@ -420,9 +420,9 @@ def register(host):
         fp = host.safe_path(host.media_dir, filename)
         if (not fp or not os.path.exists(fp) or not host.check_path(filename)
                 or host.core.library_section(filename)[0] != SECTION
-                or os.path.splitext(filename)[1].lower() not in plex.SUBTITLE_EXTS):
+                or os.path.splitext(filename)[1].lower() not in movie_import.SUBTITLE_EXTS):
             return jsonify({"success": False, "error": "not found"}), 404
-        return Response(plex.srt_to_vtt(_read_text(fp)), mimetype="text/vtt")
+        return Response(movie_import.srt_to_vtt(_read_text(fp)), mimetype="text/vtt")
 
     R, W = "read", "write"
     for rule, fn, methods, level in (
@@ -448,5 +448,5 @@ def register(host):
     host.register_file_enricher(enrich)
 
     host.provide_service("movies", {"index_all": index_all, "upsert": upsert, "state": state,
-                                    "parse": plex.parse_movie})
+                                    "parse": movie_import.parse_movie})
     log.info("movies module: movies section, table, /api/movies, Movies tab registered")

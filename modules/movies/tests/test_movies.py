@@ -12,14 +12,14 @@ import pytest
 from modules.movies import movie_import
 
 
-# -- plex.py: pure ---------------------------------------------------------
+# -- movie_import.py: pure ---------------------------------------------------------
 def test_parse_title_year():
-    assert plex.parse_title_year("Heat (1995)") == ("Heat", 1995, "")
-    assert plex.parse_title_year("Heat (1995) - 1080p") == ("Heat", 1995, "1080p")
-    assert plex.parse_title_year("Heat") == ("Heat", None, "")
-    assert plex.parse_title_year("Blade Runner (1982) {edition-Final Cut} [imdb-tt0083658]") == ("Blade Runner", 1982, "")
-    assert plex.edition_of("Blade Runner (1982) {edition-Final Cut}") == "Final Cut"
-    assert plex.sort_title("The Thing") == "thing" and plex.sort_title("An Angel") == "angel"
+    assert movie_import.parse_title_year("Heat (1995)") == ("Heat", 1995, "")
+    assert movie_import.parse_title_year("Heat (1995) - 1080p") == ("Heat", 1995, "1080p")
+    assert movie_import.parse_title_year("Heat") == ("Heat", None, "")
+    assert movie_import.parse_title_year("Blade Runner (1982) {edition-Final Cut} [imdb-tt0083658]") == ("Blade Runner", 1982, "")
+    assert movie_import.edition_of("Blade Runner (1982) {edition-Final Cut}") == "Final Cut"
+    assert movie_import.sort_title("The Thing") == "thing" and movie_import.sort_title("An Angel") == "angel"
 
 
 @pytest.mark.parametrize("path, want", [
@@ -36,59 +36,59 @@ def test_parse_title_year():
     ("Untitled/clip.mkv", dict(title="Untitled", year=None, folder="Untitled")),
 ])
 def test_parse_movie(path, want):
-    got = plex.parse_movie(path)
+    got = movie_import.parse_movie(path)
     assert got, path
     for k, v in want.items():
         assert got[k] == v, (path, k, got)
 
 
 def test_parse_movie_rejects_what_plex_ignores():
-    assert plex.parse_movie("a/b/c/d.mkv") is None
-    assert plex.parse_movie("") is None
-    assert plex.parse_movie(".hidden/x.mkv") is None
+    assert movie_import.parse_movie("a/b/c/d.mkv") is None
+    assert movie_import.parse_movie("") is None
+    assert movie_import.parse_movie(".hidden/x.mkv") is None
 
 
 def test_sidecars_in_a_movie_folder():
     names = ["Heat (1995).mkv", "poster.jpg", "fanart.jxl", "Heat (1995).nfo", "Heat (1995).en.srt",
              "Heat (1995).en.forced.srt", "Heat (1995).srt", "Heat (1995)-trailer.en.srt", "notes.txt"]
-    sc = plex.sidecars(names, "Heat (1995)")
+    sc = movie_import.sidecars(names, "Heat (1995)")
     assert sc["poster"] == "poster.jpg" and sc["fanart"] == "fanart.jxl" and sc["nfo"] == "Heat (1995).nfo"
     assert [s["file"] for s in sc["subtitles"]] == ["Heat (1995).en.forced.srt", "Heat (1995).en.srt", "Heat (1995).srt"]
     assert sc["subtitles"][0] == {"file": "Heat (1995).en.forced.srt", "lang": "en", "forced": True, "sdh": False}
     assert sc["subtitles"][2]["lang"] == ""
     # the stem-prefixed names win over the generic ones; movie.nfo / any .nfo are fallbacks
-    sc = plex.sidecars(["poster.jpg", "Heat (1995)-poster.png", "movie.nfo"], "Heat (1995)")
+    sc = movie_import.sidecars(["poster.jpg", "Heat (1995)-poster.png", "movie.nfo"], "Heat (1995)")
     assert sc["poster"] == "Heat (1995)-poster.png" and sc["nfo"] == "movie.nfo"
-    assert plex.sidecars(["other.nfo"], "Heat (1995)")["nfo"] == "other.nfo"
+    assert movie_import.sidecars(["other.nfo"], "Heat (1995)")["nfo"] == "other.nfo"
 
 
 def test_sidecars_of_a_loose_movie_ignore_the_folder_level_names():
-    sc = plex.sidecars(["Heat (1995).mkv", "poster.jpg", "Heat (1995)-poster.jpg", "movie.nfo", "Alien (1979).nfo"],
+    sc = movie_import.sidecars(["Heat (1995).mkv", "poster.jpg", "Heat (1995)-poster.jpg", "movie.nfo", "Alien (1979).nfo"],
                        "Heat (1995)", in_folder=False)
     assert sc["poster"] == "Heat (1995)-poster.jpg" and sc["nfo"] is None and sc["fanart"] is None
 
 
 def test_parse_nfo():
-    nfo = plex.parse_nfo('<?xml version="1.0" encoding="UTF-8"?>\n<movie><title>Heat</title><year>1995</year>'
+    nfo = movie_import.parse_nfo('<?xml version="1.0" encoding="UTF-8"?>\n<movie><title>Heat</title><year>1995</year>'
                          '<plot>Cops and robbers.</plot><genre>Crime</genre><genre>Drama</genre>'
                          '<sorttitle>heat</sorttitle></movie>\nhttps://www.imdb.com/title/tt0113277/')
     assert nfo["root"] == "movie" and nfo["title"] == "Heat" and nfo["year"] == 1995
     assert nfo["plot"] == "Cops and robbers." and nfo["genres"] == ["Crime", "Drama"] and nfo["sorttitle"] == "heat"
     # the year falls back to the premiere date; an episode nfo carries season / episode
-    ep = plex.parse_nfo("<episodedetails><title>Pilot</title><season>1</season><episode>1</episode>"
+    ep = movie_import.parse_nfo("<episodedetails><title>Pilot</title><season>1</season><episode>1</episode>"
                         "<aired>2001-05-01</aired></episodedetails><episodedetails><title>Two</title></episodedetails>")
     assert (ep["root"], ep["title"], ep["season"], ep["episode"], ep["year"]) == ("episodedetails", "Pilot", 1, 1, 2001)
     # malformed XML: the tag scan still reads the fields
-    bad = plex.parse_nfo("<movie><title>Bad & broken</title><year>2000</year><genre>Horror</genre></movie>")
+    bad = movie_import.parse_nfo("<movie><title>Bad & broken</title><year>2000</year><genre>Horror</genre></movie>")
     assert bad["title"] == "Bad & broken" and bad["year"] == 2000 and bad["genres"] == ["Horror"]
-    assert plex.parse_nfo("") == {} and plex.parse_nfo("just text") == {}
-    assert plex.parse_nfo("<tvshow><title>X</title></tvshow>", roots=("movie",)) == {}
+    assert movie_import.parse_nfo("") == {} and movie_import.parse_nfo("just text") == {}
+    assert movie_import.parse_nfo("<tvshow><title>X</title></tvshow>", roots=("movie",)) == {}
 
 
 def test_srt_to_vtt():
-    vtt = plex.srt_to_vtt("1\r\n00:00:01,000 --> 00:00:02,500\r\nHi\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nThere\r\n")
+    vtt = movie_import.srt_to_vtt("1\r\n00:00:01,000 --> 00:00:02,500\r\nHi\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nThere\r\n")
     assert vtt.startswith("WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nHi\n\n00:00:03.000")
-    assert plex.srt_to_vtt("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nx").startswith("WEBVTT")
+    assert movie_import.srt_to_vtt("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nx").startswith("WEBVTT")
 
 
 # -- the module -------------------------------------------------------------
@@ -158,8 +158,8 @@ def test_nfo_and_sidecars_are_attached(app, host, tree):
     _index(host, app, rel)
     r = _row(app, rel)
     assert r["poster_rel"] == f"{folder}/poster.jpg" and r["fanart_rel"] == f"{folder}/fanart.png"
-    assert r["nfo_rel"] == f"{folder}/Heat (1995).nfo" and r["plot"] == "Cops." and plex.loads(r["genres"]) == ["Crime"]
-    subs = plex.loads(r["subtitles"])
+    assert r["nfo_rel"] == f"{folder}/Heat (1995).nfo" and r["plot"] == "Cops." and movie_import.loads(r["genres"]) == ["Crime"]
+    subs = movie_import.loads(r["subtitles"])
     assert [(s["rel"], s["lang"], s["forced"]) for s in subs] == [
         (f"{folder}/Heat (1995).de.forced.srt", "de", True), (f"{folder}/Heat (1995).en.srt", "en", False)]
     # the nfo overrides the file name's title

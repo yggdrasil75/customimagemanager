@@ -19,7 +19,7 @@ This module owns:
   - a `show` / `season` / `episode` / `episode_title` enricher on file rows;
   - the TV left tab (tv_pane.html + tv.js): shows > seasons > episodes, and
     playing an episode in the core's own video viewer (selectFile).
-The pure Plex helpers live in plex.py.
+The pure Plex helpers live in movie_import.py.
 """
 import os
 import threading
@@ -118,7 +118,7 @@ def register(host):
         sid, _user, inner = host.core.library_section(rel_path)
         if sid != SECTION or not inner:
             return None, None
-        info = plex.parse_episode(inner)
+        info = movie_import.parse_episode(inner)
         if info is None:
             return None, None
         return info, rel_path[:len(rel_path) - len(inner)]
@@ -151,7 +151,7 @@ def register(host):
         Returns the show folder's file names (the caller needs them for season art)."""
         show_abs = host.safe_path(host.media_dir, show_rel)
         names = _listdir(show_abs)
-        sc = plex.show_sidecars(names, _image_exts())
+        sc = movie_import.show_sidecars(names, _image_exts())
         nfo_abs = os.path.join(show_abs, sc["nfo"]) if sc["nfo"] else None
         sig = f"{_mtime(show_abs):.3f}|{_mtime(nfo_abs):.3f}"
         if not force and _show_sig.get(show_rel) == sig:
@@ -162,7 +162,7 @@ def register(host):
             return names
         title, year, plot, genres, sortt = info["show"], info["show_year"], "", [], ""
         if nfo_abs:
-            nfo = plex.parse_nfo(_read_text(nfo_abs), roots=("tvshow",))
+            nfo = movie_import.parse_nfo(_read_text(nfo_abs), roots=("tvshow",))
             title = nfo.get("title") or title
             year = nfo.get("year") or year
             plot = nfo.get("plot") or ""
@@ -174,8 +174,8 @@ def register(host):
         host.update_file(show_rel, table="tv_shows", dont_write=True, commit=False,
                          defaults={"created": time.time()},
                          set={"sig": sig, "base": base_rel, "title": title,
-                              "sort_title": plex.sort_title(sortt or title), "year": year,
-                              "plot": plot, "genres": plex.dumps(genres),
+                              "sort_title": movie_import.sort_title(sortt or title), "year": year,
+                              "plot": plot, "genres": movie_import.dumps(genres),
                               "poster_rel": frel(sc["poster"]), "fanart_rel": frel(sc["fanart"]),
                               "banner_rel": frel(sc["banner"]), "nfo_rel": frel(sc["nfo"])})
         _show_sig[show_rel] = sig
@@ -193,7 +193,7 @@ def register(host):
         own_abs = os.path.dirname(abs_path)
         own_rel = os.path.dirname(rel_path)
         own_names = _listdir(own_abs)
-        sc = plex.episode_sidecars(own_names, info["stem"], _image_exts())
+        sc = movie_import.episode_sidecars(own_names, info["stem"], _image_exts())
         nfo_abs = os.path.join(own_abs, sc["nfo"]) if sc["nfo"] and not info["extra"] else None
         mtime = _mtime(abs_path)
         sig = f"{mtime:.3f}|{_mtime(own_abs):.3f}|{_mtime(nfo_abs):.3f}|{_show_sig.get(show_rel, '')}"
@@ -204,7 +204,7 @@ def register(host):
         season, episode, end, title, plot, aired = (info["season"], info["episode"], info["episode_end"],
                                                     info["title"], "", "")
         if nfo_abs:
-            nfo = plex.parse_nfo(_read_text(nfo_abs), roots=("episodedetails",))
+            nfo = movie_import.parse_nfo(_read_text(nfo_abs), roots=("episodedetails",))
             title = nfo.get("title") or title
             plot = nfo.get("plot") or ""
             aired = nfo.get("aired") or ""
@@ -212,7 +212,7 @@ def register(host):
                 season = nfo["season"]
             if nfo.get("episode") is not None and episode is None:
                 episode = nfo["episode"]
-        sp = plex.season_poster(show_names, season, _image_exts()) if season is not None else None
+        sp = movie_import.season_poster(show_names, season, _image_exts()) if season is not None else None
         host.update_file(rel_path, table="tv_episodes", dont_write=True, commit=False,
                          defaults={"created": time.time()},
                          set={"mtime": mtime, "sig": sig, "show_rel": show_rel, "season": season,
@@ -221,7 +221,7 @@ def register(host):
                               "thumb_rel": f"{own_rel}/{sc['thumb']}" if sc["thumb"] else None,
                               "season_poster_rel": f"{show_rel}/{sp}" if sp else None,
                               "nfo_rel": f"{own_rel}/{sc['nfo']}" if nfo_abs else None,
-                              "subtitles": plex.dumps([{"rel": f"{own_rel}/{s['file']}", "lang": s["lang"],
+                              "subtitles": movie_import.dumps([{"rel": f"{own_rel}/{s['file']}", "lang": s["lang"],
                                                         "forced": s["forced"], "sdh": s["sdh"]}
                                                        for s in sc["subtitles"]])})
         db().commit()
@@ -355,7 +355,7 @@ def register(host):
 
     def show_dict(r):
         return {"rel_path": r["rel_path"], "base": r["base"], "title": r["title"], "year": r["year"],
-                "plot": r["plot"], "genres": plex.loads(r["genres"]), "poster_rel": r["poster_rel"],
+                "plot": r["plot"], "genres": movie_import.loads(r["genres"]), "poster_rel": r["poster_rel"],
                 "fanart_rel": r["fanart_rel"], "banner_rel": r["banner_rel"], "nfo_rel": r["nfo_rel"],
                 "created": r["created"]}
 
@@ -364,7 +364,7 @@ def register(host):
                 "episode": r["episode"], "episode_end": r["episode_end"], "title": r["title"],
                 "extra": r["extra"], "plot": r["plot"], "aired": r["aired"], "thumb_rel": r["thumb_rel"],
                 "season_poster_rel": r["season_poster_rel"], "nfo_rel": r["nfo_rel"],
-                "subtitles": plex.loads(r["subtitles"]), "created": r["created"]}
+                "subtitles": movie_import.loads(r["subtitles"]), "created": r["created"]}
 
     def _order(key, desc):
         prim, tie = _SHOW_SORTS.get((key or "title").lower(), _SHOW_SORTS["title"])
@@ -382,7 +382,7 @@ def register(host):
         if a.get("year", "").strip():
             clauses.append("year=?"); params.append(a["year"].strip()[:4])
         if a.get("genre", "").strip():
-            clauses.append("genres LIKE ?"); params.append(f'%{plex.dumps(a["genre"].strip())}%')
+            clauses.append("genres LIKE ?"); params.append(f'%{movie_import.dumps(a["genre"].strip())}%')
         w, wp = where(clauses, params)
         desc = a.get("dir", "").lower() in ("desc", "-", "1", "true")
         rows = db().execute(f"SELECT * FROM tv_shows{w} ORDER BY {_order(a.get('sort'), desc)}", wp).fetchall()
@@ -478,9 +478,9 @@ def register(host):
         fp = host.safe_path(host.media_dir, filename)
         if (not fp or not os.path.exists(fp) or not host.check_path(filename)
                 or host.core.library_section(filename)[0] != SECTION
-                or os.path.splitext(filename)[1].lower() not in plex.SUBTITLE_EXTS):
+                or os.path.splitext(filename)[1].lower() not in movie_import.SUBTITLE_EXTS):
             return jsonify({"success": False, "error": "not found"}), 404
-        return Response(plex.srt_to_vtt(_read_text(fp)), mimetype="text/vtt")
+        return Response(movie_import.srt_to_vtt(_read_text(fp)), mimetype="text/vtt")
 
     R, W = "read", "write"
     for rule, fn, methods, level in (
@@ -509,5 +509,5 @@ def register(host):
     host.register_file_enricher(enrich)
 
     host.provide_service("tv", {"index_all": index_all, "upsert": upsert, "state": state,
-                                "parse": plex.parse_episode})
+                                "parse": movie_import.parse_episode})
     log.info("tv module: tv section, tables, /api/tv, TV tab registered")
