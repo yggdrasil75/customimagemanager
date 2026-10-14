@@ -135,15 +135,12 @@
           carry on by themselves once space is freed. Files already in the upload spool keep being added.</p>
       </section>
       <!-- Alerts (the storage_alerts module): its fields render compact here
-           (pane="storage", section="alerts"); storage_alerts.js unhides the
-           section and adds the readings and its buttons. -->
+           (pane="storage", section="alerts"); its declared settings section
+           (host.add_settings_section, mount="storage_alerts_section") unhides this
+           and adds the readings and its buttons. -->
       <section id="storage_alerts_section" class="hidden border-t border-gray-700 mt-3 pt-3">
-        <div class="flex items-center gap-2 mb-2">
-          <h3 class="font-bold text-amber-300 text-sm">Alerts</h3>
-          <span id="storage_alerts_tools" class="flex flex-wrap items-center gap-2 flex-1"></span>
-        </div>
+        <h3 class="font-bold text-amber-300 text-sm mb-2">Alerts</h3>
         <div id="module_settings_fields_storage_alerts" data-compact class="settings-compact"></div>
-        <div id="storage_alerts_status" class="mt-2"></div>
       </section>
     </div>
 

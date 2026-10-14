@@ -23,7 +23,6 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "assets":      ["ocr.js"],
 }
 
 
@@ -42,7 +41,6 @@ def register(host):
     core = host.core
     host.register_feature("ai.ocr", "OCR", section="ai_tooling", section_label="AI Tooling",
                           default="write")
-    host.add_asset("ocr.js")
     host.provide_service("ocr", {"line": line})
 
     def run(img_bgr):
@@ -76,8 +74,8 @@ def register(host):
         return new
     host.register_action_target("ocr", _action)
 
-    def _picker_run(action_id, fp, bgr, meta):
-        res = run(bgr)
+    def shape(res):
+        """! @brief A run's result as editor fields: regions, description, note."""
         lines = [{"class_name": ("text: " + l["text"])[:48], "cx": l["cx"], "cy": l["cy"], "w": l["w"], "h": l["h"],
                   "confirmed": False, "region_tags": [], "region_description": ""}
                  for l in res.get("lines", []) if l.get("w")]
@@ -89,6 +87,9 @@ def register(host):
         elif res.get("engine"):
             out["note"] = f"OCR ({res['engine']}): {len(lines)} line(s)."
         return out
+
+    def _picker_run(action_id, fp, bgr, meta):
+        return shape(run(bgr))
     host.register_ai_actions("OCR", lambda: [{"id": "read", "label": "Read text", "target": "ocr"}], _picker_run,
                              feature="ai.ocr")
 
@@ -102,6 +103,11 @@ def register(host):
         host.set_status("Reading text...")
         res = run(core.to_bgr(img))
         host.set_status("Ready.")
-        return jsonify({"success": True, **res})
+        return jsonify({"success": True, **res, **shape(res)})
     host.add_route("/api/ocr", api_ocr, methods=["POST"], feature="ai.ocr", level="write")
+    host.add_button("ai_tools", "ocr", "OCR", url="/api/ocr", feature="ai.ocr", variant="tertiary",
+                    busy="Reading...", on_done="apply",
+                    title="Read text in this image with the picked OCR model (Models > OCR); "
+                          "lines become regions and the text is appended to the description.")
+
     host.logger.info("ocr module: registered /api/ocr, pipeline stage, action target")

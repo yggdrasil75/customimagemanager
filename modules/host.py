@@ -10,7 +10,7 @@ import os
 import re
 import time
 
-from flask import g, has_request_context, jsonify
+from flask import Response, g, has_request_context, jsonify, request
 
 ## @brief The kinds a table can be (see add_table): rebuildable, an index of the
 # files, or data that exists only in the DB.
@@ -101,6 +101,10 @@ class Host:
         self.sort_keys = {}
         # {name: {"obj", "module_id", "priority"}}
         self.services = {}
+        # declarative UI (see "Declared UI" below): the core's module_ui.js renders
+        # these; a module needs no JS of its own for them
+        self.ui = {"buttons": [], "sections": [], "left_tabs": [], "controls_tabs": [],
+                   "tile_badges": []}
         # the module being registered, so contributions are attributed to it
         self._current_module = None
 
@@ -379,6 +383,122 @@ class Host:
         self.controls_panes.append({
             "tab_id": tab_id, "template": template, "feature": feature,
             "module_id": self._current_module})
+
+    # -- Declared UI ------------------------------------------------------------
+    # Widgets a module describes in Python and the core renders (static/module_ui.js):
+    # a button in a control area that calls a Python function, a block in a settings
+    # pane with a status view and action buttons, a left / controls tab for a
+    # server-rendered pane, a badge on gallery tiles. The module ships no JS for
+    # these. Each is attributed to the registering module and shown only while it
+    # is enabled; the routes they need are created here.
+
+    def _ui_route(self, kind, uid, name, fn, *, feature, level, methods=("POST",)):
+        mod = self._current_module or "core"
+        rule = f"/api/ui/{mod}/{kind}/{uid}/{name}"
+
+        def view():
+            body = request.get_json(silent=True) or {}
+            try:
+                out = fn(body)
+            except Exception as e:  # a failing handler answers, it doesn't 500
+                self.logger.error(f"ui {mod} {kind}/{uid}/{name}: {e}")
+                return jsonify({"success": False, "error": str(e)})
+            if isinstance(out, Response) or (isinstance(out, tuple) and out and isinstance(out[0], Response)):
+                return out  # a file to download (send_file), passed through
+            if out is None:
+                out = {}
+            elif isinstance(out, str):
+                out = {"message": out}
+            out.setdefault("success", True)
+            return jsonify(out)
+        view.__name__ = f"ui_{kind}_{uid}_{name}"
+        self.add_route(rule, view, feature=feature, level=level, methods=list(methods))
+        return rule
+
+    def add_button(self, area, uid, label, *, url=None, run=None, needs="file", feature=None,
+                   level="write", variant="secondary", title=None, confirm=None, on_done=None,
+                   busy=None, options=None):
+        """! @brief A button in a control area (`ai_tools`, `viewer_toggles`, `gallery_bulk`,
+        `gallery_tools`, `album_tools`, ...) that POSTs to `url` (one of the module's
+        routes, usually) or to a route made here for `run`.
+        The body carries `filename` (needs "file"), `filenames` ("selection"), `album`
+        ("album") or nothing (None), plus `option` when `options` is set. The reply:
+        `message` (or `note`) is shown as a toast, `error` as a failure; with on_done
+        "apply", `regions`, `tags`, `description` and `flag` go into the open editor; a
+        `job` (from run_bulk) is followed to its end; a send_file() response is
+        downloaded.
+        @param run      fn(body) -> dict | str | None | Response, when no route exists yet.
+        @param options  [{"value", "label"}]: a select next to the button; its value is `option`.
+        @param on_done  "apply" (editor fields), "refile" (reload the open file),
+                        "reload" (the gallery) or None.
+        @param confirm  a question asked before running.
+        @param busy     the label while running (default: label + "...").
+        """
+        if url is None:
+            url = self._ui_route("button", uid, "run", run, feature=feature, level=level)
+        self.ui["buttons"].append({
+            "area": area, "id": uid, "label": label, "url": url, "needs": needs,
+            "feature": feature, "variant": variant, "title": title, "confirm": confirm,
+            "on_done": on_done, "busy": busy, "options": list(options or []),
+            "module_id": self._current_module})
+
+    def add_settings_section(self, pane, uid, *, title=None, text=None, status_url=None,
+                             status=None, actions=(), poll=None, feature=None, order=100,
+                             mount=None):
+        """! @brief A block in a settings pane: `text`, a status view and action buttons.
+        @param pane        a module tab's id, or a core pane ("storage", "general", ...).
+        @param mount       id of an element inside the pane to render into (unhidden);
+                           default: appended to the pane.
+        @param status_url  a GET route of the module whose reply holds the view, either
+                           at top level or under "view" (so the route keeps its other
+                           fields): any of
+                           {"lines": [str], "rows": [{"label", "value", "tone"?}],
+                            "list": [{"text", "tone"?}], "table": {"head": [...], "rows": [[...]]},
+                            "log": [{"at": epoch, "text"}], "busy": bool, "note": str}
+                           (tone: "ok" | "warn" | "danger" | "muted"). Re-read after an
+                           action, and every `poll` seconds while `busy`.
+        @param status      fn() -> that view, when no route exists yet.
+        @param actions     [{"id", "label", "url" (POST) | "run": fn(body), "variant"?,
+                            "title"?, "confirm"?, "level"?}]; the reply's `message` (or
+                            `note`) is shown, `error` is a failure.
+        @param feature     gate; defaults to the pane's settings.<pane> permission.
+        """
+        feature = feature or f"settings.{pane}"
+        if status is not None:
+            status_url = self._ui_route("section", uid, "status", lambda body: status(),
+                                        feature=feature, level="read", methods=("GET",))
+        acts = []
+        for a in actions:
+            url = a.get("url") or self._ui_route("section", uid, "action_" + a["id"], a["run"],
+                                                 feature=feature, level=a.get("level", "write"))
+            acts.append({k: a.get(k) for k in ("id", "label", "variant", "title", "confirm")} | {"url": url})
+        self.ui["sections"].append({
+            "pane": pane, "id": uid, "title": title, "text": text, "poll": poll, "order": order,
+            "feature": feature, "status_url": status_url, "actions": acts, "mount": mount,
+            "module_id": self._current_module})
+
+    def add_left_tab(self, tab_id, label, template, *, feature=None, controls_tab=None):
+        """! @brief A left-column tab whose pane is the server-rendered `template`
+        (register_left_pane + the page-side registration in one)."""
+        self.register_left_pane(template)
+        self.ui["left_tabs"].append({"id": tab_id, "label": label, "feature": feature,
+                                     "controls_tab": controls_tab,
+                                     "module_id": self._current_module})
+
+    def add_controls_tab(self, tab_id, label, template, *, feature=None, mode_tab=False):
+        """! @brief A controls-pane tab whose pane is the server-rendered `template`
+        (register_controls_pane + the page-side registration in one)."""
+        self.register_controls_pane(tab_id, template, feature=feature)
+        self.ui["controls_tabs"].append({"id": tab_id, "label": label, "feature": feature,
+                                         "mode_tab": bool(mode_tab),
+                                         "module_id": self._current_module})
+
+    def add_tile_badge(self, field, text, *, title=None, tone="accent", feature=None, when=None):
+        """! @brief A badge on every gallery tile whose row has `field` (a file enricher's
+        field) truthy, or equal to `when`. `text` may hold {value}."""
+        self.ui["tile_badges"].append({"field": field, "text": text, "title": title,
+                                       "tone": tone, "feature": feature, "when": when,
+                                       "module_id": self._current_module})
 
     def add_worker_source(self, name, claim, handle, key_of=None, cost_of=None):
         """! @brief Register a thread-manager work source (see thread_manager.register_source)."""

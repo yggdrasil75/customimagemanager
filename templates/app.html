@@ -46,9 +46,8 @@
   {% include 'partials/review_modal.html' %}
 
   <!-- Shared globals first, then per-area modules -->
-  <script>window.CIM_MODULE_ASSETS={{ module_assets | tojson }};</script>
+  <script>window.CIM_MODULE_ASSETS={{ module_assets | tojson }};window.CIM_MODULE_UI={{ module_ui | tojson }};</script>
   {% for u in core_js_urls %}<script src="{{ u }}"></script>
-  {% endfor %}
-</body>
+  {% endfor %}</body>
 
 </html>

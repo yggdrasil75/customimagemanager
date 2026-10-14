@@ -168,6 +168,10 @@ touching `media_types.py`.
 | `host.on_setting_change(key, fn)` | side effect when a setting changes |
 | `host.add_settings_field(key=, label=, kind=, pane=, section=, options=, columns=, help=)` | a settings-UI widget bound to a key |
 | `host.add_settings_tab(id, label, icon, admin_only, group=)` | your own Settings tab (fields with `pane=<id>` render in it; gets the permission `settings.<id>`) |
+| `host.add_button(area, id, label, url=, needs=, feature=, options=, on_done=)` | a button the core draws that POSTs to one of your routes (see "Declared UI") |
+| `host.add_settings_section(pane, id, status_url=, actions=, text=, mount=)` | a status + action block in a settings pane, drawn by the core from your routes |
+| `host.add_left_tab(id, label, template, feature=)` / `add_controls_tab(...)` | a tab for a server-rendered pane, registered on the page by the core |
+| `host.add_tile_badge(field, text, tone=)` | a badge on gallery tiles from a file enricher's field |
 | `host.add_user_setting(key, label=, kind=, default=, validate=, options=, feature=)` / `host.user_setting(key)` | a per-user setting in Settings -> User settings / its value for the current user |
 | `host.add_account_field(key, label, options=, scopes=)` | a field an admin sets per account / group in Settings -> Users (`g.user["account"][key]`) |
 | `host.register_feature(key, label, section=, default=, role_defaults=)` | an auth permission; gate routes with `host.require_feature` / `core.auth.require_feature` |
@@ -478,6 +482,44 @@ but any id works: `provide_model("depth.anything", ...)` declares it on the
 fly; `host.declare_capability(id, summary=, input=, output=, label=,
 background=)` documents its I/O contract - the first module to declare an id
 owns it.
+
+## Declared UI:
+
+```python
+# A button in a control area, posting to one of the module's own routes: {"filename"}
+# (needs="file"), {"filenames"} ("selection"), {"album"} ("album") or {} (None), plus
+# "option" when options= is set. The reply's message / note is a toast, error a failure;
+# with on_done="apply" its regions / tags / description / flag go into the open editor,
+# a "job" (run_bulk) is followed, a send_file() reply is downloaded.
+host.add_button("ai_tools", "ocr", "OCR", url="/api/ocr", feature="ai.ocr", on_done="apply",
+                busy="Reading...", title="Read the text in this image")
+host.add_button("gallery_bulk", "export", "Export", url="/api/export", needs="selection",
+                options=[{"value": "jpg", "label": "jpg"}, {"value": "png", "label": "png"}])
+#   run=fn(body) instead of url= makes the route for you (/api/ui/<module>/button/<id>/run)
+
+# A block in a settings pane (your tab's id, or a core pane such as "storage", optionally
+# inside one of its elements with mount=): a status view read from a GET route of the
+# module - its reply, or its "view" key, holds any of
+#   {"lines": [...], "rows": [{"label", "value", "tone"?}], "list": [{"text", "tone"?}],
+#    "table": {"head": [...], "rows": [[...] | {"cells": [...], "tone"?}]},
+#    "log": [{"at": epoch, "text"}], "busy": bool, "note": str}      tone: ok | warn | danger | muted
+# - re-read after every action and every `poll` seconds while busy, and action buttons
+# that POST to routes of the module (their reply's message is shown).
+host.add_settings_section("email", "tools", status_url="/api/email/status", text="Save first.",
+                          actions=[{"id": "test", "label": "Send test email", "url": "/api/email/test"}])
+#   status=fn() / "run": fn(body) make the routes for you
+
+# Tabs for server-rendered panes (templates/ of the module), registered on the page too.
+host.add_left_tab("music", "Music", "music_pane.html", feature="tab.music")
+host.add_controls_tab("comic", "Comic", "comic_pane.html", feature="tab.comics")
+
+# A badge on every tile whose row (from your file enricher) has the field.
+host.add_tile_badge("motion", "LIVE", title="Motion photo", tone="accent")
+```
+
+`modules/example_hello`, `email`, `storage_alerts`, `personal_iqa`, `ocr`,
+`barcodes` and `export` are written this way. The descriptors are inlined in the
+page (`window.CIM_MODULE_UI`, also `/api/module_ui`); only enabled modules' are.
 
 ## Front-end
 

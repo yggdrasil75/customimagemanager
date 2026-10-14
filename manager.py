@@ -8292,12 +8292,22 @@ def static_build(filename):
     resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     return resp
 
+def _module_ui() -> dict:
+    """! @brief The declared UI of the enabled modules (host.add_button, add_settings_section,
+    add_left_tab, add_controls_tab, add_tile_badge) for the page's module_ui.js."""
+    return {k: [dict(e) for e in v if not e["module_id"] or module_registry.is_enabled(e["module_id"])]
+            for k, v in module_host.ui.items()}
+
+@app.route("/api/module_ui")
+def api_module_ui():
+    return jsonify(_module_ui())
+
 @app.context_processor
 def _inject_page_assets():
     """! @brief core_js_urls: the page's scripts (one bundle, or each file);
     module_assets: what modules.js injects (saves the /api/module_assets round trip)."""
     core = [_bundles["core_js"]] if _bundles.get("core_js") else [f"/static/{f}" for f in _assets.CORE_JS]
-    return {"core_js_urls": core, "module_assets": _page_module_assets()}
+    return {"core_js_urls": core, "module_assets": _page_module_assets(), "module_ui": _module_ui()}
 
 
 if __name__=='__main__':

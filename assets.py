@@ -34,7 +34,7 @@ CORE_JS = [
     "upload.js", "albums.js", "panes.js", "panes_resize.js",
     "vendor/three.min.js", "vendor/OBJLoader.js", "vendor/OrbitControls.js",
     "editor.js", "ai_tools.js", "review.js", "tiers.js", "info.js", "user_settings.js",
-    "modules.js", "init.js", "controls_tabs.js",
+    "modules.js", "module_ui.js", "init.js", "controls_tabs.js",
 ]
 
 

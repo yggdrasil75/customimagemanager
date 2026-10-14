@@ -31,7 +31,6 @@ MANIFEST = {
     "core":        False,          # can be toggled off in Settings > Modules
     "requires":    [],             # e.g. ["metadata"] to load after metadata
     "pip":         [],             # e.g. ["requests"] - advisory dep check
-    "assets":      ["hello.js"],   # injected into the page (also add_asset below)
 }
 
 
@@ -54,18 +53,23 @@ def register(host):
             "version": MANIFEST["version"],
             "message": "Hello from a pluggable module.",
             "page_size_seen_from_module": page_size,
+            # what the declared settings block (3) shows: see add_settings_section in host.py
+            "view": {"rows": [{"label": "Module", "value": MANIFEST["id"] + " " + MANIFEST["version"]},
+                              {"label": "Page size", "value": page_size}]},
         })
 
-    host.add_route("/api/hello", hello)
+    host.add_route("/api/hello", hello, methods=["GET", "POST"])
 
-    # 2) A front-end asset. Served from this folder's static/ dir and
-    #    injected into app.html on load. (Also declared in MANIFEST["assets"];
-    #    either mechanism works - add_asset is the programmatic one.)
-    host.add_asset("hello.js")
-
-    # 3) A settings tab. The core renders the button + an empty pane; the
-    #    module's own hello.js fills it. admin_only mirrors the Users tab.
+    # 2) A settings tab. The core renders the button and an empty pane.
     host.add_settings_tab("example_hello", "Hello", admin_only=False)
+
+    # 3) Declared UI: a block in that pane with a status view and a button, all
+    #    described here and rendered by the core (static/module_ui.js), so the
+    #    module ships no JavaScript. A module that needs its own page code still
+    #    can: put it in static/ and host.add_asset("mine.js").
+    host.add_settings_section("example_hello", "demo", status_url="/api/hello",
+                              text="This block is declared in modules/example_hello/module.py.",
+                              actions=[{"id": "ping", "label": "Ping /api/hello", "url": "/api/hello", "variant": "primary"}])
 
     ## @brief 4) A startup hook - runs after the server is set up, not at import time.
     def _greet():

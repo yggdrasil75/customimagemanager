@@ -39,7 +39,6 @@ MANIFEST = {
     "core":        False,
     "requires":    ["email"],
     "pip":         [],
-    "assets":      ["storage_alerts.js"],
 }
 
 TAB = "storage"          # the core Storage tab; the fields are its "alerts" section
@@ -474,7 +473,37 @@ def register(host):
         d["enabled"] = bool(host.config.get("storage_alerts_enabled"))
         rows = host.db().execute("SELECT at, kind, subject FROM storage_alerts_log ORDER BY id DESC LIMIT 20").fetchall()
         d["log"] = [dict(r) for r in rows]
-        return jsonify({"success": True, **d})
+        return jsonify({"success": True, **d, "view": _view(d)})
+
+    def _view(d):
+        """! @brief The Alerts block in Settings -> Storage (host.add_settings_section)."""
+        gb = lambda b: "%.1f GB" % (float(b or 0) / GB)
+        when = lambda t: time.strftime("%Y-%m-%d %H:%M", time.localtime(t)) if t else "never"
+        rcpts = d["recipients"]
+        v = {"rows": [{"label": "Alerts", "value": ("enabled" if d["enabled"] else "disabled")
+                       + f"; last check {when(d.get('at'))}" + (f", next {when(d['next_check'])}" if d["enabled"] else "")},
+                      {"label": "Recipients", "value": ", ".join(rcpts) or "none", "tone": None if rcpts else "warn"}],
+             "list": [{"text": f"{a.get('title')}: {a.get('detail')}", "tone": "warn"} for a in (d.get("alerts") or {}).values()],
+             "log": [{"at": r["at"], "text": f"{r['kind']}: {r['subject']}"} for r in d["log"]]}
+        if d.get("error"):
+            v["list"].insert(0, {"text": "Last error: " + str(d["error"]), "tone": "danger"})
+        if not v["list"] and d.get("at"):
+            v["list"].append({"text": "No alert is tripped.", "tone": "ok"})
+        table = []
+        for r in d.get("readings") or []:
+            if r.get("error"):
+                table.append({"cells": [r["what"], r["error"], "", ""], "tone": "danger"})
+            elif r["what"] == "library":
+                table.append({"cells": ["library", gb(r["bytes"]), ("cap " + gb(r["cap"])) if r.get("cap") else "no cap", ""]})
+            elif r["what"] == "tier":
+                table.append({"cells": ["tier " + str(r.get("name")), gb(r["actual"]) + " used",
+                                        "budget " + gb(r["budget"]), r.get("path") or ""]})
+            else:
+                table.append({"cells": [r["what"], gb(r["free"]) + " free", f"of {gb(r['total'])}, floor {gb(r['floor'])}",
+                                        r.get("path") or ""], "tone": "warn" if r["free"] < r["floor"] else None})
+        if table:
+            v["table"] = {"rows": table}
+        return v
 
     def api_check():
         """! @brief Run the check now; ?send=0 only measures."""
@@ -482,7 +511,8 @@ def register(host):
         res = run_check(send=send)
         with lock:
             d = dict(last)
-        return jsonify({"success": res is not None, **d})
+        return jsonify({"success": res is not None, **d,
+                        "message": d.get("sent") or ("Checked, nothing to send." if send else "Measured.")})
 
     def api_test():
         """! @brief Send a test mail with the settings as they are saved."""
@@ -493,11 +523,19 @@ def register(host):
             log_mail("error", "test", str(e))
             return jsonify({"success": False, "error": str(e)})
         log_mail("test", "test mail", ", ".join(rcpts))
-        return jsonify({"success": True, "recipients": rcpts})
+        return jsonify({"success": True, "recipients": rcpts, "message": "Test mail sent to " + ", ".join(rcpts)})
 
     host.add_route("/api/storage_alerts/status", api_status, feature="settings." + TAB)
     host.add_route("/api/storage_alerts/check", api_check, methods=["POST"], feature="settings." + TAB, level="write")
     host.add_route("/api/storage_alerts/test", api_test, methods=["POST"], feature="settings." + TAB, level="write")
-    host.add_asset("storage_alerts.js")
+    host.add_settings_section(TAB, "alerts", mount="storage_alerts_section", status_url="/api/storage_alerts/status",
+                              text="Buttons use the settings as saved: press Save first after changing the SMTP account.",
+                              actions=[{"id": "check", "label": "Check now", "url": "/api/storage_alerts/check",
+                                        "variant": "primary", "title": "Measure and send alerts if any trip"},
+                                       {"id": "measure", "label": "Measure only", "url": "/api/storage_alerts/check?send=0",
+                                        "variant": "neutral", "title": "Measure without sending"},
+                                       {"id": "test", "label": "Send test email", "url": "/api/storage_alerts/test",
+                                        "title": "Send a test mail with the saved settings (save first)"}])
+
     host.provide_service("storage_alerts", {"run_check": run_check, "send_mail": send_mail})
     log.info("storage_alerts module registered")

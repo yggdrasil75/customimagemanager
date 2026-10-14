@@ -28,12 +28,10 @@ MANIFEST = {
     "requires":    [],
     "pip":         [],  # zxing-cpp decodes more formats; the OpenCV path always works
     "pip_optional": ["zxing-cpp:zxingcpp"],
-    "assets":      ["barcodes.js"],
 }
 
 
 def register(host):
-    host.add_asset("barcodes.js")
 
     host.register_feature("ai.barcodes", "Scan barcodes",
                           section="ai_tooling", section_label="AI Tooling",
@@ -124,8 +122,19 @@ def register(host):
         host.set_status("Scanning for barcodes...")
         res = run(core.to_bgr(img), deep=bool(d.get("deep", True)))
         host.set_status("Ready.")
-        return jsonify({"success": True, "regions": _scan.to_regions(res),
-                        "summary": _scan.summary_text(res), **res})
+        summary = _scan.summary_text(res)
+        undec = res["detected"] - res["decoded"]
+        return jsonify({"success": True, "regions": _scan.to_regions(res), "summary": summary, **res,
+                        "description": ("Barcodes:\n" + summary) if summary else None,
+                        "message": (f"Barcodes: {res['detected']} found, {res['decoded']} decoded"
+                                    + (f" ({undec} not readable)" if undec else "")
+                                    + (f" | {res['detector']}" if res.get("detector") else "") + ".")
+                                   if res["detected"] else None})
 
     host.add_route("/api/barcodes", api_barcodes, methods=["POST"], feature="ai.barcodes", level="write")
+    host.add_button("ai_tools", "barcodes", "Scan barcodes", url="/api/barcodes", feature="ai.barcodes",
+                    variant="warn", busy="Scanning...", on_done="apply",
+                    title="Detect barcodes and QR codes with the configured YOLO model, then decode each one. "
+                          "Codes that are found but can't be read are still marked, so you keep a note of where they are.")
+
     host.logger.info("barcodes module: registered /api/barcodes")

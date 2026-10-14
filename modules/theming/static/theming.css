@@ -18,3 +18,17 @@
 .cim-btn-danger    { background-color: var(--cim-btn-danger, var(--cim-danger-700, #b91c1c)); }  .cim-btn-danger:hover:not(:disabled)    { background-color: var(--cim-btn-danger-hover, var(--cim-danger-600, #dc2626)); }
 .cim-btn-neutral   { background-color: var(--cim-gray-700, #374151); color: var(--cim-gray-200, #e5e7eb); }
 .cim-btn-neutral:hover:not(:disabled) { background-color: var(--cim-gray-600, #4b5563); }
+/* Declared tile badges (host.add_tile_badge, rendered by static/module_ui.js).
+   Drawn on a photo, so the fill stays literal; the tone picks the border. */
+.gallery-item .cim-tile-badge {
+  position: absolute; left: 4px; bottom: 4px; z-index: 3; pointer-events: none;
+  font-size: 10px; line-height: 1; padding: 2px 4px; border-radius: 4px;
+  font-weight: 700; letter-spacing: 0.04em;
+  background: rgba(17, 24, 39, 0.85); color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+}
+.gallery-item .cim-tile-badge ~ .cim-tile-badge { left: auto; right: 4px; }
+.gallery-item .cim-tile-badge-ok     { border-color: var(--cim-ok-400, #4ade80); }
+.gallery-item .cim-tile-badge-warn   { border-color: var(--cim-warn-400, #fbbf24); }
+.gallery-item .cim-tile-badge-danger { border-color: var(--cim-danger-400, #f87171); }
+.gallery-item .cim-tile-badge-accent { border-color: var(--cim-accent-400, #60a5fa); }
