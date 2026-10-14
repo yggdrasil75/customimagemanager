@@ -46,7 +46,7 @@ def _bind(host):
 
 def _segment_boxes(img, boxes: list) -> list:
     """! @brief Masks for boxes via the picked segmenter (broker 'segment.box'). Returns
-    instance dicts {class_name, cx, cy, w, h, mask_svg}; [] if none/failed."""
+    instance dicts {class_name, cx, cy, w, h, mask_svg, polygon}; [] if none/failed."""
     if not boxes:
         return []
     try:
@@ -71,7 +71,8 @@ def _segment_boxes(img, boxes: list) -> list:
         out.append({"class_name": h.get("class_name", "object"),
                     "cx": (min(xs) + max(xs)) / 2, "cy": (min(ys) + max(ys)) / 2,
                     "w": max(xs) - min(xs), "h": max(ys) - min(ys),
-                    "mask_svg": _polygon_mask_svg(poly, W, H)})
+                    "mask_svg": _polygon_mask_svg(poly, W, H),
+                    "polygon": [[float(x), float(y)] for x, y in poly]})
     return out
 
 def _attach_masks(img, regions: list) -> None:
@@ -84,6 +85,7 @@ def _attach_masks(img, regions: list) -> None:
                 best, best_iou = r, iou
         if best is not None and best_iou >= 0.5 and inst.get("mask_svg"):
             best["mask_svg"] = inst["mask_svg"]
+            best["polygon"] = inst["polygon"]
 
 
 def _polygon_mask_svg(poly, W, H):
@@ -102,7 +104,7 @@ def _polygon_mask_svg(poly, W, H):
 def _segment_image(img_bgr, classes=None) -> list:
     """! @brief Run the picked fixed-class segmenter (broker 'segment', foreground pick)
     and return region dicts {class_name, cx, cy, w, h, confirmed, mask_svg,
-    score}. classes: whitelist (None = the capability's picker whitelist;
+    conf, polygon}. classes: whitelist (None = the capability's picker whitelist;
     [] = keep all). Raises NoProviderError when nothing serves it."""
     run = HOST.broker.request("segment")
     v = HOST.broker.variant("segment")
@@ -124,7 +126,7 @@ def _segment_image(img_bgr, classes=None) -> list:
         out.append({"class_name": name, "cx": (min(xs) + max(xs)) / 2,
                     "cy": (min(ys) + max(ys)) / 2, "w": max(xs) - min(xs),
                     "h": max(ys) - min(ys), "confirmed": False, "mask_svg": svg,
-                    "score": h.get("conf")})
+                    "conf": h.get("conf"), "polygon": [[float(x), float(y)] for x, y in poly]})
     return out
 
 
@@ -148,7 +150,8 @@ def _segment_regions(bgr, query):
                 insts.append({"class_name": h.get("class_name") or query,
                               "cx": (min(xs) + max(xs)) / 2, "cy": (min(ys) + max(ys)) / 2,
                               "w": max(xs) - min(xs), "h": max(ys) - min(ys),
-                              "mask_svg": _polygon_mask_svg(poly, W, H)})
+                              "mask_svg": _polygon_mask_svg(poly, W, H), "conf": h.get("conf"),
+                              "polygon": [[float(x), float(y)] for x, y in poly]})
     except NoProviderError as e:
         access_logger.warning(f"segment: {e}")
     except Exception as e:
@@ -161,7 +164,8 @@ def _segment_regions(bgr, query):
                     "cx": inst["cx"], "cy": inst["cy"],
                     "w": inst["w"], "h": inst["h"],
                     "confirmed": False, "region_tags": [],
-                    "region_description": "", "mask_svg": inst["mask_svg"]})
+                    "region_description": "", "mask_svg": inst["mask_svg"],
+                    **{k: inst[k] for k in ("conf", "polygon", "obb") if inst.get(k) is not None}})
     for n in new:
         if n["class_name"] not in state["classes"]:
             state["classes"].append(n["class_name"])

@@ -5,6 +5,8 @@ and the mwg-rs Regions XML read / write helpers. Field tables are built with
 xmp_fields' XMPField passed in (no import cycle). Region / type structs use the
 metadataworkinggroup.com host, as existing sidecars do.
 """
+import json as _json
+import re as _re
 
 MWG_RS_NS   = "mwg-rs"
 MWG_COLL_NS = "mwg-coll"
@@ -14,7 +16,7 @@ MWG_RS_URI   = "http://www.metadataworkinggroup.com/schemas/regions/"
 MWG_ST_URI   = "http://www.metadataworkinggroup.com/schemas/regions/type/"  # stArea / stDim
 MWG_COLL_URI = "http://www.metadataworkinggroup.com/schemas/collections/"
 MWG_KW_URI   = "http://www.metadataworkinggroup.com/schemas/keywords/"
-# the app's own mwg-rs:Extensions leaves (Confirmed, masks)
+# the app's own mwg-rs:Extensions leaves (Confirmed, masks, Conf, Obb, Polygon, Pose...)
 CIM_EXT_URI  = "https://github.com/yggdrasil75/customimagemanager/ns/regions/"
 
 MWG_RS_TITLE   = "MWG Regions"
@@ -146,6 +148,21 @@ _MWG_RS_FIELDS = [
     ("RegionExtMaskCenterline", "string", True, None, None,
      "Extensions/cim:MaskCenterline - normalized SVG path for the SAM mask "
      "traced down the middle of the stairstep edges. The default mask store."),
+    ("RegionExtConf", "real", True, None, None,
+     "Extensions/cim:Conf - the detector / segmenter confidence (0..1) of an AI region."),
+    ("RegionExtObb", "string", True, None, None,
+     "Extensions/cim:Obb - an oriented box as its 4 corners 'x,y x,y x,y x,y' "
+     "(normalized, display frame); Area holds the axis-aligned bounds around them."),
+    ("RegionExtPolygon", "string", True, None, None,
+     "Extensions/cim:Polygon - the segmenter's outline 'x,y x,y ...' (normalized), "
+     "the source the mask paths were traced from."),
+    ("RegionExtPose", "string", True, None, None,
+     "Extensions/cim:Pose - JSON skeleton of the person in this region: "
+     "{n, kind, model, provider, conf, kp: [x, y, v, ...]} (normalized whole-image)."),
+    ("RegionExtNeedsReview", "bool", True, None, None,
+     "Extensions/cim:NeedsReview - the pipeline couldn't validate this region."),
+    ("RegionExtIsAnimal", "bool", True, None, None,
+     "Extensions/cim:IsAnimal - the subject is an animal."),
     ("RegionFocusUsage", "string", True, None, _RS_FOCUSUSAGE,
      "RegionStruct.FocusUsage."),
     ("RegionName", "string", True, "regions", None,
@@ -217,12 +234,84 @@ def build_mwg_kw_fields(XMPField, type_map):
     """! @brief mwg-kw fields (read; leaves fold into tags)."""
     return _build(_MWG_KW_FIELDS, XMPField, type_map, force_writable=False)
 
+# -- region extension values: geometry, confidence, skeleton --
+def points_to_text(pts, nd=5):
+    """! @brief [[x, y], ...] -> "x,y x,y ..." (normalized)."""
+    return " ".join(f"{float(p[0]):.{nd}f},{float(p[1]):.{nd}f}" for p in pts)
+
+
+def text_to_points(s):
+    """! @brief "x,y x,y ..." -> [[x, y], ...]; [] when malformed."""
+    out = []
+    for tok in str(s or "").split():
+        try:
+            x, y = tok.split(",")
+            out.append([float(x), float(y)])
+        except ValueError:
+            return []
+    return out
+
+
+def pose_to_text(pose):
+    """! @brief A region skeleton {keypoints: [{x, y, v}], kind?, model?, provider?, conf?}
+    as compact JSON for cim:Pose ('' when it has no keypoints)."""
+    if not isinstance(pose, dict):
+        return ""
+    kps = pose.get("keypoints") or []
+    flat = []
+    for k in kps:
+        try:
+            flat += [round(float(k["x"]), 4), round(float(k["y"]), 4), round(float(k.get("v", 1.0)), 3)]
+        except (KeyError, TypeError, ValueError):
+            flat += [0.0, 0.0, 0.0]
+    if not flat:
+        return ""
+    out = {"n": len(kps), "kp": flat}
+    for key in ("kind", "model", "provider"):
+        if pose.get(key):
+            out[key] = str(pose[key])
+    if pose.get("conf") is not None:
+        try:
+            out["conf"] = round(float(pose["conf"]), 4)
+        except (TypeError, ValueError):
+            pass
+    return _json.dumps(out, separators=(",", ":"))
+
+
+def text_to_pose(s):
+    """! @brief cim:Pose JSON -> {keypoints: [{x, y, v}], ...}; None when malformed."""
+    try:
+        obj = _json.loads(s)
+        flat = obj.get("kp") or []
+        kps = [{"x": flat[i], "y": flat[i + 1], "v": flat[i + 2]} for i in range(0, len(flat) - 2, 3)]
+    except (ValueError, TypeError, AttributeError, IndexError):
+        return None
+    if not kps:
+        return None
+    out = {"keypoints": kps}
+    for key in ("kind", "model", "provider", "conf"):
+        if obj.get(key) is not None:
+            out[key] = obj[key]
+    return out
+
+
+def _region_conf(b):
+    v = b.get("conf", b.get("score"))
+    try:
+        return None if v is None else max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _truthy(v):
+    return str(v).strip().lower() in ('true', '1', 'yes')
+
+
 # -- mwg-rs Regions XML --
 # Region dicts use class_name, cx, cy, w, h, confirmed, uuid,
-# region_description, region_tags. The Description JSON and the SeeAlso link
-# are app callbacks.
-import re as _re
-
+# region_description, region_tags, mask_svg, and when the producer gave them:
+# conf (score), obb (4 corners), polygon, pose (one skeleton), needs_review,
+# is_animal. The Description JSON and the SeeAlso link are app callbacks.
 def parse_region_list(xmp, desc_from_json):
     """! @brief Xmp.mwg-rs.Regions as region dicts ([] when none).
     @param desc_from_json  fn(raw) -> (description, tags).
@@ -266,6 +355,27 @@ def parse_region_list(xmp, desc_from_json):
         mask_over = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskOverscan', '') or ''
         mask_center = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskCenterline', '') or ''
         dbg = xmp.get(f'{p}/mwg-rs:Extensions/cim:Debug', '') or ''
+        extra = {}
+        raw = xmp.get(f'{p}/mwg-rs:Extensions/cim:Conf', None)
+        if raw not in (None, ''):
+            try:
+                extra["conf"] = float(raw)
+            except (TypeError, ValueError):
+                pass
+        obb = text_to_points(xmp.get(f'{p}/mwg-rs:Extensions/cim:Obb', ''))
+        if len(obb) == 4:
+            extra["obb"] = obb
+        poly = text_to_points(xmp.get(f'{p}/mwg-rs:Extensions/cim:Polygon', ''))
+        if len(poly) >= 3:
+            extra["polygon"] = poly
+        raw = xmp.get(f'{p}/mwg-rs:Extensions/cim:Pose', '')
+        pose = text_to_pose(raw) if raw else None
+        if pose:
+            extra["pose"] = pose
+        if _truthy(xmp.get(f'{p}/mwg-rs:Extensions/cim:NeedsReview', '')):
+            extra["needs_review"] = True
+        if _truthy(xmp.get(f'{p}/mwg-rs:Extensions/cim:IsAnimal', '')):
+            extra["is_animal"] = True
         regions.append({
             "class_name": rclass or rtype or inst_name or 'object',
             "region_name": inst_name,
@@ -284,6 +394,7 @@ def parse_region_list(xmp, desc_from_json):
                 "overscan": str(mask_over),
                 "centerline": str(mask_center),
             },
+            **extra,
         })
     return regions
 
@@ -335,6 +446,22 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
             _d = mask_svg.get(_meth)
             if _d:
                 ext_parts.append(f'<cim:{_tag}>{esc(str(_d))}</cim:{_tag}>')
+        conf = _region_conf(b)
+        if conf is not None:
+            ext_parts.append(f'<cim:Conf>{conf:.4f}</cim:Conf>')
+        obb = b.get("obb")
+        if isinstance(obb, (list, tuple)) and len(obb) == 4:
+            ext_parts.append(f'<cim:Obb>{esc(points_to_text(obb, 6))}</cim:Obb>')
+        poly = b.get("polygon")
+        if isinstance(poly, (list, tuple)) and len(poly) >= 3:
+            ext_parts.append(f'<cim:Polygon>{esc(points_to_text(poly))}</cim:Polygon>')
+        pose_txt = pose_to_text(b.get("pose"))
+        if pose_txt:
+            ext_parts.append(f'<cim:Pose>{esc(pose_txt)}</cim:Pose>')
+        if b.get("needs_review"):
+            ext_parts.append('<cim:NeedsReview>true</cim:NeedsReview>')
+        if b.get("is_animal"):
+            ext_parts.append('<cim:IsAnimal>true</cim:IsAnimal>')
         ext_el = ('<mwg-rs:Extensions rdf:parseType="Resource">'
                   + "".join(ext_parts) +
                   '</mwg-rs:Extensions>')

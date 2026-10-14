@@ -288,6 +288,86 @@ def orient_rect(o, rect):
             "right": max(x0, x1), "bottom": max(y0, y1)}
 
 
+def orient_mirrors(o) -> bool:
+    """! @brief True when orientation `o` mirrors the picture (2, 4, 5, 7): left and right swap."""
+    return norm_orientation(o) in (2, 4, 5, 7)
+
+
+def orient_points(o, pts) -> list:
+    """! @brief [[x, y], ...] (0..1) of the stored frame as displayed under orientation `o`."""
+    return [[round(c, 6) for c in orient_point(o, float(p[0]), float(p[1]))] for p in pts or []]
+
+
+def _pairs_to_perm(n, pairs):
+    perm = list(range(n))
+    for a, b in pairs:
+        perm[a], perm[b] = b, a
+    return perm
+
+
+_COCO17_LR = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
+# iBUG 68-point face: jaw, brows, nose base, eyes, outer and inner lips
+_FACE68_LR = ([(i, 16 - i) for i in range(8)]
+              + [(17, 26), (18, 25), (19, 24), (20, 23), (21, 22), (31, 35), (32, 34),
+                 (36, 45), (37, 44), (38, 43), (39, 42), (40, 47), (41, 46),
+                 (48, 54), (49, 53), (50, 52), (55, 59), (56, 58), (60, 64), (61, 63), (65, 67)])
+_BLAZE33_LR = [(1, 4), (2, 5), (3, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16), (17, 18),
+               (19, 20), (21, 22), (23, 24), (25, 26), (27, 28), (29, 30), (31, 32)]
+## @brief keypoint count -> index permutation that swaps left and right (a mirror).
+# 17 COCO, 133 COCO-WholeBody (body, feet, 68-pt face, hands), 33 BlazePose,
+# 543 Holistic (body and hands; the 468-point face mesh keeps its indices).
+KEYPOINT_FLIP = {
+    17: _pairs_to_perm(17, _COCO17_LR),
+    33: _pairs_to_perm(33, _BLAZE33_LR),
+    133: _pairs_to_perm(133, _COCO17_LR + [(17, 20), (18, 21), (19, 22)]
+                        + [(23 + a, 23 + b) for a, b in _FACE68_LR]
+                        + [(91 + i, 112 + i) for i in range(21)]),
+    543: _pairs_to_perm(543, _BLAZE33_LR + [(501 + i, 522 + i) for i in range(21)]),
+}
+
+
+def orient_keypoints(o, keypoints) -> list:
+    """! @brief A skeleton's [{x, y, v}] of the stored frame as displayed under `o`; a
+    mirror also swaps left / right points so labels keep naming the body side."""
+    kps = []
+    for k in keypoints or []:
+        k = dict(k)
+        try:
+            x, y = orient_point(o, float(k["x"]), float(k["y"]))
+            k["x"], k["y"] = round(x, 5), round(y, 5)
+        except (KeyError, TypeError, ValueError):
+            pass
+        kps.append(k)
+    perm = KEYPOINT_FLIP.get(len(kps)) if orient_mirrors(o) else None
+    return [kps[i] for i in perm] if perm else kps
+
+
+def obb_corners(cx, cy, w, h, angle, W, H) -> list:
+    """! @brief An oriented box (normalised centre, side lengths normalised by image
+    width / height as ultralytics' xywhr is, angle in radians) as its 4 corners [[x, y]]
+    (0..1). The rotation happens in pixels so a non-square picture doesn't skew it."""
+    pcx, pcy, pw, ph = cx * W, cy * H, w * W, h * H
+    c, s = float(np.cos(angle)), float(np.sin(angle))
+    out = []
+    for dx, dy in ((-pw / 2, -ph / 2), (pw / 2, -ph / 2), (pw / 2, ph / 2), (-pw / 2, ph / 2)):
+        out.append([round((pcx + dx * c - dy * s) / W, 6), round((pcy + dx * s + dy * c) / H, 6)])
+    return out
+
+
+def obb_angle(corners, W, H) -> float:
+    """! @brief The rotation (radians) of an oriented box along its first edge, in pixels."""
+    (x0, y0), (x1, y1) = corners[0], corners[1]
+    return float(np.arctan2((y1 - y0) * H, (x1 - x0) * W))
+
+
+def points_bounds(pts) -> dict:
+    """! @brief The axis-aligned centre-form box {cx, cy, w, h} around [[x, y]] (clamped to 0..1)."""
+    xs = [min(1.0, max(0.0, float(p[0]))) for p in pts]
+    ys = [min(1.0, max(0.0, float(p[1]))) for p in pts]
+    return {"cx": (min(xs) + max(xs)) / 2, "cy": (min(ys) + max(ys)) / 2,
+            "w": max(xs) - min(xs), "h": max(ys) - min(ys)}
+
+
 def orient_array(img, o):
     """! @brief Pixels of the stored frame as displayed under orientation `o` (numpy)."""
     o = norm_orientation(o)

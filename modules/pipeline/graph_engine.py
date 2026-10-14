@@ -426,6 +426,8 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
                         if iou > best_iou: best, best_iou = s, iou
                     if best is not None and best_iou >= 0.5:
                         best["mask_svg"] = inst["mask_svg"]
+                        if inst.get("polygon"):
+                            best["polygon"] = inst["polygon"]
             return {"subjects": subs}
         if t == "ocr":
             if not ocr_fn:

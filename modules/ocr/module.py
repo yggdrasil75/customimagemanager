@@ -37,6 +37,18 @@ def line(text, score, x1, y1, x2, y2, W, H):
             "w": round((x2 - x1) / W, 4), "h": round((y2 - y1) / H, 4)}
 
 
+def _line_region(line):
+    """! @brief One OCR line as an unconfirmed region: the class shows the start of the
+    text, the description keeps all of it, conf the recogniser's confidence."""
+    text = str(line.get("text") or "")
+    reg = {"class_name": ("text: " + text)[:48], "cx": line["cx"], "cy": line["cy"],
+           "w": line["w"], "h": line["h"], "confirmed": False, "region_tags": [],
+           "region_description": text if len("text: " + text) > 48 else ""}
+    if line.get("conf") is not None:
+        reg["conf"] = line["conf"]
+    return reg
+
+
 def register(host):
     core = host.core
     host.register_feature("ai.ocr", "OCR", section="ai_tooling", section_label="AI Tooling",
@@ -64,9 +76,7 @@ def register(host):
 
     def _action(fp, bgr, meta, action):
         res = run(bgr)
-        new = [{"class_name": ("text: " + l["text"])[:48], "cx": l["cx"], "cy": l["cy"],
-                "w": l["w"], "h": l["h"], "confirmed": False, "region_tags": [],
-                "region_description": ""} for l in res.get("lines", []) if l.get("w")]
+        new = [_line_region(l) for l in res.get("lines", []) if l.get("w")]
         if new or res.get("text"):
             core.update_file(fp, set={"regions": core.merge_regions(meta["regions"], new)},
                              add={"description": "Detected text: " + res["text"]} if res.get("text") else None,

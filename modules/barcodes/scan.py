@@ -590,6 +590,7 @@ def to_regions(result: dict, *, confirmed: bool = False) -> list[dict]:
             "region_description": desc,
             "region_tags": [{"tag": t, "generated": True, "confirmed": False}
                             for t in code_tags(c)],
+            **({"conf": c["det_conf"]} if c.get("det_conf") is not None else {}),
         })
     return regions
 

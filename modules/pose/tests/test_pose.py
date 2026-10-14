@@ -1,6 +1,7 @@
 """! @file
 @brief Pose module: /api/pose, /api/bulk_pose, /api/pose_remove, stored skeletons."""
 import pytest
+from modules.pose import skeleton as sk
 from cimtest import post_json, picked_model, picked_name, read_meta, write_meta, box
 
 
@@ -75,3 +76,34 @@ def test_real_pose_single_person(client, upload, app):
         f"{picked_name(app, 'pose')} found {len(j['pose']['people'])} skeletons in "
         f"person_single.jpg, want 1 - tests/test_fixtures.py says whether the photo or "
         f"the model is at fault")
+
+# -- skeletons on their person regions ----------------------------------------
+
+def test_pose_run_links_skeleton_to_person_region(client, upload, one_person):
+    fn = upload(seed=204)
+    write_meta(client, fn, regions=[box(class_name="person"),
+                                    box(class_name="face", region_type="Face", cx=.5, cy=.15, w=.1, h=.1),
+                                    box(class_name="tree", cx=.9, cy=.5, w=.1, h=.4)])
+    client.post("/api/pose", json={"filename": fn})
+    regs = {r["class_name"]: r for r in read_meta(client, fn)["regions"]}
+    assert len(regs["person"]["pose"]["keypoints"]) == 17
+    assert regs["person"]["pose"]["kind"] == "body" and regs["person"]["pose"]["conf"] == pytest.approx(.9)
+    assert "pose" not in regs["face"] and "pose" not in regs["tree"]
+    # removing the region's skeleton removes that person from the image-level pose too
+    idx = [r["class_name"] for r in read_meta(client, fn)["regions"]].index("person")
+    j = client.post("/api/pose_remove", json={"filename": fn, "region_index": idx}).get_json()
+    assert j["success"] and j["remaining_people"] == 0
+    m = read_meta(client, fn)
+    assert not (m.get("pose") or {}).get("people")
+    assert all("pose" not in r for r in m["regions"])
+
+
+def test_link_regions_prefers_own_box_over_group_box():
+    a = [{"x": .2 + (i % 3) * .04, "y": .1 + i * .045, "v": .9} for i in range(17)]
+    b = [{"x": .7 + (i % 3) * .04, "y": .1 + i * .045, "v": .9} for i in range(17)]
+    regions = [box(class_name="group", cx=.5, cy=.5, w=.95, h=.95),
+               box(class_name="person", cx=.25, cy=.5, w=.25, h=.85),
+               box(class_name="person", cx=.75, cy=.5, w=.25, h=.85)]
+    out, n = sk.link_regions(regions, {"kind": "body", "people": [{"keypoints": a}, {"keypoints": b}]})
+    assert n == 2 and "pose" not in out[0]
+    assert out[1]["pose"]["keypoints"] == a and out[2]["pose"]["keypoints"] == b

@@ -318,8 +318,12 @@ def _parse_yolo_result(r, H, W, keep_classes, as_obb):
             pts = obb.xyxyxyxy[i].cpu().numpy().reshape(-1, 2)
             x1, y1 = pts[:, 0].min() / W, pts[:, 1].min() / H
             x2, y2 = pts[:, 0].max() / W, pts[:, 1].max() / H
+            # the axis-aligned bounds are the box; the rotated corners and the
+            # confidence ride along so a stored region keeps them
             out.append({"class_name": name, "cx": (x1 + x2) / 2,
-                        "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1})
+                        "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1,
+                        "conf": float(obb.conf[i]) if obb.conf is not None else 0.0,
+                        "obb": [[round(float(x) / W, 6), round(float(y) / H, 6)] for x, y in pts]})
         return out
     if r.boxes is not None:
         names = r.names

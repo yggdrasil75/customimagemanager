@@ -341,6 +341,8 @@ def execute(tool, params, img, st, hooks, llm, known_text):
         for s, inst in zip(st.subjects, insts):
             if inst and inst.get("mask_svg"):
                 s["mask_svg"] = inst["mask_svg"]
+                if inst.get("polygon"):
+                    s["polygon"] = inst["polygon"]
                 n += 1
         return "masks on %d of %d subjects" % (n, len(st.subjects))
     if tool == "each_subject":

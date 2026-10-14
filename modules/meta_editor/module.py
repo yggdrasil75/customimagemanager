@@ -117,8 +117,22 @@ def _turn_path(d, op):
     return " ".join(out)
 
 
+def turn_pose(pose, op):
+    """! @brief A pose dict ({people: [{keypoints}]} or one {keypoints} skeleton) turned by
+    `op`; a mirror swaps left / right points (common.orient_keypoints)."""
+    if not isinstance(pose, dict):
+        return pose
+    pose = dict(pose)
+    if isinstance(pose.get("keypoints"), list):
+        pose["keypoints"] = common.orient_keypoints(op, pose["keypoints"])
+    if isinstance(pose.get("people"), list):
+        pose["people"] = [turn_pose(p, op) for p in pose["people"]]
+    return pose
+
+
 def turn_region(b, op):
-    """! @brief A region dict (cx, cy, w, h normalised; mask_svg paths) turned by `op`."""
+    """! @brief A region dict (cx, cy, w, h normalised; mask_svg paths, polygon, oriented
+    box corners and its skeleton) turned by `op`."""
     b = dict(b)
     try:
         cx, cy, w, h = float(b["cx"]), float(b["cy"]), float(b["w"]), float(b["h"])
@@ -131,6 +145,11 @@ def turn_region(b, op):
     m = b.get("mask_svg")
     if isinstance(m, dict):
         b["mask_svg"] = {k: (_turn_path(v, op) if isinstance(v, str) else v) for k, v in m.items()}
+    for k in ("polygon", "obb"):
+        if isinstance(b.get(k), list):
+            b[k] = common.orient_points(op, b[k])
+    if b.get("pose"):
+        b["pose"] = turn_pose(b["pose"], op)
     return b
 
 
@@ -407,8 +426,14 @@ def register(host):
             return "this file format keeps no EXIF orientation"
         meta = core.read_metadata(fp)
         regions = meta.get("regions") or []
+        pose = meta.get("pose") or {}
+        turned = {}
         if regions:
-            host.update_file(rel, set={"regions": [turn_region(b, op) for b in regions]})
+            turned["regions"] = [turn_region(b, op) for b in regions]
+        if pose.get("people"):
+            turned["pose"] = turn_pose(pose, op)      # skeletons follow the picture
+        if turned:
+            host.update_file(rel, set=turned)
         if common.orient_swaps(op):
             row = host.db().execute("SELECT width, height FROM files WHERE rel_path=?",
                                     (rel,)).fetchone()

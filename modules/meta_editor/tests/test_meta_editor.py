@@ -4,6 +4,7 @@ import io
 import time
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from cimtest import box, media_path, read_meta, write_meta
@@ -210,3 +211,38 @@ def test_native_jpeg_rotate_and_location(client, host, upload):
     with Image.open(media_path(fn)) as im:
         gps = im.getexif().get_ifd(0x8825)
     assert gps.get(1) == "N" and gps.get(3) == "W"
+
+
+def test_rotate_and_mirror_carry_pose_polygon_and_obb(client, host, upload):
+    fn = upload(seed=4302, name="rotpose.png", folder=FOLDER)
+    kps = [{"x": round(.2 + (i % 4) * .02, 4), "y": round(.1 + i * .04, 4), "v": .9} for i in range(17)]
+    reg = box(class_name="person", cx=.25, cy=.45, w=.2, h=.8, confirmed=True,
+              polygon=[[.2, .1], [.3, .1], [.3, .8]], obb=[[.2, .1], [.3, .1], [.3, .8], [.2, .8]],
+              pose={"kind": "body", "keypoints": kps})
+    host.update_file(fn, set={"regions": [reg], "pose": {"kind": "body", "people": [{"keypoints": kps}]}})
+    assert _post(client, "/api/meta_editor/rotate", {"filenames": [fn], "direction": "right"})["success"]
+    m = read_meta(client, fn)
+    r = m["regions"][0]
+    # a quarter turn clockwise: (x, y) -> (1 - y, x)
+    assert r["polygon"][0] == [pytest_approx(.9), pytest_approx(.2)]
+    assert r["obb"][2] == [pytest_approx(.2), pytest_approx(.3)]
+    k5 = r["pose"]["keypoints"][5]
+    assert (k5["x"], k5["y"]) == (pytest_approx(1 - kps[5]["y"]), pytest_approx(kps[5]["x"]))
+    i5 = m["pose"]["people"][0]["keypoints"][5]
+    assert (i5["x"], i5["y"]) == (k5["x"], k5["y"]), "the image-level skeleton turns too"
+    # a mirror swaps left / right: left_shoulder now holds the mirrored right_shoulder
+    assert _post(client, "/api/meta_editor/rotate", {"filenames": [fn], "direction": "flip"})["success"]
+    r2 = read_meta(client, fn)["regions"][0]
+    k6 = r["pose"]["keypoints"][6]
+    assert r2["pose"]["keypoints"][5]["x"] == pytest_approx(1 - k6["x"])
+    assert r2["pose"]["keypoints"][5]["y"] == pytest_approx(k6["y"])
+    assert _post(client, "/api/meta_editor/rotate", {"filenames": [fn], "direction": "flip"})["success"]
+    assert _post(client, "/api/meta_editor/rotate", {"filenames": [fn], "direction": "left"})["success"]
+    back = read_meta(client, fn)["regions"][0]
+    assert back["polygon"] == [[pytest_approx(x), pytest_approx(y)] for x, y in reg["polygon"]]
+    assert [(k["x"], k["y"]) for k in back["pose"]["keypoints"]] == \
+        [(pytest_approx(k["x"]), pytest_approx(k["y"])) for k in kps]
+
+
+def pytest_approx(v):
+    return pytest.approx(v, abs=2e-4)

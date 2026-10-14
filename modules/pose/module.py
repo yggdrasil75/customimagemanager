@@ -65,7 +65,9 @@ def _estimate(host, img_bgr, detect=None):
         return base
     try:
         people = detect(img_bgr)          # canonical: [{keypoints:[{x,y,v}], conf}]
-        base["people"] = [{"keypoints": p.get("keypoints", [])} for p in people]
+        base["people"] = [{"keypoints": p.get("keypoints", []),
+                           **({"conf": round(float(p["conf"]), 4)} if p.get("conf") is not None else {})}
+                          for p in people]
         base["provider"] = host.broker.selected_id("pose") or ""
         if base["people"]:
             kind, names, edges = _pose_core.topology(max(len(p["keypoints"]) for p in base["people"]))
@@ -150,6 +152,20 @@ def register(host):
     host.add_table("CREATE TABLE IF NOT EXISTS pose_runs("
                    "rel_path TEXT PRIMARY KEY, model TEXT, people INTEGER, updated REAL)", kind="cache")  # progress marker; the pose itself is in the sidecar
 
+    def _store(fp, pose_data):
+        """! @brief Write a pose run: the image-level skeletons, and each one on the
+        body region it belongs to (region pose, cim:Pose in the sidecar)."""
+        if not pose_data.get("people"):
+            # nothing found: the stored skeletons stay, as they always have
+            core.update_file(fp, set={"pose": pose_data})
+            return
+        meta = core.read_metadata(fp)
+        regions, _ = _pose_core.link_regions(meta.get("regions") or [], pose_data)
+        new = {"pose": pose_data}
+        if any(a.get("pose") != b.get("pose") for a, b in zip(meta.get("regions") or [], regions)):
+            new["regions"] = regions
+        core.update_file(fp, set=new, meta=meta)
+
     def _mark(rel, pose_data, model=None):
         model = model or host.broker.selected_id("pose") or ""
         host.update_file(rel, table="pose_runs", dont_write=True,
@@ -171,7 +187,7 @@ def register(host):
         pose_data = _estimate(host, core.to_bgr(img), detect=handle)
         if pose_data.get("note") and not pose_data.get("people"):
             raise RuntimeError(pose_data["note"])
-        core.update_file(fp, set={"pose": pose_data})
+        _store(fp, pose_data)
         _mark(rel, pose_data, host.broker.selected_id("pose", "bg"))
     host.add_background_sweep("pose", _bg_pending, _bg_run)
 
@@ -186,7 +202,7 @@ def register(host):
             return jsonify({"success": False, "error": "Decode failed."})
         host.set_status("Estimating pose...")
         pose_data = _estimate(host, core.to_bgr(img))
-        core.update_file(fp, set={"pose": pose_data})
+        _store(fp, pose_data)
         _mark(fn, pose_data)
         host.set_status("Ready.")
         if not pose_data.get("people"):
@@ -209,7 +225,7 @@ def register(host):
                 if img is None:
                     errors.append(fn); continue
                 pose_data = _estimate(host, core.to_bgr(img))
-                core.update_file(fp, set={"pose": pose_data})
+                _store(fp, pose_data)
                 _mark(fn, pose_data)
                 if (pose_data or {}).get("people"):
                     posed += 1
@@ -244,12 +260,12 @@ def register(host):
         regions = [dict(r) for r in meta["regions"]]
         if ri < 0 or ri >= len(regions):
             return jsonify({"success": False, "error": "region_index out of range."})
-        regions[ri].pop("pose", None)
-        people = [r["pose"] for r in regions if r.get("pose")]
-        new_pose = {"kind": "body", "people": people} if people else {"clear": True}
+        gone = regions[ri].pop("pose", None)
+        new_pose = _pose_core.drop_person(meta.get("pose"), (gone or {}).get("keypoints") or []) \
+            if gone else (meta.get("pose") or {"clear": True})
         core.update_file(fp, set={"regions": regions, "pose": new_pose}, meta=meta)
         return jsonify({"success": True, "cleared": ri,
-                        "remaining_people": len(people)})
+                        "remaining_people": len(new_pose.get("people") or [])})
 
     # All three run/store/remove skeletons, so they require WRITE on ai.pose.
     # (ai.pose_remove no longer exists as a separate key - it collapsed into

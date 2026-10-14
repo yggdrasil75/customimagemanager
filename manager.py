@@ -1715,10 +1715,13 @@ def _read_mm_tag(xmp_path, tag):
         if not os.path.exists(xmp_path):
             return None
         text = _read_text_loose(xmp_path) or ""
-        m = re.search(rf'<mm:{tag}>(.*?)</mm:{tag}>', text, re.DOTALL)
+        # element form as written here, or attribute form (mm:tag="...") as exiv2
+        # writes it back after any EXIF / XMP patch to the sidecar
+        m = (re.search(rf'<mm:{tag}>(.*?)</mm:{tag}>', text, re.DOTALL)
+             or re.search(rf'\bmm:{tag}\s*=\s*"([^"]*)"', text))
         if not m:
             return None
-        return json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
+        return json.loads(base64.b64decode(m.group(1).strip()).decode("utf-8"))
     except Exception as e:
         access_logger.warning(f"_read_mm_tag({tag}) {xmp_path}: {e}")
         return None
@@ -2891,6 +2894,39 @@ def _foreign_xmp_xml(xmp_path: str) -> str:
             out.append(ET.tostring(child, encoding="unicode"))
     return "".join(out)
 
+def _display_dims(filepath):
+    """! @brief A picture's displayed (width, height): its files row, else a decode. (0, 0) when unknown."""
+    try:
+        r = _db().execute("SELECT width, height FROM files WHERE rel_path=?", (_rel(filepath),)).fetchone()
+        if r and r["width"] and r["height"]:
+            return int(r["width"]), int(r["height"])
+    except Exception:
+        pass
+    img = read_jxl(filepath)
+    return (int(img.shape[1]), int(img.shape[0])) if img is not None else (0, 0)
+
+def _settle_obb(filepath, regions):
+    """! @brief Regions holding an oriented box as (cx, cy, w, h, angle) - a detector's
+    xywhr - get its 4 corners (`obb`) and the axis-aligned bounds as their box, so the
+    box every reader draws is right and the rotation survives the sidecar."""
+    if not regions or not any(isinstance(b, dict) and b.get("angle") is not None and not b.get("obb")
+                              for b in regions):
+        return regions
+    W, H = _display_dims(filepath)
+    for b in regions:
+        # in place: the caller reads the uuids the writer fills in off these dicts
+        if not isinstance(b, dict) or b.get("angle") is None:
+            continue
+        if not b.get("obb") and W and H:
+            try:
+                corners = common.obb_corners(float(b["cx"]), float(b["cy"]), float(b["w"]),
+                                             float(b["h"]), float(b["angle"]), W, H)
+                b.update(common.points_bounds(corners), obb=corners)
+            except (KeyError, TypeError, ValueError):
+                pass
+        b.pop("angle", None)
+    return regions
+
 def write_metadata(filepath: str, tags: list, description: str, regions: list,
                    analysis: dict | None = None, flag: dict | None = None,
                    pose: dict | None = None, page_count: int | None = None,
@@ -2907,6 +2943,7 @@ def write_metadata(filepath: str, tags: list, description: str, regions: list,
                 _rel(filepath))
         except Exception:
             pass
+        regions = _settle_obb(filepath, regions)
         _sync_yolo(filepath, regions)
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
         if albums is None:
@@ -3833,6 +3870,11 @@ def _background_instances(img_bgr) -> list:
                 continue
             inst = {"class_name": name, "cx": h["cx"], "cy": h["cy"], "w": h["w"],
                     "h": h["h"], "conf": h.get("conf")} if "cx" in h else None
+            if inst is not None and h.get("angle") is not None:
+                # an oriented box: xywhr in, corners + bounds out (the region writer
+                # would settle it too, but the mask pass below wants the bounds now)
+                corners = common.obb_corners(h["cx"], h["cy"], h["w"], h["h"], float(h["angle"]), W, H)
+                inst.update(common.points_bounds(corners), obb=corners)
             if cap == "segment":
                 poly = h.get("mask") or []
                 if not poly:
@@ -3847,8 +3889,6 @@ def _background_instances(img_bgr) -> list:
     # polygons become mask_svg in the segmentation module; without it, boxes only
     for _ in module_host.emit("regions.masks", instances=out, width=W, height=H):
         pass
-    for inst in out:
-        inst.pop("polygon", None)
     return out
 
 def _fold_background(insts, person_regions, out):
@@ -3864,12 +3904,15 @@ def _fold_background(insts, person_regions, out):
                     best, best_iou = r, iou
             if best is not None and best_iou >= 0.5:
                 best["mask_svg"] = inst["mask_svg"]
+                if inst.get("polygon"):
+                    best["polygon"] = inst["polygon"]
                 continue
         reg = {"class_name": inst.get("class_name", "object"), "region_name": "",
                "cx": inst["cx"], "cy": inst["cy"], "w": inst["w"], "h": inst["h"],
                "confirmed": False, "region_tags": [], "region_description": ""}
-        if inst.get("mask_svg"):
-            reg["mask_svg"] = inst["mask_svg"]
+        for k in ("mask_svg", "conf", "polygon", "obb"):
+            if inst.get(k) is not None:
+                reg[k] = inst[k]
         (person_regions if reg["class_name"] == "person" else out).append(reg)
 
 def _folder_scope_clause(column: str, folder: str, recursive: bool = False) -> tuple[list, list]:

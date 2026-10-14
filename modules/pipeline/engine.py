@@ -408,6 +408,8 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                 cb = _clamp(b)
                 if cb:
                     cb["class_name"] = b.get("class_name", "person")
+                    if b.get("conf") is not None:
+                        cb["conf"] = b["conf"]
                     clamped.append(cb)
             matched = match_pose_boxes(clamped, pose, unmatched_box=unmatched,
                                        contain_thresh=node.get("contain_thresh", 0.4))
@@ -426,6 +428,7 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
 
         return pose, [{
             "box": {k: m["box"][k] for k in ("cx", "cy", "w", "h")},
+            "conf": m["box"].get("conf"),
             "label": m["class_name"],
             "pose": m.get("pose"),
             "needs_review": m.get("needs_review", False),
@@ -566,6 +569,8 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                             best, best_iou = s, iou
                     if best is not None and best_iou >= 0.5:
                         best["mask_svg"] = inst["mask_svg"]
+                        if inst.get("polygon"):
+                            best["polygon"] = inst["polygon"]
                 _report(f"segment: masked {sum(1 for s in subs if s.get('mask_svg'))}"
                         f"/{len(subs)} subject(s)")
             elif not seg_fn:

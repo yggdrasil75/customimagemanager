@@ -12,8 +12,8 @@
         const regs=d.regions||[];
         if(!regs.length){ showToast(d.note||'No objects segmented.'); }
         else{
-          regs.forEach(r=>currentRegions.push({class_name:r.class_name,
-            cx:r.cx,cy:r.cy,w:r.w,h:r.h,confirmed:false,mask_svg:r.mask_svg}));
+          // keep everything the server made (conf, polygon) so the save writes it
+          regs.forEach(r=>currentRegions.push({...r,confirmed:false}));
           drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
           renderRegionsList(); triggerAutosave();
           showToast(`Segment: ${regs.length} region(s) added.`);

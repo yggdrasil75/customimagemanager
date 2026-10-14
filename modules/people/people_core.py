@@ -126,12 +126,13 @@ def _face_regions_for(img, rel: str) -> list:
         out.append({"class_name": "face", "region_name": "",
                     "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
                     "confirmed": False, "region_tags": [], "region_description": "",
-                    "_drawn": b.get("_drawn")})
+                    "conf": b.get("conf"), "_drawn": b.get("_drawn")})
     person_regions = []
     for b in _run_person(img):
         person_regions.append({"class_name": "person", "region_name": "",
                     "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
-                    "confirmed": False, "region_tags": [], "region_description": ""})
+                    "confirmed": False, "region_tags": [], "region_description": "",
+                    "conf": b.get("conf")})
 
     _fold_background(_background_instances(img), person_regions, out)
 
@@ -168,7 +169,8 @@ def _face_regions_for_batch(imgs, rels, face_run=None, person_run=None,
             results[i].append({"class_name": "face", "region_name": "",
                                "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
                                "confirmed": False, "region_tags": [],
-                               "region_description": "", "_drawn": b.get("_drawn")})
+                               "region_description": "", "conf": b.get("conf"),
+                               "_drawn": b.get("_drawn")})
 
     # People - the picked 'detect.persons' provider, batched when it can.
     try:
@@ -188,7 +190,8 @@ def _face_regions_for_batch(imgs, rels, face_run=None, person_run=None,
             person_regions_per[i].append({"class_name": "person", "region_name": "",
                                           "cx": b["cx"], "cy": b["cy"],
                                           "w": b["w"], "h": b["h"], "confirmed": False,
-                                          "region_tags": [], "region_description": ""})
+                                          "region_tags": [], "region_description": "",
+                                          "conf": b.get("conf")})
 
     # Region-shaped background capabilities (detect/segment, Models tab) ride
     # the face pass - per image; ponytail: no batch API on handles.
