@@ -1,4 +1,4 @@
-/* upscale.js - the Upscale module (modules/upscale).
+/* upscale.js - the Upscale module (modules/esrgan).
  * An "Upscale" button in the viewer's AI tools and the gallery bulk bar opens a
  * small dialog (factor, output); jobs run on the server and show in a progress
  * panel until they finish. Settings -> Upscale gains the weight files (stock and

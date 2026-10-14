@@ -86,9 +86,7 @@ def register(host):
 
     def shape(res):
         """! @brief A run's result as editor fields: regions, description, note."""
-        lines = [{"class_name": ("text: " + l["text"])[:48], "cx": l["cx"], "cy": l["cy"], "w": l["w"], "h": l["h"],
-                  "confirmed": False, "region_tags": [], "region_description": ""}
-                 for l in res.get("lines", []) if l.get("w")]
+        lines = [_line_region(l) for l in res.get("lines", []) if l.get("w")]
         out = {"regions": lines}
         if res.get("text"):
             out["description"] = "Detected text: " + res["text"]

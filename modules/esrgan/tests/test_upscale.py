@@ -14,8 +14,8 @@ import torch
 
 import model_registry
 from cimtest import media_path, signed_in_as
-from modules.upscale import esrgan_arch, jobs as jobs_mod, upscaler
-from modules.upscale import module as um
+from modules.esrgan import esrgan_arch, jobs as jobs_mod, upscaler
+from modules.esrgan import module as um
 
 
 def _rrdb(nb=1, nf=8, gc=4, n_up=2, unshuffle=1):
