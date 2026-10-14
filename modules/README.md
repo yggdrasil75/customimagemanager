@@ -134,6 +134,8 @@ module registers: `read_image`,
 `upload_spool_dir`, `upload_workers_wake`, `api_upload`, `auth`, `features`,
 `object_grouping`, `files_where` (the gallery's WHERE for a `q` / folder /
 album: `(where_sql, params, text, structured)`, so a view lists what the grid would),
+`library_section(rel)` / `section_folders(id)` / `section_clause(id, column=)` (see
+"Library sections"),
 `file_data(rel, key=None)` / `set_file_data(rel, key, value)` (per-file module
 data in the file's XMP, see "Where data lives"), `start_sync(mode)` /
 `sync_status()` (the library sync job), `image_adjust(abs_path)` -> `{orientation,
@@ -181,6 +183,7 @@ touching `media_types.py`.
 | `host.register_pipeline_stage(name, fn, label=)` | an AI-pipeline node type |
 | `host.register_action_target(name, fn)` | an AI-action target (`fn(fp, bgr, meta, action)`) |
 | `host.register_gallery_filter(clause)` | hide container members (comic pages) from the flat gallery |
+| `host.register_library_section(id, label=, kinds=, per_user=True)` | own a top-level library folder with a fixed meaning (music, movies, tv); see "Library sections" |
 | `host.extend_media_type(kind, exts=, mime_map=)` | add extensions to a kind another module owns (comics -> book) |
 | `host.add_worker_source(name, claim, handle, ...)` | a background worker source |
 | `host.register_controls_pane(tab_id, template, feature=, label=, mode_tab=, loader=)` / `register_left_pane(template, tab_id=, label=, feature=, controls_tab=)` / `register_centre_pane` / `register_app_modal` | server-rendered UI partials from your `templates/`; with a label / tab_id the tab that shows the pane is declared too |
@@ -237,7 +240,7 @@ The core emits, modules react; the core never names a module.
 | `library.reconcile` | - | after the image index scan (and after every sync) |
 | `library.sync` | `direction, rel_paths` | a sync (Sync button, `/api/sync`): `"push"` = write what only your tables hold into the files (rel_paths None); `"pull"` = rebuild your mirrored tables from the files, for `rel_paths` (the re-indexed files) or every file when None (a full sync) |
 | `file.index` | `rel_path, abs_path, force` -> truthy if handled | index a file of a kind you own; core skips its image path |
-| `upload.check` | `folder, filename, size` -> a reason string to refuse | veto an upload before it is written (quotas); the client gets 413. A chunked upload (`POST /api/upload/session`) asks once, with the full size, before any byte arrives |
+| `upload.check` | `folder, filename, size` -> a reason string to refuse | veto an upload before it is written (quotas); the client gets 413. A chunked upload (`POST /api/upload/session`) asks once, with the full size, before any byte arrives. |
 | `upload.duplicate_check` | `sha, filename` -> existing rel_path or None | veto an upload as a duplicate |
 | `upload.before_convert` | `spool_path, filename, rel_path` | the spooled original before it is converted (and `rel_path` it will be stored as); keep what conversion drops (motion photos extract their video) |
 | `upload.stored` | `rel_path, filename` | index a file you own after upload |
@@ -254,6 +257,59 @@ The core emits, modules react; the core never names a module.
 
 `emit()` returns every non-None handler result; the books module answers
 `upload.duplicate_check`, dedup answers `file.deleted`.
+
+### Library sections
+
+A library section is a top-level folder with a fixed meaning: public at
+`<media>/<id>` and, per user, at `<media>/users/<name>/<id>` (the ownership
+module's personal folders). The module that owns a kind of library declares it
+once, in `register(host)`:
+
+```python
+host.register_library_section("music", label="Music", kinds={"audio", "video", "image", "book"},
+                              sidecars={".cue", ".log", ".m3u", ".m3u8", ".nfo"})
+#   id: the folder name (lower-case letters, digits, underscore)
+#   kinds: the media kinds (input_kind names: audio, image, video, book) the module
+#          indexes as its items; informational, nothing is refused
+#   sidecars: non-media extensions that belong beside the items
+#   per_user=False: no users/<name>/<id> folders
+```
+
+Nothing uploaded into a section is refused: the point is that a library kept by
+another app (Plex) imports as it is. A sidecar, or a file of a type the app does
+not handle, is stored as sent next to its item (never converted, never rejected;
+`upload.stored` tells the module), and a filename keeps its spaces and brackets
+inside a section because the layout is the name. Media of another kind is stored
+and indexed by the core as usual (a video in `music/` is a music video, a plain
+library file, not a track). With the module off, the folder is an ordinary folder.
+
+What the core does with it:
+
+- one gallery filter hides every registered section's rows from the plain
+  gallery grid and the folder list (the section's own tab shows them); the files
+  are still indexed, served and searched as usual, so a section module never
+  registers a gallery filter of its own;
+- `GET /api/sections` -> `{"sections": [{"id", "label", "kinds", "sidecars",
+  "per_user", "folders"}]}` lists them for the page and `upload.py --dest <section>`;
+- `host.core.library_section(rel)` -> `(section_id, username, inner_rel)`: the
+  section a path is in, its owner for a `users/<name>/<id>` path (None for the
+  public one) and the path relative to the section folder
+  (`"Artist/Album/01.flac"`); `(None, None, None)` outside every section;
+- `host.core.section_folders(id)` -> `["music", "users/ann/music", ...]`, the
+  section's folders that exist on disk (what an indexer walks);
+- `host.core.section_clause(id, column="rel_path")` -> `(sql, params)`, the rows
+  of a table inside the section (public and per-user), exact on path segments.
+
+The music module is the reference: audio counts as a track only inside a music
+section (a `.flac` elsewhere is claimed by `file.index` but not indexed, a
+video never is), `index_all` walks `section_folders("music")`, and the folders
+of the Plex layout (`Artist/Album/01 - Track.flac`) carry the album art (any
+image in the album folder, `cover.jpg` / `folder.jpg` first), the artist picture
+(an image in the artist folder) and descriptions (a book-kind file in either),
+exposed on `/api/music/albums` (`folder`, `art_rel`, `description_rel`,
+`description`) and `/api/music/artists` (`folder`, `picture_rel`,
+`description_rel`, `description`). Movies and TV are laid out the same way
+(`Title (Year)/Title (Year).mkv`, `Show (Year)/Season 01/Show - s01e01 - Title.mkv`).
 
 ### Services
 

@@ -922,6 +922,14 @@ def _same_source_upload(existing_rel, orig_name):
         return bool(existing_raw) and existing_raw.strip().lower() == orig_name.strip().lower()
     return not existing_raw
 
+def _library_sha256(rel_path):
+    """! @brief The stored sha256 of a library file (the `files` row), or None."""
+    try:
+        row = _db().execute("SELECT sha256 FROM files WHERE rel_path=?", (rel_path,)).fetchone()
+        return row["sha256"] if row and row["sha256"] else None
+    except Exception:
+        return None
+
 def _existing_upload(pred_rel, orig_name):
     """! @brief The library file an upload is a re-send of: the one stored under its
     predicted name, or under the '<base>_<n>' the upload took because a different
@@ -3929,6 +3937,28 @@ def _folder_scope_clause(column: str, folder: str, recursive: bool = False) -> t
         return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
     return [], []
 
+def _library_section(rel_path: str) -> tuple:
+    """! @brief (section_id, username, inner_rel) of a path in a registered library
+    section (host.register_library_section), else (None, None, None)."""
+    return mt.library_section(rel_path)
+
+def _section_folders(section_id: str) -> list:
+    """! @brief The section's folders that exist on disk: ["music", "users/ann/music", ...]."""
+    return mt.section_folders(section_id, MEDIA_DIR)
+
+def _section_clause(section_id: str, column: str = "rel_path") -> tuple:
+    """! @brief (sql, params) selecting the rows of `column` inside a section."""
+    return mt.section_clause(section_id, column)
+
+def _sections_reply() -> list:
+    """! @brief The registered sections for GET /api/sections: [{id, label, kinds, folders}]."""
+    out = []
+    for sid, spec in sorted(mt.library_sections().items()):
+        out.append({"id": sid, "label": spec["label"], "kinds": sorted(spec["kinds"]),
+                    "sidecars": sorted(spec.get("sidecars") or ()),
+                    "per_user": bool(spec["per_user"]), "folders": _section_folders(sid)})
+    return out
+
 def _recursive_arg() -> bool:
     """! @brief The request's `recursive=1` (folder scope includes subfolders); False outside a request."""
     if not has_request_context():
@@ -4502,6 +4532,13 @@ def branding_logo():
                 return send_file(os.path.join(brand_dir, name))
     return ("", 404)
 
+@app.route("/api/sections")
+def api_sections():
+    """! @brief The library sections modules registered (music, movies, tv): id, label,
+    the media kinds each accepts and its folders on disk. Read-only; any signed-in
+    user (the page's tabs and upload.py --dest use it)."""
+    return jsonify({"success": True, "sections": _sections_reply()})
+
 @app.route("/api/folders")
 @_auth.require_feature("tab.gallery")
 def api_folders():
@@ -4957,6 +4994,9 @@ def _process_spooled_inline(spool_path, orig_name, folder, metadata):
     except OSError as e:
         # spool gone: transient; queueing will notice too
         return "retry", {"error": f"spool missing: {e}"}, 503
+    # the sha of the bytes as sent: a client that deletes its copy after a
+    # receipt (upload.py --delete-source) compares it with its own
+    source_sha = hashlib.sha256(data).hexdigest()
 
     # the queue worker's pipeline, keeping its full JSON receipt
     ctx = app.test_request_context("/api/upload", method="POST",
@@ -4972,6 +5012,9 @@ def _process_spooled_inline(spool_path, orig_name, folder, metadata):
         try: os.remove(spool_path)
         except OSError: pass
         payload.setdefault("queued", False)
+        payload.setdefault("source_sha256", source_sha)
+        if payload.get("duplicate") and payload.get("existing_file"):
+            payload.setdefault("existing_sha256", _library_sha256(payload["existing_file"]))
         return "done", payload, code
 
     ecode = payload.get("error_code") or ""
@@ -4982,6 +5025,7 @@ def _process_spooled_inline(spool_path, orig_name, folder, metadata):
         existing = payload.get("existing_file") or payload.get("filename")
         return "done", {"success": True, "queued": False, "duplicate": True,
                         "filename": existing, "existing_file": existing,
+                        "existing_sha256": _library_sha256(existing), "source_sha256": source_sha,
                         "error_code": ecode}, 200
     if ecode in _TERMINAL_UPLOAD_CODES:
         # bad file: final
@@ -5015,7 +5059,7 @@ def api_upload():
         return jsonify({"success": False, "error_code": "bad_folder",
                         "error": "Folder path is outside media directory."}), 400
 
-    orig_name = mt.clean_filename(file.filename) or "upload.bin"
+    orig_name = mt.clean_filename(file.filename, folder=folder) or "upload.bin"
     metadata  = request.form.get("metadata", "{}") or "{}"
     pred      = _predicted_rel(tdir, orig_name)
 
@@ -5034,7 +5078,8 @@ def api_upload():
     existing = _existing_upload(pred, orig_name)
     if existing:
         return jsonify({"success": True, "queued": False, "duplicate": True,
-                        "filename": existing, "existing_file": existing}), 200
+                        "filename": existing, "existing_file": existing,
+                        "existing_sha256": _library_sha256(existing)}), 200
 
     # always spool first: inline stays crash-safe and can fall back to the queue
     try:
@@ -5203,7 +5248,7 @@ def _run_upload():
                         "error": f"Folder path is outside media directory."}), 400
     os.makedirs(tdir, exist_ok=True)
 
-    fname    = mt.clean_filename(file.filename)
+    fname    = mt.clean_filename(file.filename, folder=folder)
     in_ext   = os.path.splitext(fname)[1].lower()
     unknown_type = in_ext not in mt.UPLOAD_EXTS
     # the original extension when the content said otherwise
@@ -5217,6 +5262,25 @@ def _run_upload():
         # an archive (.zip .rar .7z .tar...) is unpacked and its contents uploaded one by one
         if media_encoding.is_archive_name(fname):
             return _expand_uploaded_archive(orig, fname, folder)
+
+        # inside a library section a sidecar (a movie's .nfo, its subtitles, an album's
+        # .cue) or any file of a type the app does not handle is stored as sent next to
+        # its item, never converted or rejected: another app's library imports whole.
+        # The section's module reads what it wants (upload.stored).
+        sid = mt.library_section(f"{folder}/{fname}" if folder else fname)[0]
+        if sid and (in_ext in (mt.library_sections().get(sid) or {}).get("sidecars", ())
+                    or (unknown_type and mt.sniff_ext(orig) is None)):
+            out = os.path.join(tdir, fname)
+            if os.path.exists(out):
+                rel_path = _rel(out)
+                return jsonify({"success": True, "queued": False, "duplicate": True,
+                                "filename": rel_path, "existing_file": rel_path,
+                                "existing_sha256": _sha256(out)}), 200
+            shutil.move(orig, out)
+            rel_path = _rel(out)
+            module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
+            return jsonify({"success": True, "queued": False, "filename": rel_path,
+                            "sidecar": True, "sha256": _sha256(out)}), 200
 
         # Always check the extension against the bytes: a JPEG named .png has a
         # valid-looking extension and would make cjxl fail.
@@ -6229,7 +6293,7 @@ def api_upload_session_create():
     if not tdir:
         return jsonify({"success": False, "error_code": "bad_folder",
                         "error": "Folder path is outside media directory."}), 400
-    orig_name = mt.clean_filename(str(d.get("filename") or "")) or "upload.bin"
+    orig_name = mt.clean_filename(str(d.get("filename") or ""), folder=folder) or "upload.bin"
     for reason in module_host.emit("upload.check", folder=folder, filename=orig_name, size=size):
         if reason:
             return jsonify({"success": False, "error_code": "refused", "error": str(reason)}), 413
@@ -8028,6 +8092,8 @@ _core_api = SimpleNamespace(
     run_bulk=run_bulk, resolve_bulk=_resolve_bulk, bulk_reply=_bulk_reply,
     detect_boxes=_detect_obb_or_box, refresh_model_groups=populate_model_selector,
     meta_cache_drop=_meta_cache_drop, folder_scope_clause=_folder_scope_clause,
+    library_section=_library_section, section_folders=_section_folders,
+    section_clause=_section_clause, library_sections=mt.library_sections,
     api_upload=api_upload, auth=_auth, authmgr=_authmgr, features=features, save_classes=save_classes,
     model_key=_yolo_key, merge_regions=_merge_regions,
     read_image=read_jxl, to_bgr=_to_bgr, resolve_media=_resolve_media, rel=_rel,

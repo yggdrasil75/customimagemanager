@@ -120,6 +120,139 @@ def media_group(kind, group):
     return _MEDIA_TYPES.get(kind, {}).get("groups", {}).get(group, set())
 
 
+# -- library sections -----------------------------------------------------------
+# A library section is a top-level folder with a fixed meaning (music, movies,
+# tv): public at <media>/<id>, and per user at <media>/users/<name>/<id> (the
+# ownership module's personal folders). Files inside a section belong to the
+# module that registered it and stay out of the plain gallery.
+# {id: {"label", "kinds", "per_user"}}
+_LIBRARY_SECTIONS = {}
+## @brief The personal-folder root (modules/ownership USER_ROOT).
+SECTION_USER_ROOT = "users"
+_SECTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def register_library_section(section_id, *, label, kinds, per_user=True, sidecars=()):
+    """! @brief Register a library section (called through host.register_library_section).
+    @param section_id  the folder name, lower-case letters / digits / underscore.
+    @param kinds       media kinds the section's module indexes as its items (input_kind
+                       names: audio, image, video, book); other kinds are stored and
+                       indexed by the core as usual, nothing is refused.
+    @param per_user    the section also exists under users/<name>/<section_id>.
+    @param sidecars    non-media extensions stored as sent beside the items (".nfo",
+                       ".srt", ".cue"...); any unknown file type inside a section is
+                       stored as sent too, so an export of another app imports whole.
+    @return the section's record.
+    """
+    sid = str(section_id or "").strip().lower()
+    if not _SECTION_ID.match(sid) or sid == SECTION_USER_ROOT:
+        raise ValueError(f"bad section id {section_id!r}")
+    _LIBRARY_SECTIONS[sid] = {"id": sid, "label": str(label or sid), "kinds": set(kinds or ()),
+                              "per_user": bool(per_user),
+                              "sidecars": {str(e).lower() for e in sidecars or ()}}
+    return _LIBRARY_SECTIONS[sid]
+
+
+def unregister_library_section(section_id):
+    _LIBRARY_SECTIONS.pop(str(section_id or "").lower(), None)
+
+
+def library_sections():
+    """! @brief {id: {"id", "label", "kinds", "per_user"}} of every registered section (a copy)."""
+    return {k: dict(v, kinds=set(v["kinds"]), sidecars=set(v["sidecars"])) for k, v in _LIBRARY_SECTIONS.items()}
+
+
+def library_section(rel_path):
+    """! @brief Which section a library path is in.
+    @return (section_id, username, inner_rel): the section, the owner for a
+            users/<name>/<section> path (None for the public section) and the path
+            relative to the section folder ("" for the folder itself); (None, None, None)
+            outside every section.
+    """
+    parts = [p for p in str(rel_path or "").replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts:
+        return None, None, None
+    head = parts[0].lower()
+    spec = _LIBRARY_SECTIONS.get(head)
+    if spec is not None:
+        return head, None, "/".join(parts[1:])
+    if head == SECTION_USER_ROOT and len(parts) >= 3:
+        sid = parts[2].lower()
+        spec = _LIBRARY_SECTIONS.get(sid)
+        if spec is not None and spec["per_user"]:
+            return sid, parts[1], "/".join(parts[3:])
+    return None, None, None
+
+
+def section_folders(section_id, media_dir):
+    """! @brief The section's folders that exist on disk, relative to media_dir:
+    ["music", "users/ann/music", ...] (the public one first)."""
+    sid = str(section_id or "").lower()
+    spec = _LIBRARY_SECTIONS.get(sid)
+    if spec is None:
+        return []
+    out = []
+    if os.path.isdir(os.path.join(media_dir, sid)):
+        out.append(sid)
+    if spec["per_user"]:
+        root = os.path.join(media_dir, SECTION_USER_ROOT)
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            names = []
+        for name in names:
+            if name.startswith("."):
+                continue
+            if os.path.isdir(os.path.join(root, name, sid)):
+                out.append(f"{SECTION_USER_ROOT}/{name}/{sid}")
+    return out
+
+
+def _section_sql(sid, column, per_user, literal):
+    """! @brief The SQL matching rows inside one section, exact on path segments
+    (LIKE would let `_` and `%` in an id match more). Per-user: the segment after
+    users/<name>/ is compared with substr/instr."""
+    pub = f"{sid}/"
+    n = len(pub)
+    ur = f"{SECTION_USER_ROOT}/"
+    un = len(ur)
+    params = []
+
+    def val(v):
+        # ids are [a-z0-9_] and the user root a plain word: safe to inline
+        if literal:
+            return repr(v) if isinstance(v, str) else str(v)
+        params.append(v)
+        return "?"
+
+    sql = f"lower(substr({column}, 1, {val(n)})) = {val(pub)}"
+    if per_user:
+        rest = f"substr({column}, {un + 1})"
+        sql += (f" OR (lower(substr({column}, 1, {val(un)})) = {val(ur)} AND instr({rest}, '/') > 0"
+                f" AND lower(substr({column}, instr({rest}, '/') + {val(un + 1)}, {val(n)})) = {val(pub)})")
+    return f"({sql})", params
+
+
+def section_clause(section_id, column="rel_path"):
+    """! @brief (sql, params): the rows of `column` inside a section (public and per-user).
+    An unknown section matches nothing."""
+    sid = str(section_id or "").lower()
+    spec = _LIBRARY_SECTIONS.get(sid)
+    if spec is None:
+        return "0", []
+    return _section_sql(sid, column, spec["per_user"], literal=False)
+
+
+def section_hide_clause(column="rel_path"):
+    """! @brief A parameter-free SQL condition true for rows outside every registered
+    section (the core's gallery filter); "" when no section is registered."""
+    if not _LIBRARY_SECTIONS:
+        return ""
+    parts = [_section_sql(sid, column, spec["per_user"], literal=True)[0]
+             for sid, spec in _LIBRARY_SECTIONS.items()]
+    return "NOT (" + " OR ".join(parts) + ")"
+
+
 def unregister_media_type(kind):
     _MEDIA_TYPES.pop(kind, None)
 
@@ -594,9 +727,14 @@ def _trim_name(name, fits):
     return stem + ext
 
 
-def clean_filename(name: str, prefs=None) -> str:
-    """! @brief Clean an uploaded filename per the filename_cleanup setting."""
+def clean_filename(name: str, prefs=None, folder: str = "") -> str:
+    """! @brief Clean an uploaded filename per the filename_cleanup setting.
+    @param folder  the destination folder: inside a library section the name keeps
+                   its spaces and brackets (the Plex layout, "Title (2020).mkv", is
+                   the name), so only bad characters and the storage rules apply."""
     p = prefs or _FILENAME_PREFS
+    if folder and library_section(folder)[0]:
+        p = dict(p, web=False)
     name = unicodedata.normalize('NFC', str(name or '')).replace('\x00', '')
     name = name.replace('\\', '/').rsplit('/', 1)[-1]
     if p.get('bad'):

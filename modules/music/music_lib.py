@@ -6,6 +6,7 @@ k-means clustering and shuffle-by. The routes, indexer and UI wiring are in
 module.py; nothing here touches the app.
 """
 from __future__ import annotations
+import os
 import struct
 import numpy as np
 from optional_deps import optional_import
@@ -159,7 +160,9 @@ def write_audio_metadata(abs_path: str, meta: dict) -> bool:
 # -- cover art -------------------------------------------------------------------
 # Folder images a ripper / tagger leaves beside the tracks, best first.
 _FOLDER_COVERS = ("cover", "folder", "front", "album", "albumart", "albumartsmall")
-_IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+_IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".jxl", ".avif")
+# description formats whose text is read straight into the API reply
+_TEXT_EXTS = (".txt", ".md", ".nfo")
 
 
 def _sniff_mime(data: bytes) -> str:
@@ -220,30 +223,68 @@ def _embedded_cover(abs_path: str):
     return data, _sniff_mime(data)
 
 
-def folder_cover_path(abs_path: str):
-    """! @brief A cover image beside the track (cover.jpg, folder.png, ...), or None."""
-    import os
-    d = os.path.dirname(abs_path)
+def folder_image(abs_dir: str, any_image: bool = False):
+    """! @brief The image that stands for a folder: cover.jpg / folder.png / front.* ...
+    first; with `any_image` (an album or artist folder in a music section, laid out
+    like Plex) any image in it, by name. None when there is none."""
     try:
-        names = {n.lower(): n for n in os.listdir(d)}
+        entries = sorted(os.listdir(abs_dir))
     except OSError:
         return None
+    names = {n.lower(): n for n in entries}
     for stem in _FOLDER_COVERS:
         for ext in _IMG_EXTS:
             n = names.get(stem + ext)
             if n:
-                return os.path.join(d, n)
+                return os.path.join(abs_dir, n)
+    if any_image:
+        for n in entries:
+            if not n.startswith(".") and os.path.splitext(n)[1].lower() in _IMG_EXTS:
+                return os.path.join(abs_dir, n)
     return None
 
 
-def read_cover(abs_path: str):
+def folder_cover_path(abs_path: str, any_image: bool = False):
+    """! @brief A cover image beside the track (cover.jpg, folder.png, ...), or None."""
+    return folder_image(os.path.dirname(abs_path), any_image)
+
+
+def folder_description(abs_dir: str, book_exts):
+    """! @brief The description file of an album / artist folder: the first book-kind
+    file in it by name (`book_exts`: lower-case extensions with the dot, the book
+    media kind's), or None."""
+    try:
+        entries = sorted(os.listdir(abs_dir))
+    except OSError:
+        return None
+    exts = set(book_exts or ())
+    for n in entries:
+        if not n.startswith(".") and os.path.splitext(n)[1].lower() in exts:
+            return os.path.join(abs_dir, n)
+    return None
+
+
+def read_description(abs_path: str, limit: int = 4000) -> str | None:
+    """! @brief The text of a plain-text description (.txt / .md / .nfo), up to `limit`
+    characters; None for any other format (the file is still linked by path)."""
+    if os.path.splitext(abs_path)[1].lower() not in _TEXT_EXTS:
+        return None
+    try:
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(limit).strip()
+    except OSError:
+        return None
+
+
+def read_cover(abs_path: str, any_image: bool = False):
     """! @brief (bytes, mime) of a track's cover: the embedded art, else the folder's
-    cover image; None when it has neither. Never raises."""
+    cover image (any image in the folder with `any_image`); None when it has
+    neither. Never raises."""
     try:
         emb = _embedded_cover(abs_path) if HAVE_MUTAGEN else None
         if emb:
             return emb
-        fp = folder_cover_path(abs_path)
+        fp = folder_cover_path(abs_path, any_image)
         if fp:
             with open(fp, "rb") as f:
                 data = f.read()

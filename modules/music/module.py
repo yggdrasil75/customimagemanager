@@ -6,6 +6,11 @@ Audio is stored natively (no lossless shrink), organised and tagged in
 place. This module owns:
   - the 'audio' media kind (extensions, mimes) - core stores/serves audio
     without knowing what it is;
+  - the `music` library section (<media>/music and users/<name>/music, laid
+    out Artist/Album/01 - Track.flac as Plex expects): audio counts as music
+    only inside it, a video never does; an image in an album folder is the
+    album art, one in the artist folder the artist picture, a book-kind file
+    (txt / md / pdf / epub ...) in either its description;
   - the `music` / `music_clusters` tables;
   - indexing: on the library walk (`file.index`), after upload
     (`upload.stored`), on delete (`file.deleted`) and on demand;
@@ -56,6 +61,9 @@ def register(host):
     db = host.db
     log = host.logger
     host.register_media_type("audio", exts=AUDIO_EXTS, mime_map=_MIME)
+    # the folders that hold music: tracks, their art and descriptions
+    host.register_library_section("music", label="Music", kinds={"audio", "video", "image", "book"},
+                                  sidecars={".cue", ".log", ".m3u", ".m3u8", ".nfo"})
     def _migrate(conn):
         # has_cover: 1 / 0 once known, NULL until the track is (re)indexed
         try:
@@ -81,6 +89,19 @@ def register(host):
 
     def _is_audio(path):
         return os.path.splitext(path)[1].lower() in AUDIO_EXTS
+
+    def _in_section(rel_path):
+        """! @brief True inside a music section (public or a user's)."""
+        return host.core.library_section(rel_path)[0] == "music"
+
+    def _is_music(rel_path):
+        """! @brief A track: an audio file inside a music section. Audio elsewhere is
+        not music, and a video never is (AUDIO_EXTS leaves the video containers out)."""
+        return _is_audio(rel_path) and _in_section(rel_path)
+
+    def _book_exts():
+        """! @brief The book kind's extensions (empty without the books module)."""
+        return set(host.media.BOOK_EXTS)
 
     # -- the audio embedding pick (Models -> Audio embedding) ---------------
     ## @brief The librosa fingerprint is registered as the no-download fallback; the
@@ -136,7 +157,7 @@ def register(host):
             if row and abs(row["mtime"] - mtime) < 1e-6:
                 return False
         m = ml.read_audio_metadata(abs_path)
-        has_cover = 1 if ml.read_cover(abs_path) else 0
+        has_cover = 1 if ml.read_cover(abs_path, any_image=_in_section(rel_path)) else 0
         # Index row read from the file: DB only (the tags are already in it).
         host.update_file(rel_path, table="music", dont_write=True, commit=False,
                          defaults={"tags": "[]", "created": time.time()},
@@ -152,19 +173,28 @@ def register(host):
         db().commit()
         return True
 
+    def _drop_outside():
+        """! @brief Forget rows of files that are not in a music section any more
+        (moved out, or indexed before sections existed)."""
+        sql, p = host.core.section_clause("music", "rel_path")
+        db().execute(f"DELETE FROM music WHERE NOT {sql}", p)
+        db().commit()
+
     def index_all(force=False):
-        """! @brief Walk the library for tracks. Resumable and self-guarding."""
+        """! @brief Walk the music sections for tracks. Resumable and self-guarding."""
         if state["indexing"]:
             return
         state.update(indexing=True, status="scanning")
         try:
             paths = []
-            for root, dirs, files in os.walk(host.media_dir):
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
-                for f in files:
-                    if _is_audio(f):
-                        ap = os.path.join(root, f)
-                        paths.append((host.core.rel(ap), ap))
+            for folder in host.core.section_folders("music"):
+                for root, dirs, files in os.walk(os.path.join(host.media_dir, folder)):
+                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+                    for f in files:
+                        if _is_audio(f):
+                            ap = os.path.join(root, f)
+                            paths.append((host.core.rel(ap), ap))
+            _drop_outside()
             state.update(total=len(paths), indexed=0)
             for rp, ap in paths:
                 try:
@@ -261,6 +291,12 @@ def register(host):
     def _file_index(rel_path, abs_path, force=False):
         if not _is_audio(abs_path):
             return None
+        if not _in_section(rel_path):
+            # audio outside a music section is not a track: a stale row goes and the
+            # core indexes the file like any other (a stub row, so it is still a
+            # library file: in the gallery, playable, taggable)
+            host.update_file(rel_path, table="music", remove=True, dont_write=True)
+            return None
         try:
             upsert(rel_path, abs_path, force=force)
         except Exception as e:
@@ -268,14 +304,37 @@ def register(host):
         return True                      # handled: core skips the image path
     host.on("file.index", _file_index)
     host.on("upload.stored", lambda rel_path, filename:
-            threading.Thread(target=index_all, daemon=True).start() if _is_audio(filename) else None)
-    host.on("file.renamed", lambda old_rel, new_rel:
-            host.update_file(table="music", where=("rel_path=?", (old_rel,)), set={"rel_path": new_rel},
-                             dont_write=True) if _is_audio(old_rel) else None)
+            threading.Thread(target=index_all, daemon=True).start() if _is_music(rel_path) else None)
+
+    def _file_renamed(old_rel, new_rel):
+        """! @brief A track keeps its row inside the sections; moved out it stops being
+        music, moved in it becomes one."""
+        if not _is_audio(old_rel) and not _is_audio(new_rel):
+            return None
+        if _is_music(new_rel):
+            if _is_music(old_rel):
+                host.update_file(table="music", where=("rel_path=?", (old_rel,)),
+                                 set={"rel_path": new_rel}, dont_write=True)
+            else:
+                ap = host.safe_path(host.media_dir, new_rel)
+                if ap and os.path.exists(ap):
+                    upsert(new_rel, ap, force=True)
+        else:
+            host.update_file(old_rel, table="music", remove=True, dont_write=True)
+        return None
+    host.on("file.renamed", _file_renamed)
 
     def _file_deleted(rel_path):
         host.update_file(rel_path, table="music", remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)
+
+    def _library_sync(direction, rel_paths=None):
+        """! @brief A full pull rebuilds the index from the sections (the core's
+        re-index reaches every track through file.index; this drops what is left
+        outside a section)."""
+        if direction == "pull" and rel_paths is None:
+            _drop_outside()
+    host.on("library.sync", _library_sync)
 
     # -- routes ------------------------------------------------------------
     def row_dict(r):
@@ -455,6 +514,65 @@ def register(host):
         out.sort(key=lambda c: -c["size"])
         return jsonify({"success": True, "clusters": out})
 
+    # -- folder art and descriptions (the Plex layout inside a music section) -----
+    # Artist/Album/01 - Track.flac: an image in the album folder is the album art,
+    # one in the artist folder the artist picture, a book-kind file in either its
+    # description. Looked up per folder, cached by the folder's mtime.
+    _FOLDER_INFO = {}    # rel folder -> (dir mtime, {"image", "description_rel", "description"})
+
+    def _section_dirs(rel_path):
+        """! @brief (album folder, artist folder) of a track, as rel paths, by depth inside
+        the section: Artist/Album/x -> both; Artist/x -> the artist folder serves as
+        both; x -> neither. None where there is none."""
+        sid, user, inner = host.core.library_section(rel_path)
+        if sid != "music" or not inner:
+            return None, None
+        base = rel_path[:len(rel_path) - len(inner)].rstrip("/")
+        parts = inner.split("/")
+        if len(parts) < 2:
+            return None, None
+        album = f"{base}/{'/'.join(parts[:-1])}"
+        artist = f"{base}/{parts[0]}"
+        return album, artist
+
+    def _folder_info(rel_dir):
+        """! @brief {"image", "description_rel", "description"} of a section folder
+        (rel paths, the description's text for plain-text formats), from disk."""
+        empty = {"image": None, "description_rel": None, "description": None}
+        if not rel_dir:
+            return empty
+        ad = host.safe_path(host.media_dir, rel_dir)
+        try:
+            mtime = os.path.getmtime(ad) if ad else None
+        except OSError:
+            mtime = None
+        if mtime is None:
+            return empty
+        hit = _FOLDER_INFO.get(rel_dir)
+        if hit and hit[0] == mtime:
+            return hit[1]
+        img = ml.folder_image(ad, any_image=True)
+        desc = ml.folder_description(ad, _book_exts())
+        info = {"image": host.core.rel(img) if img else None,
+                "description_rel": host.core.rel(desc) if desc else None,
+                "description": ml.read_description(desc) if desc else None}
+        _FOLDER_INFO[rel_dir] = (mtime, info)
+        return info
+
+    def _album_extras(any_rel):
+        """! @brief The fields a folder adds to an album row."""
+        album_dir, _ = _section_dirs(any_rel or "")
+        info = _folder_info(album_dir)
+        return {"folder": album_dir, "art_rel": info["image"],
+                "description_rel": info["description_rel"], "description": info["description"]}
+
+    def _artist_extras(any_rel):
+        """! @brief The fields a folder adds to an artist row."""
+        _, artist_dir = _section_dirs(any_rel or "")
+        info = _folder_info(artist_dir)
+        return {"folder": artist_dir, "picture_rel": info["image"],
+                "description_rel": info["description_rel"], "description": info["description"]}
+
     def artists():
         a = request.args
         cl, cp = _filters(a, skip=("artist",))
@@ -462,9 +580,14 @@ def register(host):
         rows = db().execute(
             f"SELECT {_NAME} AS name, COUNT(*) AS tracks, COUNT(DISTINCT {_ALB}) AS albums, "
             f"SUM(COALESCE(duration,0)) AS duration, MAX(COALESCE(created,0)) AS added, "
-            f"{_COVER} AS cover_rel FROM music{w} GROUP BY {_NAME} "
+            f"{_COVER} AS cover_rel, MIN(rel_path) AS any_rel FROM music{w} GROUP BY {_NAME} "
             f"ORDER BY {_order(_GROUP_SORTS, a.get('sort'), _desc())}", wp).fetchall()
-        return jsonify({"success": True, "artists": [dict(r) for r in rows]})
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.update(_artist_extras(d.pop("any_rel")))
+            out.append(d)
+        return jsonify({"success": True, "artists": out})
 
     def albums():
         a = request.args
@@ -474,9 +597,14 @@ def register(host):
             f"SELECT {_ALB} AS album, {_NAME} AS artist, COUNT(*) AS tracks, "
             f"MIN(NULLIF(substr(year,1,4),'')) AS year, MIN(NULLIF(genre,'')) AS genre, "
             f"SUM(COALESCE(duration,0)) AS duration, MAX(COALESCE(created,0)) AS added, "
-            f"{_COVER} AS cover_rel FROM music{w} GROUP BY {_ALB}, {_NAME} "
+            f"{_COVER} AS cover_rel, MIN(rel_path) AS any_rel FROM music{w} GROUP BY {_ALB}, {_NAME} "
             f"ORDER BY {_order(_ALBUM_SORTS, a.get('sort'), _desc())}", wp).fetchall()
-        return jsonify({"success": True, "albums": [dict(r) for r in rows]})
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.update(_album_extras(d.pop("any_rel")))
+            out.append(d)
+        return jsonify({"success": True, "albums": out})
 
     def genres():
         a = request.args
@@ -566,7 +694,7 @@ def register(host):
         r = db().execute(f"SELECT * FROM music{w}", wp).fetchone()
         if r is None:
             ap = host.safe_path(host.media_dir, rp)
-            if ap and os.path.exists(ap) and _is_audio(ap):
+            if ap and os.path.exists(ap) and _is_music(rp):
                 upsert(rp, ap)
                 r = db().execute(f"SELECT * FROM music{w}", wp).fetchone()
         if r is None:
@@ -582,7 +710,7 @@ def register(host):
         mt = os.path.getmtime(fp)
         if _NO_COVER.get(filename) == mt:
             return jsonify({"success": False, "error": "no cover"}), 404
-        got = ml.read_cover(fp)
+        got = ml.read_cover(fp, any_image=_in_section(filename))
         known = db().execute("SELECT has_cover FROM music WHERE rel_path=?", (filename,)).fetchone()
         if known is not None and known["has_cover"] != (1 if got else 0):
             host.update_file(filename, table="music", dont_write=True, set={"has_cover": 1 if got else 0})

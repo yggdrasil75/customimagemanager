@@ -89,6 +89,9 @@ class Host:
         self.action_targets = {}  # AI-action target -> fn(fp, bgr, meta, action)
         self.ai_action_groups = []  # see register_ai_actions
         self.gallery_filters = []  # SQL clauses that hide rows from the flat gallery
+        # the one gallery filter hiding every registered library section's rows
+        # (register_library_section rebuilds it; sections never register their own)
+        self._section_filter = None
         # see register_access_policy
         self.access_policies = []
         # left-column pane partials
@@ -767,6 +770,42 @@ class Host:
     def register_gallery_filter(self, clause):
         """! @brief Hide matching rows from the flat gallery (a SQL condition on files)."""
         self.gallery_filters.append(clause)
+
+    def register_library_section(self, section_id, *, label, kinds, per_user=True, sidecars=()):
+        """! @brief Declare a library section this module owns: a top-level folder with a
+        fixed meaning, `<media>/<section_id>` and, with per_user, every account's
+        `<media>/users/<name>/<section_id>`. Its files stay out of the plain gallery
+        (one core filter covers every section) and GET /api/sections lists it. Nothing
+        is refused: another app's library imports as it is. Inside a section the core
+        stores a file of an unknown type (and the declared `sidecars`) as sent, next to
+        the item it belongs to, and keeps uploaded names as they are (the layout is the
+        name). With the module off, the folder is an ordinary folder.
+        @param section_id  the folder name: lower-case letters, digits, underscore.
+        @param label       shown in the UI ("Music").
+        @param kinds       media kinds the module indexes as its items, e.g. {"audio", "video"}.
+        @param sidecars    non-media extensions beside the items (".nfo", ".srt", ".cue").
+        @param per_user    also under each user's personal folder.
+        @return the section record {"id", "label", "kinds", "per_user", "sidecars"}.
+        Read it back with host.core.library_section(rel) -> (id, username, inner_rel),
+        host.core.section_folders(id) and host.core.section_clause(id, column).
+        """
+        rec = self.media.register_library_section(section_id, label=label, kinds=kinds,
+                                                  per_user=per_user, sidecars=sidecars)
+        rec = dict(rec, module_id=self._current_module)
+        self._refresh_section_filter()
+        return rec
+
+    def _refresh_section_filter(self):
+        """! @brief Rebuild the one gallery filter from the registered sections."""
+        if self._section_filter in self.gallery_filters:
+            self.gallery_filters.remove(self._section_filter)
+        self._section_filter = self.media.section_hide_clause("rel_path") or None
+        if self._section_filter:
+            self.gallery_filters.append(self._section_filter)
+
+    def library_sections(self):
+        """! @brief {id: {"id", "label", "kinds", "per_user"}} of every registered section."""
+        return self.media.library_sections()
 
     def register_ai_actions(self, source, list_fn, run_fn, *, feature=None):
         """! @brief Add actions to the editor's AI picker and the bulk bar.

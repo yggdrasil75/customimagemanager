@@ -16,6 +16,7 @@ import http.client
 import http.cookiejar
 import json
 import os
+import re
 import ssl
 import sys
 import threading
@@ -307,13 +308,15 @@ def file_sha256(path):
 
 
 def chunked_upload(http, filepath, fname, folder, metadata, mode, validate=False,
-                   backoff=1.0, resume=None, progress=None):
+                   backoff=1.0, resume=None, progress=None, sha=None):
     """! @brief Send one file through an upload session, resuming after drops.
     @param http      callable(method, path, body=, headers=, timeout=) -> (status, dict);
                      a Session, or a fake in tests.
     @param resume    dict filepath -> session id, so a later attempt in this run
                      continues the same session.
     @param progress  fn(bytes_sent) after each stored chunk.
+    @param sha       the file's sha256 when the caller already computed it (with
+                     validate, saves hashing a big file twice).
     @return (status, body) of the final answer (the receipt, a duplicate, an error),
             or None when the server has no sessions (fall back to /api/upload).
     @throws TransportError after CHUNK_RETRIES consecutive failed sends.
@@ -332,7 +335,7 @@ def chunked_upload(http, filepath, fname, folder, metadata, mode, validate=False
         if metadata:
             req["metadata"] = metadata
         if validate:
-            req["sha256"] = file_sha256(filepath)
+            req["sha256"] = sha or file_sha256(filepath)
         status, body = http("POST", "/api/upload/session",
                             body=json.dumps(req).encode("utf-8"),
                             headers={"Content-Type": "application/json"}, timeout=60)
@@ -408,6 +411,204 @@ MEDIA_EXTENSIONS = (IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | RAW_EXTENSIONS
 
 NON_MEDIA_EXTENSIONS = {'.txt', '.xmp', '.json', '.md', '.ini', '.log', '.db'}
 
+## @brief Extension -> media kind, the client's copy of the server's input_kind()
+# (a section only takes some kinds).
+EXT_KIND = {}
+for _ext in IMAGE_EXTENSIONS | RAW_EXTENSIONS:
+    EXT_KIND[_ext] = "image"
+for _ext in VIDEO_EXTENSIONS:
+    EXT_KIND[_ext] = "video"
+for _ext in AUDIO_EXTENSIONS:
+    EXT_KIND[_ext] = "audio"
+for _ext in BOOK_EXTENSIONS:
+    EXT_KIND[_ext] = "book"
+del _ext
+
+## @brief Non-media files beside a section's items (the server's registered sections
+# say theirs; this is what the usual three declare): .nfo and subtitles with videos,
+# cue / log / playlist with music. Inside a section EVERY file is sent (the server
+# stores what it does not handle as it is, so another app's library imports whole);
+# these are the ones that are a media file's sidecar for --delete-source: they go
+# only when their media file (same stem, optionally a language tag) went.
+SECTION_SIDECARS = {
+    "movies": {".nfo", ".srt", ".vtt", ".ass", ".ssa", ".sub", ".idx", ".sup"},
+    "tv":     {".nfo", ".srt", ".vtt", ".ass", ".ssa", ".sub", ".idx", ".sup"},
+    "music":  {".cue", ".log", ".m3u", ".m3u8", ".nfo"},
+}
+SIDECAR_EXTENSIONS = {".txt", ".xmp"} | set().union(*SECTION_SIDECARS.values())
+## @brief The three sections every server has, for a server without GET /api/sections.
+SECTION_FALLBACK = {
+    "music":  {"label": "Music", "kinds": {"audio", "video", "image", "book"}, "sidecars": SECTION_SIDECARS["music"]},
+    "movies": {"label": "Movies", "kinds": {"video", "image", "book"}, "sidecars": SECTION_SIDECARS["movies"]},
+    "tv":     {"label": "TV", "kinds": {"video", "image", "book"}, "sidecars": SECTION_SIDECARS["tv"]},
+}
+## @brief The personal-folder root on the server (users/<name>/<section>).
+SECTION_USER_ROOT = "users"
+
+_TITLE_YEAR_RE = re.compile(r"^.+ \((\d{4})\)$")
+_SEASON_RE = re.compile(r"^(season\s*\d+|specials)$", re.IGNORECASE)
+_EPISODE_RE = re.compile(r"s\d{1,2}e\d{1,3}", re.IGNORECASE)
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def fetch_sections(session):
+    """! @brief The server's library sections: {id: {"label", "kinds": set}}.
+    An older server without GET /api/sections (or one that cannot be asked)
+    gives SECTION_FALLBACK.
+    """
+    try:
+        status, body = session.request("GET", "/api/sections", timeout=30)
+    except TransportError:
+        return dict((k, dict(v)) for k, v in SECTION_FALLBACK.items())
+    rows = body.get("sections") if status == 200 else None
+    if not isinstance(rows, list):
+        return dict((k, dict(v)) for k, v in SECTION_FALLBACK.items())
+    out = {}
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        sid = str(row["id"]).lower()
+        out[sid] = {"label": str(row.get("label") or sid),
+                    "kinds": set(str(k) for k in (row.get("kinds") or [])),
+                    "sidecars": set(str(e).lower() for e in (row.get("sidecars") or []))}
+        SIDECAR_EXTENSIONS.update(out[sid]["sidecars"])
+    return out
+
+
+def dest_section(dest, sections):
+    """! @brief (section_id, inner) when a destination is inside a library section:
+    its first segment names one ("music/Artist"), or it is a personal section
+    folder ("users/ann/music/Artist"). inner is the rest of the path within the
+    section ("Artist"). (None, dest) elsewhere.
+    """
+    parts = [p for p in dest.replace("\\", "/").split("/") if p]
+    if not parts:
+        return None, dest
+    head = parts[0].lower()
+    if head in sections:
+        return head, "/".join(parts[1:])
+    if head == SECTION_USER_ROOT and len(parts) >= 3 and parts[2].lower() in sections:
+        return parts[2].lower(), "/".join(parts[3:])
+    return None, dest
+
+
+def section_allows(section_id, kinds, fname):
+    """! @brief Whether a file is sent into a section: everything is, except what never
+    travels as a file (classes.txt, and the .txt / .xmp that go as metadata)."""
+    return fname != "classes.txt" and os.path.splitext(fname)[1].lower() not in (".txt", ".xmp")
+
+
+def layout_warning(section_id, inner_dir, filenames):
+    """! @brief Why a folder's contents do not follow the section's Plex layout,
+    or "" when they do (or the folder holds nothing the layout cares about).
+    @param inner_dir   the folder's path within the section ("Artist/Album").
+    @param filenames   the files of that folder that will be sent.
+    """
+    parts = [p for p in inner_dir.replace("\\", "/").split("/") if p]
+    depth = len(parts)
+    kinds = set(EXT_KIND.get(os.path.splitext(f)[1].lower()) for f in filenames)
+    where = "/".join(parts) or "(section root)"
+    if section_id == "music":
+        if "audio" in kinds and depth != 2:
+            return ("{}: tracks belong in Artist/Album/ (this folder is {} deep); "
+                    "expected e.g. Artist/Album/01 - Track.flac".format(where, depth))
+        return ""
+    if section_id == "movies":
+        if "video" not in kinds:
+            return ""
+        title = parts[0] if parts else ""
+        if depth < 1 or not _TITLE_YEAR_RE.match(title):
+            return ("{}: a movie belongs in its own 'Title (Year)/' folder, "
+                    "e.g. 'Heat (1995)/Heat (1995).mkv'".format(where))
+        if depth > 2:
+            return ("{}: a movie folder holds the film and at most one level of extras "
+                    "folders".format(where))
+        return ""
+    if section_id == "tv":
+        if "video" not in kinds:
+            return ""
+        if depth != 2 or not _SEASON_RE.match(parts[1]):
+            return ("{}: episodes belong in 'Show (Year)/Season 01/' (or 'Specials/'), "
+                    "e.g. 'Show (2019)/Season 01/Show - s01e01 - Pilot.mkv'".format(where))
+        bad = [f for f in filenames
+               if EXT_KIND.get(os.path.splitext(f)[1].lower()) == "video"
+               and not _EPISODE_RE.search(f)]
+        if bad:
+            return ("{}: {} episode file(s) without an s01e01 marker in the name, "
+                    "e.g. {!r}".format(where, len(bad), bad[0]))
+        return ""
+    return ""
+
+
+def receipt_sha(body, duplicate=False):
+    """! @brief The sha256 a reply reports for the stored (or already existing)
+    file, lower-case, or "" when the reply carries none. A stored file's receipt
+    says `sha256` (or `source_sha256`, the bytes as sent when the server converted
+    them); a duplicate reply says `sha256` or `existing_sha256`.
+    """
+    keys = ("sha256", "existing_sha256") if duplicate else ("sha256", "source_sha256")
+    for k in keys:
+        v = str(body.get(k) or "").strip().lower()
+        if _SHA256_RE.match(v):
+            return v
+    return ""
+
+
+def delete_decision(result):
+    """! @brief Whether a source file may be deleted after its upload.
+    @return (delete, reason). Only a REAL receipt deletes: a stored file whose
+            reported sha256 equals the local one, or a duplicate naming an
+            existing file whose reported sha256 equals the local one; and that
+            on the first attempt, from an inline (200) answer.
+    """
+    o = result.outcome
+    if o == Outcome.QUEUED:
+        return False, "queued (202): no receipt yet"
+    if o == Outcome.FAILED:
+        return False, "failed"
+    if o == Outcome.SKIPPED:
+        return False, "rejected"
+    if result.attempts > 1:
+        return False, "needed a retry"
+    if not result.local_sha:
+        return False, "local sha256 not computed"
+    if o == Outcome.SUCCESS:
+        if result.status != 200:
+            return False, "no inline receipt (HTTP {})".format(result.status)
+        if not result.receipt_sha:
+            return False, "receipt reports no sha256"
+        if result.receipt_sha != result.local_sha:
+            return False, "receipt sha256 differs from the local file"
+        return True, "stored, sha256 verified"
+    if o == Outcome.DUPLICATE:
+        if not result.existing_file:
+            return False, "duplicate reply names no existing file"
+        if not result.receipt_sha:
+            return False, "duplicate reply reports no sha256"
+        if result.receipt_sha != result.local_sha:
+            return False, "existing file's sha256 differs from the local file"
+        return True, "duplicate of {}, sha256 verified".format(result.existing_file)
+    return False, "unknown outcome"
+
+
+def sidecar_owner(filepath, media_files):
+    """! @brief The media file a sidecar belongs to ("Title (Year).en.srt" ->
+    "Title (Year).mkv"), or None.
+    @param media_files  the media files of the same folder, by stem:
+                        {stem: filepath} (lower-case stems).
+    """
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+    for candidate in (stem, os.path.splitext(stem)[0]):
+        if candidate and candidate.lower() in media_files:
+            return media_files[candidate.lower()]
+    return None
+
+
+def is_sidecar(fname):
+    """! @brief A file that travels with a media file of the same stem."""
+    return os.path.splitext(fname)[1].lower() in SIDECAR_EXTENSIONS and fname != "classes.txt"
+
+
 PERMANENT_ERROR_CODES = {
     "exact_duplicate",
     "filename_exists",
@@ -433,7 +634,7 @@ class UploadResult(object):
     """! @brief One file's outcome."""
 
     def __init__(self, filepath, outcome, message, error_code=None, existing_file=None,
-                 attempts=1, size=0, chunked=False):
+                 attempts=1, size=0, chunked=False, status=0, local_sha="", receipt_sha=""):
         self.filepath = filepath
         self.outcome = outcome
         self.message = message
@@ -442,6 +643,15 @@ class UploadResult(object):
         self.attempts = attempts
         self.size = size
         self.chunked = chunked
+        ## @brief HTTP status of the final answer (0: none).
+        self.status = status
+        ## @brief The file's sha256 as computed here (with --validate), else "".
+        self.local_sha = local_sha
+        ## @brief The sha256 the server reported for the stored / existing file, else "".
+        self.receipt_sha = receipt_sha
+        ## @brief Filled by --delete-source: True deleted, False kept, None not decided.
+        self.deleted = None
+        self.delete_reason = ""
 
 
 def load_classes(source_dir):
@@ -564,22 +774,24 @@ def upload_file(filepath, source_dir, classes_map, endpoint, max_attempts,
     last_code   = ""
     last_detail = ""
     sha = None
+    status = 0
 
     def result(outcome, message, attempt, **kw):
         return UploadResult(filepath, outcome, message, attempts=attempt, size=size,
-                            chunked=use_chunks, **kw)
+                            chunked=use_chunks, status=status, local_sha=sha or "", **kw)
 
     for attempt in range(1, max_attempts + 1):
         try:
+            if validate and sha is None:
+                sha = file_sha256(filepath)
             got = None
             if use_chunks:
                 got = chunked_upload(session, filepath, fname, folder, metadata, mode,
-                                     validate=validate, backoff=initial_backoff, resume=resume)
+                                     validate=validate, backoff=initial_backoff, resume=resume,
+                                     sha=sha)
                 if got is None:
                     use_chunks = False  # no sessions on this server
             if got is None:
-                if validate and sha is None:
-                    sha = file_sha256(filepath)
                 form_data = {'folder': folder, 'mode': mode}
                 if metadata:
                     form_data['metadata'] = json.dumps(metadata)
@@ -594,7 +806,8 @@ def upload_file(filepath, source_dir, classes_map, endpoint, max_attempts,
                     return result(Outcome.DUPLICATE,
                                   "duplicate of {}".format(existing) if existing else "duplicate",
                                   attempt, error_code=body.get('error_code'),
-                                  existing_file=existing)
+                                  existing_file=existing,
+                                  receipt_sha=receipt_sha(body, duplicate=True))
                 # The server fixed a wrong extension: report it.
                 corrected = body.get('corrected_extension') or {}
                 note = ""
@@ -602,7 +815,8 @@ def upload_file(filepath, source_dir, classes_map, endpoint, max_attempts,
                     note = "  [type corrected {} -> {}]".format(
                         corrected.get('from') or '(none)', corrected.get('to'))
                 return result(Outcome.SUCCESS,
-                              "-> {}{}".format(body.get('filename', fname), note), attempt)
+                              "-> {}{}".format(body.get('filename', fname), note), attempt,
+                              receipt_sha=receipt_sha(body))
 
             if status == 202 and body.get('success'):
                 if mode == 'sync' and attempt < max_attempts:
@@ -626,7 +840,8 @@ def upload_file(filepath, source_dir, classes_map, endpoint, max_attempts,
             if error_code in ('exact_duplicate', 'filename_exists'):
                 return result(Outcome.DUPLICATE,
                               "duplicate of {}".format(existing) if existing else error_msg,
-                              attempt, error_code=error_code, existing_file=existing)
+                              attempt, error_code=error_code, existing_file=existing,
+                              receipt_sha=receipt_sha(body, duplicate=True))
 
             # the bytes arrived damaged and were discarded: send again
             if error_code == "checksum_mismatch":
@@ -670,7 +885,13 @@ def _human(n):
     return "{} B".format(int(n))
 
 
-def print_summary(results, verbose_duplicates, elapsed=None):
+def print_summary(results, verbose_duplicates, elapsed=None, not_allowed=None,
+                  deleted=None):
+    """! @brief The end-of-run report.
+    @param not_allowed  files not sent because the section does not take their
+                        kind: [(filepath, reason)].
+    @param deleted      --delete-source's tally: {"deleted": [paths], "kept": [(path, why)]}.
+    """
     by_outcome = dict((o, []) for o in Outcome)
     for r in results:
         by_outcome[r.outcome].append(r)
@@ -683,6 +904,7 @@ def print_summary(results, verbose_duplicates, elapsed=None):
     failed    = len(by_outcome[Outcome.FAILED])
     sent      = sum(r.size for r in results if r.outcome in (Outcome.SUCCESS, Outcome.QUEUED))
     chunked   = sum(1 for r in results if r.chunked)
+    not_allowed = not_allowed or []
 
     print("\n" + "-" * 60)
     print("  Total:      {}".format(total))
@@ -691,13 +913,30 @@ def print_summary(results, verbose_duplicates, elapsed=None):
         print("  Queued:     {}  (spooled on server; converts later)".format(queued))
     print("  Duplicates: {}  (skipped - already on server)".format(dupes))
     print("  Skipped:    {}  (permanent rejection)".format(skipped))
+    if not_allowed:
+        print("  Not sent:   {}  (kind the section does not take)".format(len(not_allowed)))
     print("  Failed:     {}  (gave up after retries)".format(failed))
     if chunked:
         print("  Chunked:    {}  (resumable sessions)".format(chunked))
+    if deleted is not None:
+        print("  Deleted:    {}  (source files removed after a verified receipt)".format(
+            len(deleted.get("deleted", []))))
+        print("  Kept:       {}  (source files left in place)".format(
+            len(deleted.get("kept", []))))
     if elapsed:
         rate = sent / elapsed if elapsed > 0 else 0
         print("  Sent:       {} in {:.1f}s ({}/s)".format(_human(sent), elapsed, _human(rate)))
     print("-" * 60)
+
+    if not_allowed:
+        print("\nNot sent (the section does not take them):")
+        for path, why in not_allowed:
+            print("  {}: {}".format(os.path.basename(path), why))
+
+    if deleted is not None and deleted.get("kept"):
+        print("\nSource files kept:")
+        for path, why in deleted["kept"]:
+            print("  {}: {}".format(os.path.basename(path), why))
 
     if verbose_duplicates and by_outcome[Outcome.DUPLICATE]:
         print("\nDuplicate files:")
@@ -729,66 +968,253 @@ def _should_upload(fname, aggressive):
     return ext in MEDIA_EXTENSIONS
 
 
-def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
-                verbose_dupes, aggressive=False, username="", password="",
-                verify_tls=True, dest="", mode="auto", chunked="auto", validate=False):
-    """! @brief Upload a folder tree. @return the exit code."""
-    source_dir = os.path.abspath(source_dir)
-    if not os.path.isdir(source_dir):
-        print("Error: '{}' is not a directory.".format(source_dir))
-        return 2
+def _walk(source_dir):
+    """! @brief Every file under source_dir (absolute paths), folders in walk order."""
+    return [os.path.join(root, f)
+            for root, _, filenames in os.walk(source_dir)
+            for f in sorted(filenames)]
 
-    dest = "/".join(
+
+def _clean_dest(dest):
+    """! @brief A destination as the server sees it: forward slashes, no empty / dot segments."""
+    return "/".join(
         s for s in dest.replace('\\', '/').split('/')
         if s and s not in ('.', '..')
     )
 
+
+def plan_files(source_dir, all_files, dest, sections, aggressive=False):
+    """! @brief Pick the files to send and check them against the destination section.
+    @param all_files  every file under source_dir (see _walk).
+    @param sections   {id: {"label", "kinds"}} from fetch_sections.
+    @return (to_send, not_allowed, warnings): the files to send; [(path, why)] for
+            files the section does not take; one layout warning per folder that
+            does not follow the section's Plex layout (advice only).
+    """
+    section, inner_dest = dest_section(dest, sections)
+    kinds = sections.get(section, {}).get("kinds", set()) if section else set()
+    label = sections.get(section, {}).get("label", section) if section else ""
+    to_send, not_allowed, warnings = [], [], []
+    by_dir = {}
+    for path in all_files:
+        fname = os.path.basename(path)
+        if section is None:
+            if _should_upload(fname, aggressive):
+                to_send.append(path)
+            continue
+        # inside a section every file goes (the server keeps what it does not handle
+        # as it is), so a library exported by another app imports unchanged
+        if section_allows(section, kinds, fname):
+            to_send.append(path)
+            by_dir.setdefault(os.path.dirname(path), []).append(fname)
+    if section is not None:
+        for folder in sorted(by_dir):
+            rel_dir = os.path.relpath(folder, source_dir).replace("\\", "/")
+            inner = "/".join(p for p in (inner_dest, rel_dir if rel_dir != "." else "") if p)
+            why = layout_warning(section, inner, by_dir[folder])
+            if why:
+                warnings.append(why)
+    return to_send, not_allowed, warnings
+
+
+def apply_delete_source(results, all_files, dry_run=False):
+    """! @brief --delete-source: remove the source files that have a real receipt
+    (delete_decision), then the sidecars of the media files that went.
+    @param results    every UploadResult of the run.
+    @param all_files  every file under the source folder, sent or not (a .txt
+                      sidecar travels as metadata and has no result of its own).
+    @param dry_run    decide and report, delete nothing.
+    @return {"deleted": [path], "kept": [(path, why)]}
+    """
+    by_path = dict((r.filepath, r) for r in results)
+    deleted, kept = [], []
+    gone = set()
+
+    def remove(path):
+        if not dry_run:
+            try:
+                os.remove(path)
+            except OSError as e:
+                return "could not delete: {}".format(e)
+        deleted.append(path)
+        gone.add(path)
+        return ""
+
+    # 1. the media files (everything sent that is not a sidecar)
+    owners = {}  # dir -> {stem lower: path} of the media files sent
+    for r in results:
+        fname = os.path.basename(r.filepath)
+        if is_sidecar(fname):
+            continue
+        owners.setdefault(os.path.dirname(r.filepath), {})[
+            os.path.splitext(fname)[0].lower()] = r.filepath
+        ok, why = delete_decision(r)
+        if ok:
+            err = remove(r.filepath)
+            if err:
+                ok, why = False, err
+        r.deleted, r.delete_reason = ok, why
+        if not ok:
+            kept.append((r.filepath, why))
+
+    # 2. the sidecars: only with their media file, and only with their own real
+    #    receipt when they were sent as files
+    for path in all_files:
+        fname = os.path.basename(path)
+        if not is_sidecar(fname):
+            continue
+        owner = sidecar_owner(path, owners.get(os.path.dirname(path), {}))
+        r = by_path.get(path)
+        if owner is None:
+            if r is not None:
+                r.deleted, r.delete_reason = False, "sidecar without a media file in this run"
+                kept.append((path, r.delete_reason))
+            continue  # a stray note, not part of the run
+        if owner not in gone:
+            why = "its media file {} was kept".format(os.path.basename(owner))
+            if r is not None:
+                r.deleted, r.delete_reason = False, why
+            kept.append((path, why))
+            continue
+        if r is not None:
+            ok, why = delete_decision(r)
+            if not ok:
+                r.deleted, r.delete_reason = False, why
+                kept.append((path, why))
+                continue
+        err = remove(path)
+        if err:
+            kept.append((path, err))
+            if r is not None:
+                r.deleted, r.delete_reason = False, err
+        elif r is not None:
+            r.deleted, r.delete_reason = True, "with {}".format(os.path.basename(owner))
+    return {"deleted": deleted, "kept": kept}
+
+
+def _connect(server_url, username, password, verify_tls, dry_run=False):
+    """! @brief Probe the server and log in when it wants that.
+    @return (session, cfg, error): error is a message (exit 2) when the run cannot
+            go on; in a dry run a server that cannot be reached is not an error
+            (session is None then).
+    """
     session = Session(server_url, username, password, verify=verify_tls)
     try:
         cfg = session.probe()
     except AuthError as e:
-        print("Error: {}".format(e))
-        return 2
+        if dry_run:
+            print("[*] {} - dry run goes on with the built-in section list.".format(e))
+            return None, {}, ""
+        return None, {}, "Error: {}".format(e)
 
     if session.auth_enabled:
         if cfg.get("needs_bootstrap"):
             print("[*] Server has no users yet - this login will create the "
                   "initial admin account.")
         if not session.username:
-            print("Error: server requires authentication. Pass --username "
-                  "(and --password, or set CIM_PASSWORD, or be prompted).")
-            return 2
+            msg = ("Error: server requires authentication. Pass --username "
+                   "(and --password, or set CIM_PASSWORD, or be prompted).")
+            if dry_run:
+                print("[*] Server requires authentication; dry run goes on with the "
+                      "built-in section list.")
+                return None, cfg, ""
+            return None, cfg, msg
         try:
             session.login()
         except AuthError as e:
-            print("Error: {}".format(e))
-            return 2
+            if dry_run:
+                print("[*] {} - dry run goes on with the built-in section list.".format(e))
+                return None, cfg, ""
+            return None, cfg, "Error: {}".format(e)
         who = (session.user or {}).get("username", session.username)
         admin = " (admin)" if (session.user or {}).get("is_admin") else ""
         print("[*] Authenticated as {}{} (mode: {}).".format(who, admin, cfg.get('mode', '?')))
     elif username:
         # Credentials the server doesn't want usually mean a wrong --url.
         print("[*] Server has authentication disabled; ignoring --username.")
+    return session, cfg, ""
 
-    offer = session.server_config()
+
+def _print_dry_run(source_dir, to_send, not_allowed, dest, delete_source):
+    """! @brief What a run would do, nothing done."""
+    print("[*] Dry run: nothing is sent, nothing is deleted.\n")
+    for path in to_send:
+        rel_dir = os.path.relpath(os.path.dirname(path), source_dir)
+        folder = "/".join(p for p in (dest, rel_dir if rel_dir != "." else "") if p)
+        print("  would send    {}  ->  {}/".format(
+            os.path.relpath(path, source_dir).replace("\\", "/"), folder.replace("\\", "/")))
+    for path, why in not_allowed:
+        print("  would not send {}  ({})".format(
+            os.path.relpath(path, source_dir).replace("\\", "/"), why))
+    sidecars = sum(1 for p in to_send if is_sidecar(os.path.basename(p)))
+    print("\n" + "-" * 60)
+    print("  Would send:     {}  ({} media, {} sidecar)".format(
+        len(to_send), len(to_send) - sidecars, sidecars))
+    print("  Would not send: {}  (kind the section does not take)".format(len(not_allowed)))
+    if delete_source:
+        print("  Would delete:   each sent file after a verified receipt (sha256 match), "
+              "its sidecars with it; nothing after a 202, a retry or an error")
+    print("-" * 60)
+
+
+def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
+                verbose_dupes, aggressive=False, username="", password="",
+                verify_tls=True, dest="", mode="auto", chunked="auto", validate=False,
+                delete_source=False, dry_run=False):
+    """! @brief Upload a folder tree. @return the exit code."""
+    source_dir = os.path.abspath(source_dir)
+    if not os.path.isdir(source_dir):
+        print("Error: '{}' is not a directory.".format(source_dir))
+        return 2
+    if delete_source and mode != "sync":
+        print("Error: --delete-source needs --mode sync (only an inline receipt proves "
+              "the server stored the file).")
+        return 2
+    if delete_source and not validate:
+        validate = True
+        print("[*] --delete-source: sending sha256 checksums (--validate).")
+
+    dest = _clean_dest(dest)
+
+    session, cfg, err = _connect(server_url, username, password, verify_tls, dry_run)
+    if err:
+        print(err)
+        return 2
+
+    offer = session.server_config() if session else {}
     if offer.get("validate") and not validate:
         validate = True
         print("[*] The server asks for verified uploads: sending sha256 checksums.")
 
+    sections = fetch_sections(session) if session else \
+        dict((k, dict(v)) for k, v in SECTION_FALLBACK.items())
+    section, _ = dest_section(dest, sections)
     classes_map = load_classes(source_dir)
-    files = [
-        os.path.join(root, f)
-        for root, _, filenames in os.walk(source_dir)
-        for f in filenames
-        if _should_upload(f, aggressive)
-    ]
+    all_files = _walk(source_dir)
+    files, not_allowed, warnings = plan_files(source_dir, all_files, dest, sections, aggressive)
+    if section:
+        spec = sections[section]
+        print("[*] Destination is the {} section: every file is sent as it is ({} are its items).".format(
+            spec["label"], ", ".join(sorted(spec["kinds"])) or "none"))
+        for w in warnings:
+            log_error("layout: " + w)
     if not files:
-        print("No media files found.")
+        print("No media files found." if not not_allowed else
+              "Nothing to send: {} file(s) are of a kind the section does not take.".format(
+                  len(not_allowed)))
+        if session:
+            session.logout()
         return 0
 
     if aggressive:
         print("[*] Aggressive mode: uploading all non-sidecar files, including "
               "misnamed / extension-less ones (server will attempt conversion).")
+
+    if dry_run:
+        _print_dry_run(source_dir, files, not_allowed, dest, delete_source)
+        if session:
+            session.logout()
+        return 0
 
     endpoint = "{}/api/upload".format(server_url.rstrip('/'))
     total    = len(files)
@@ -801,6 +1227,9 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
         print("[*] Chunked sessions: {}".format(
             {"on": "every file", "off": "never"}.get(chunked, "files over {}".format(
                 _human(offer.get("chunked_over") or CHUNKED_OVER)))))
+    if delete_source:
+        print("[*] Delete source: each file is removed only after a receipt whose sha256 "
+              "matches it (never after a 202, a retry or an error).")
     if max_attempts > 1:
         print("[*] Retries: up to {} attempts, {}s initial backoff (exponential).\n".format(
             max_attempts, initial_backoff))
@@ -830,7 +1259,9 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
 
     session.logout()
 
-    print_summary(results, verbose_dupes, elapsed=time.time() - started)
+    tally = apply_delete_source(results, all_files) if delete_source else None
+    print_summary(results, verbose_dupes, elapsed=time.time() - started,
+                  not_allowed=not_allowed, deleted=tally)
 
     failed_count = sum(1 for r in results if r.outcome == Outcome.FAILED)
     if failed_count == total:
@@ -842,7 +1273,15 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Bulk-upload images to the AI Media & Asset Manager.",
+        description="Bulk-upload media to the AI Media & Asset Manager.",
+        epilog="Library sections: when --dest starts with a section (music, movies, tv, "
+               "or any the server lists at /api/sections; also users/<name>/<section>), "
+               "only files of the kinds that section takes are sent (plus its sidecars: "
+               ".nfo and subtitles with videos, .cue/.log/.m3u with music); the rest are "
+               "counted as not sent. Folders that do not follow the Plex layout "
+               "(Artist/Album/track, 'Title (Year)/Title (Year).mkv', "
+               "'Show (Year)/Season 01/Show - s01e01 - Title.mkv') get a warning, "
+               "never a refusal.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("source_dir",
@@ -852,7 +1291,19 @@ def main():
     parser.add_argument("--dest", default="",
         help="Destination folder on the server to nest uploads under. The "
              "source's own subfolders are preserved beneath it, e.g. "
-             "--dest myphotos uploads photos/cat.jpg to myphotos/photos/cat.jpg.")
+             "--dest myphotos uploads photos/cat.jpg to myphotos/photos/cat.jpg. "
+             "A section name (music, movies, tv, ...) as the first segment "
+             "filters by kind and checks the Plex layout (see below).")
+    parser.add_argument("--delete-source", action="store_true",
+        help="Remove each local file once the server's receipt proves it is stored: "
+             "an inline receipt (needs --mode sync) or a duplicate reply whose "
+             "reported sha256 equals the file's own (implies --validate). Nothing "
+             "is removed after a 202 (queued), a retry, an error or a receipt "
+             "without a sha256. Sidecars (.txt, .xmp, .nfo, subtitles, ...) go "
+             "only together with their media file.")
+    parser.add_argument("--dry-run", action="store_true",
+        help="Send nothing and delete nothing: list what would be sent, what the "
+             "section would not take, and the layout warnings.")
     parser.add_argument("--workers", type=int, default=8,
         help="Number of concurrent uploads.")
     parser.add_argument("--retries", type=int, default=3,
@@ -930,6 +1381,8 @@ def main():
         mode            = args.mode,
         chunked         = args.chunked,
         validate        = args.validate,
+        delete_source   = args.delete_source,
+        dry_run         = args.dry_run,
     ))
 
 
