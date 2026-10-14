@@ -57,3 +57,27 @@ def test_edit_tags_writes_file_and_index(client, mp3):
 def test_status(client):
     j = client.get("/api/music/status").get_json()
     assert j["success"] and "tracks" in j
+
+
+def test_track_detail_and_cover(client, mp3):
+    s = _song(client, mp3)
+    assert s
+    j = client.get(f"/api/music/track?rel_path={mp3}").get_json()
+    assert j["success"] and j["song"]["rel_path"] == mp3
+    assert client.get("/api/music/track?rel_path=nope.mp3").status_code == 404
+    r = client.get(f"/api/music/cover/{mp3}")
+    # the fixture may or may not carry art; either way the answer is an image or a clean 404
+    assert r.status_code in (200, 404)
+    if r.status_code == 200:
+        assert r.mimetype.startswith("image/") and len(r.data) > 0
+        assert _song(client, mp3)["has_cover"] is True
+
+
+def test_track_in_gallery(client, mp3):
+    assert _song(client, mp3)
+    files = client.get("/api/list?q=&folder=&page=0&recursive=1").get_json().get("files", [])
+    hit = [f for f in files if f.get("kind") == "audio" and f["rel_path"] == mp3]
+    assert hit, "track should show in the gallery as an audio tile"
+    # an image-only token leaves tracks out
+    files = client.get("/api/list?q=is:tagged&folder=&page=0").get_json().get("files", [])
+    assert not [f for f in files if f.get("kind") == "audio"]

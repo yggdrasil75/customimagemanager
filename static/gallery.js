@@ -450,7 +450,7 @@ function renderGallery(files){
   // Books and comics are not part of the image multi-select / bulk-op set:
   // "confirm all boxes" or "run pose" over an epub is meaningless, and letting
   // them into galleryFiles would put them in range of every bulk action.
-  galleryFiles = files.filter(x=>x.kind!=='comic' && x.kind!=='book');
+  galleryFiles = files.filter(x=>x.kind!=='comic' && x.kind!=='book' && x.kind!=='audio');
   const grid=document.getElementById('gallery_grid');
   grid.querySelectorAll('.gallery-item').forEach(el=>io.unobserve(el));
   grid.innerHTML='';
@@ -471,6 +471,12 @@ function renderGallery(files){
         <span class="label">${_esc(item.title)}</span>`;
       grid.appendChild(div);
       if(cover) io.observe(div);
+      return;
+    }
+    if(item.kind==='audio'){
+      // A track (music module): plays in the centre-pane player, like a book
+      // opens in the reader. The module draws its own tile.
+      if(typeof window.musicGalleryTile==='function') grid.appendChild(window.musicGalleryTile(item));
       return;
     }
     if(item.kind==='book'){
@@ -744,6 +750,11 @@ async function selectFile(fn, opts){
   // editor and a 500 in the log, so route to the reader and stop here.
   if(typeof isBookFile==='function' && isBookFile(fn)){
     if(typeof openBook==='function') openBook(fn);
+    return;
+  }
+  // A track goes to the music player, for the same reason.
+  if(typeof window.isAudioFile==='function' && window.isAudioFile(fn) && typeof window.musicOpenFile==='function'){
+    window.musicOpenFile(fn);
     return;
   }
   if(typeof autosaveTO!=='undefined' && autosaveTO && window.currentFile && window.currentFile!==fn){

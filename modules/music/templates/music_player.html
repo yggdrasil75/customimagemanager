@@ -1,0 +1,117 @@
+{# Music player: a centre-pane media mode (like the book reader and the comic
+   reader). Shown via setMediaMode('music'); the track's tags live in the
+   controls pane's Track tab (music_editor.html). The <audio> element lives
+   here and keeps playing while the centre shows something else. #}
+<div id="music_player" class="hidden flex-1 flex flex-col bg-gray-900 min-w-0">
+
+  <!-- header -->
+  <div class="flex items-center gap-3 px-3 py-1.5 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+    <button onclick="closeMusicPlayer()" title="Back to images (playback continues)"
+      class="text-gray-400 hover:text-white text-sm">‹ Back</button>
+    <div class="min-w-0 flex-1">
+      <p id="mp_title_h" class="text-xs font-bold text-blue-400 truncate">Nothing playing</p>
+      <p id="mp_sub_h" class="text-[10px] text-gray-500 truncate">-</p>
+    </div>
+    <span id="mp_queue_label" class="text-[10px] text-gray-400 whitespace-nowrap"></span>
+    <div class="flex gap-1 items-center">
+      <span data-ext-area="music_player_tools" class="contents"></span>
+      <select id="mp_vis_mode" onchange="musicSetVisMode(this.value)" title="Visualizer"
+        class="bg-gray-700 rounded border border-gray-600 text-[10px] px-1 py-1">
+        <option value="bars">Bars</option>
+        <option value="radial">Radial</option>
+        <option value="wave">Waveform</option>
+        <option value="off">Off</option>
+      </select>
+      <button onclick="musicToggleQueue()" id="mp_queue_btn" title="Show / hide up next"
+        class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">☰ Up next</button>
+    </div>
+  </div>
+
+  <div class="flex-1 flex overflow-hidden min-h-0">
+    <!-- stage: cover + visualizer -->
+    <div id="mp_stage" class="flex-1 relative overflow-hidden bg-black min-w-0">
+      <div id="mp_backdrop" class="absolute inset-0 bg-center bg-cover opacity-25 blur-2xl scale-110"></div>
+      <canvas id="mp_vis" class="absolute inset-0 w-full h-full"></canvas>
+      <div class="absolute inset-0 flex items-center justify-center p-6 pb-24 pointer-events-none">
+        <div id="mp_cover_wrap"
+          class="relative w-[min(38vh,50%)] aspect-square rounded-lg overflow-hidden shadow-2xl border border-gray-700 bg-gray-800">
+          <div id="mp_cover_fallback" class="absolute inset-0 flex items-center justify-center text-6xl text-white/70">♪</div>
+          <img id="mp_cover" class="hidden absolute inset-0 w-full h-full object-cover" alt="">
+        </div>
+      </div>
+      <!-- title along the bottom, clear of the cover and the visualizer ring -->
+      <div class="absolute left-0 right-0 bottom-0 px-6 pb-5 pt-10 text-center pointer-events-none
+                  bg-gradient-to-t from-black/70 to-transparent">
+        <div id="mp_title" class="text-xl font-bold truncate drop-shadow">Nothing playing</div>
+        <div id="mp_sub" class="text-sm text-gray-300 truncate drop-shadow">Pick a track from the Music tab</div>
+      </div>
+      <div id="mp_radio_badge"
+        class="hidden absolute top-2 left-2 text-[10px] bg-red-600/90 px-2 py-0.5 rounded font-bold">● RADIO</div>
+    </div>
+
+    <!-- up next -->
+    <div id="mp_queue" class="hidden w-64 flex-shrink-0 border-l border-gray-700 bg-gray-900 flex flex-col">
+      <div class="px-3 py-1.5 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-b border-gray-800 flex items-center">
+        <span>Up next</span><span id="mp_queue_count" class="ml-auto normal-case font-normal"></span>
+      </div>
+      <div id="mp_queue_list" class="flex-1 overflow-auto text-xs"></div>
+    </div>
+  </div>
+
+  <!-- scrub bar + transport -->
+  <div class="flex-shrink-0 bg-gray-800 border-t border-gray-700 px-4 pt-2 pb-3">
+    <div class="flex items-center gap-2 text-[10px] text-gray-400 font-mono">
+      <span id="mp_cur" class="w-10 text-right">0:00</span>
+      <div id="mp_scrub" class="relative flex-1 h-3 cursor-pointer group" title="Seek">
+        <div class="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-1 rounded bg-gray-700 group-hover:h-1.5 transition-all"></div>
+        <div id="mp_buffered" class="absolute left-0 top-1/2 -translate-y-1/2 h-1 rounded bg-gray-600 group-hover:h-1.5 transition-all" style="width:0"></div>
+        <div id="mp_played" class="absolute left-0 top-1/2 -translate-y-1/2 h-1 rounded bg-blue-500 group-hover:h-1.5 transition-all" style="width:0"></div>
+        <div id="mp_knob" class="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-white shadow opacity-0 group-hover:opacity-100" style="left:0"></div>
+      </div>
+      <span id="mp_dur" class="w-10">0:00</span>
+    </div>
+
+    <div class="mt-2 flex items-center gap-2 flex-wrap">
+      <!-- left: sound-driven queue tools -->
+      <div class="flex items-center gap-1 flex-1 min-w-0 flex-wrap">
+        <button id="shuffle_song_btn" onclick="shuffleByCurrent('song')" title="New queue: shuffle by this song's sound"
+          class="text-[10px] bg-gray-700 hover:bg-gray-600 font-bold px-2 py-1 rounded">Shuffle by song</button>
+        <button id="shuffle_artist_btn" onclick="shuffleByCurrent('artist')" title="New queue: shuffle by this artist's sound"
+          class="text-[10px] bg-gray-700 hover:bg-gray-600 font-bold px-2 py-1 rounded">by artist</button>
+        <button onclick="similarToCurrent()" title="List the tracks that sound most like this one"
+          class="text-[10px] bg-indigo-700 hover:bg-indigo-600 font-bold px-2 py-1 rounded">Similar</button>
+      </div>
+
+      <!-- centre: transport -->
+      <div class="flex items-center gap-2">
+        <button onclick="musicToggleShuffle()" id="mp_shuffle" title="Shuffle the queue"
+          class="w-8 h-8 rounded-full text-gray-400 hover:text-white hover:bg-gray-700">⇄</button>
+        <button onclick="playPrev()" title="Previous (or restart)"
+          class="w-9 h-9 rounded-full text-lg text-gray-200 hover:bg-gray-700">⏮</button>
+        <button onclick="musicTogglePlay()" id="mp_play" title="Play / pause (Space)"
+          class="w-12 h-12 rounded-full bg-blue-600 hover:bg-blue-500 text-xl font-bold shadow">▶</button>
+        <button onclick="playNext()" title="Next"
+          class="w-9 h-9 rounded-full text-lg text-gray-200 hover:bg-gray-700">⏭</button>
+        <button onclick="musicCycleRepeat()" id="mp_repeat" title="Repeat: off"
+          class="w-8 h-8 rounded-full text-gray-400 hover:text-white hover:bg-gray-700">↻</button>
+      </div>
+
+      <!-- right: modes + volume -->
+      <div class="flex items-center gap-1 flex-1 justify-end min-w-0 flex-wrap">
+        <button id="auto_similar_btn" onclick="toggleAutoSimilar()"
+          title="When a track ends, play the most similar unplayed track instead of the next in the queue"
+          class="text-[10px] bg-gray-700 hover:bg-gray-600 font-bold px-2 py-1 rounded">Auto-similar</button>
+        <button id="radio_btn" onclick="toggleRadio()"
+          title="Play the whole library as one route through embedding space (rock → blues → jazz → classical ...), round after round. Seasonal tracks stay out; low-rated ones sit rounds out; loved ones may come round twice."
+          class="text-[10px] bg-gray-700 hover:bg-gray-600 font-bold px-2 py-1 rounded">Radio</button>
+        <span id="music_radio_pos" class="text-[10px] text-gray-500"></span>
+        <button onclick="musicToggleMute()" id="mp_mute" title="Mute"
+          class="w-7 h-7 rounded text-gray-300 hover:bg-gray-700">🔊</button>
+        <input id="mp_volume" type="range" min="0" max="1" step="0.01" value="1"
+          oninput="musicSetVolume(this.value)" class="w-20 accent-blue-500" title="Volume">
+      </div>
+    </div>
+  </div>
+
+  <audio id="audio_el" preload="metadata" class="hidden"></audio>
+</div>
