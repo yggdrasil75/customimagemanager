@@ -858,11 +858,7 @@
 // -- registration with the core UI -------------------------------------------
 (function () {
   function init() {
-    if (window.registerControlsTab)
-      registerControlsTab({ id: "trainer", label: "Trainer", feature: "tab.trainer", modeTab: true });
-    if (window.registerLeftTab)
-      registerLeftTab({ id: "trainer", label: "Trainer", feature: "tab.trainer",
-                        paneId: "trainer_pane", controlsTab: "trainer", onShow: trInit });
+    if (window.registerLeftTab) registerLeftTab({ id: "trainer", onShow: trInit });   // the tabs themselves: module.py
     if (window.registerControlButton) {
       registerControlButton("ai_tooling_links", {label: "Trainer", onclick: "setPane('trainer')",
         feature: "tab.trainer", variant: "neutral"});

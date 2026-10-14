@@ -567,7 +567,7 @@
   /** @brief Register the Map left tab and the Places gallery view. */
   function register() {
     if (window.registerLeftTab)
-      registerLeftTab({ id: "map", label: "Map", feature: "tab.map", paneId: "map_pane", onShow });
+      registerLeftTab({ id: "map", onShow });   // the tab itself: module.py
     if (window.registerGalleryView) registerGalleryView(placesView);
   }
   if (document.readyState === "loading") window.addEventListener("DOMContentLoaded", register);

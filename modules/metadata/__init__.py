@@ -31,10 +31,10 @@ def register(host):
     for name in ("exif_editor", "iptc_editor", "xmp_editor"):
         host.add_asset(f"{name}.css", kind="css", module_id="metadata")
         host.add_asset(f"{name}.js", kind="js", module_id="metadata")
-    host.add_asset("metadata_tabs.js", kind="js", module_id="metadata")
-    host.register_controls_pane("exif", "exif_editor.html", feature="meta.exif")
-    host.register_controls_pane("iptc", "iptc_editor.html", feature="meta.iptc")
-    host.register_controls_pane("xmp",  "xmp_editor.html",  feature="meta.xmp")
+    # the three controls tabs: each pane's editor object loads the open file when its tab shows
+    host.register_controls_pane("exif", "exif_editor.html", feature="meta.exif", label="EXIF", loader="exifEditor")
+    host.register_controls_pane("iptc", "iptc_editor.html", feature="meta.iptc", label="IPTC", loader="iptcEditor")
+    host.register_controls_pane("xmp",  "xmp_editor.html",  feature="meta.xmp",  label="XMP",  loader="xmpEditor")
 
     m = host.core
 

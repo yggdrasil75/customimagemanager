@@ -193,8 +193,9 @@ def register(host):
     # -- UI: People tab (left pane) + Person editor (controls pane) + mesh --
     for a in MANIFEST["assets"]:
         host.add_asset(a)
-    host.register_left_pane("faces_pane.html")
-    host.register_controls_pane("person", "person_editor.html", feature="tab.faces")
+    host.register_left_pane("faces_pane.html", tab_id="faces", label="People", feature="tab.faces",
+                            controls_tab="person")
+    host.register_controls_pane("person", "person_editor.html", feature="tab.faces", label="Person", mode_tab=True)
     host.register_centre_pane("person_mesh.html")
 
     # -- background scan worker + persons cache ----------------------------

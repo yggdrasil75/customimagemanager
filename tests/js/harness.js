@@ -28,7 +28,12 @@ function moduleAssets() {
       return { module_id: a.module_id, url: a.url, file: path.join(dir, "static", rel) };
     });
 }
-function hasModule(id) { return moduleAssets().some(a => a.module_id === id); }
+/** @brief The enabled modules' declared UI (host.add_button & co), as /api/module_ui served it. */
+function moduleUi() { return (readJson(SNAP, {})["/api/module_ui"]) || {}; }
+function hasModule(id) {
+  return moduleAssets().some(a => a.module_id === id)
+    || Object.values(moduleUi()).some(list => (list || []).some(e => e.module_id === id));
+}
 
 function makeApi() {
   const calls = [];
@@ -140,4 +145,4 @@ function boot(opts = {}) {
   return { window, document: window.document, api, run, val, errors, tick, dom };
 }
 
-module.exports = { boot, makeApi, moduleAssets, hasModule };
+module.exports = { boot, makeApi, moduleAssets, moduleUi, hasModule };

@@ -8025,6 +8025,7 @@ def _inject_tailwind():
 # Everything a module needs from the core, as one namespace handed over on
 # host.core. Add here instead of letting modules import manager.
 _core_api = SimpleNamespace(
+    run_bulk=run_bulk, resolve_bulk=_resolve_bulk, bulk_reply=_bulk_reply,
     detect_boxes=_detect_obb_or_box, refresh_model_groups=populate_model_selector,
     meta_cache_drop=_meta_cache_drop, folder_scope_clause=_folder_scope_clause,
     api_upload=api_upload, auth=_auth, authmgr=_authmgr, features=features, save_classes=save_classes,
@@ -8337,7 +8338,7 @@ def static_build(filename):
 
 def _module_ui() -> dict:
     """! @brief The declared UI of the enabled modules (host.add_button, add_settings_section,
-    add_left_tab, add_controls_tab, add_tile_badge) for the page's module_ui.js."""
+    register_left_pane / register_controls_pane tabs, add_tile_badge) for the page's module_ui.js."""
     return {k: [dict(e) for e in v if not e["module_id"] or module_registry.is_enabled(e["module_id"])]
             for k, v in module_host.ui.items()}
 

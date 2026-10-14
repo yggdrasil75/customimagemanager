@@ -1,5 +1,9 @@
 /* Map module: thumbnail markers and clusters. Leaflet's own CSS is loaded
    lazily by map.js from /api/map/vendor/. */
+/* Leaflet stacks its panes at z-index 400..1000 inside the map; without a
+   stacking context of its own those escape the page and sit above modals
+   (Settings is z-50). isolation keeps them inside the map box. */
+#map_canvas, .cim-minimap, .me-map { isolation: isolate; position: relative; z-index: 0; }
 #map_canvas { background: var(--cim-gray-800, #1f2937); }
 #map_canvas .leaflet-container { background: var(--cim-gray-800, #1f2937); }
 

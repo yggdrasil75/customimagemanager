@@ -701,7 +701,7 @@ def register(host):
 
     host.add_asset("map.js")
     host.add_asset("map.css", kind="css")
-    host.register_left_pane("map_pane.html")
+    host.register_left_pane("map_pane.html", tab_id="map", label="Map", feature="tab.map")
     host.provide_service("geo", {"refresh": refresh, "rescan": _scan_async,
                                  "place_of": _place_of, "resolve": places.resolve,
                                  "locate": _locate, "forward": places.forward})

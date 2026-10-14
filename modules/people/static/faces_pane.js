@@ -752,18 +752,13 @@ async function rescanFaces() {
 (function () {
   function init() {
     if (window.registerLeftTab) {
-      registerLeftTab({
-        id: "faces", label: "People", feature: "tab.faces", paneId: "faces_pane",
-        controlsTab: "person",
+      registerLeftTab({            // the tab itself (label, feature, controls tab): module.py
+        id: "faces",
         onShow: () => {
           const l = document.getElementById("faces_list");
           if (!l || !l.children.length) loadFaces();
         },
       });
-    }
-    if (window.registerControlsTab) {
-      registerControlsTab({ id: "person", label: "Person", feature: "tab.faces",
-                            modeTab: true, onShow: () => {} });
     }
     if (window.registerMediaMode) {
       registerMediaMode({ id: "person", centreId: "person_pane", controlsTab: "person" });

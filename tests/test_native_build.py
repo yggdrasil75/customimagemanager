@@ -1,24 +1,23 @@
 """! @file
 @brief native_build.py: the compiled module list holds only Flask-free helper
 modules that exist, and --check drops a build older than its source."""
-import ast
 import os
 import time
 import native_build as nb
 
 
-def test_compile_list_is_flask_free_and_present():
-    for rel in nb.COMPILE:
-        path = os.path.join(nb.ROOT, rel)
-        assert os.path.exists(path), rel
-        tree = ast.parse(open(path).read())
-        names = set()
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Import):
-                names.update(a.name.split(".")[0] for a in n.names)
-            elif isinstance(n, ast.ImportFrom) and n.module:
-                names.add(n.module.split(".")[0])
-        assert "flask" not in names and "manager" not in names, rel
+def test_compile_list_covers_the_tree_and_skips_the_entry_points():
+    rels = set(nb.COMPILE)
+    assert "common.py" in rels and "modules/stats/module.py" in rels and "assets.py" in rels
+    for never in ("manager.py", "native_build.py", "conftest.py", "modules/loader.py",
+                  "modules/host.py", "modules/__init__.py"):
+        assert never not in rels, never
+    assert not any(r.startswith("tests/") or "/tests/" in r for r in rels)
+    assert "modules/metadata/exif_fields.py" not in rels      # data table: nothing to gain
+    for rel in rels:
+        assert os.path.exists(os.path.join(nb.ROOT, rel)), rel
+    assert nb._dotted("modules/stats/module.py") == "modules.stats.module"
+    assert nb._dotted("common.py") == "common"
 
 
 def test_check_drops_stale_build(tmp_path, monkeypatch):

@@ -438,10 +438,7 @@ function showToastM(msg) {
 (function () {
   function init() {
     if (!window.registerLeftTab) return;
-    registerLeftTab({
-      id: "music", label: "Music", feature: "tab.music", paneId: "music_pane",
-      onShow: () => { musicRefreshStatus(); musicView(musicCurrentView || 'artists'); },
-    });
+    registerLeftTab({ id: "music", onShow: () => { musicRefreshStatus(); musicView(musicCurrentView || 'artists'); } });
   }
   if (document.readyState === "loading") window.addEventListener("DOMContentLoaded", init);
   else init();

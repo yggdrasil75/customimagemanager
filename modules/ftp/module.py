@@ -24,6 +24,7 @@ shows the server state, connected sessions and recent events.
 """
 import os
 import threading
+import time
 
 from flask import jsonify
 
@@ -39,7 +40,6 @@ MANIFEST = {
     "requires":    ["auth"],
     "pip":         ["pyftpdlib"],
     "pip_optional": ["pyOpenSSL:OpenSSL", "cryptography"],
-    "assets":      ["ftp.js"],
 }
 
 TAB = "ftp"
@@ -207,8 +207,32 @@ def register(host):
             "error": runner.error,
             "note": state["note"],
             "sessions": service.session_rows(),
+            "view": _view(events),
             "events": events,
         })
+
+    def _view(events):
+        """! @brief The settings tab's status block (host.add_settings_section)."""
+        when = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) if t else ""
+        if runner.running():
+            a = runner.address or ("?", "?")
+            rows = [{"label": "Server", "value": f"running on {a[0]}:{a[1]}, encryption: {runner.tls}", "tone": "ok"}]
+        elif runner.error:
+            rows = [{"label": "Server", "value": "not running: " + str(runner.error), "tone": "danger"}]
+        else:
+            rows = [{"label": "Server", "value": "starting..." if cfg()["ftp_enabled"] else "off"}]
+        lst = []
+        if state["note"]:
+            lst.append({"text": state["note"], "tone": "warn"})
+        if not ftp_server.HAVE_TLS:
+            lst.append({"text": "FTPS needs pyOpenSSL on the server.", "tone": "muted"})
+        for s in service.session_rows():
+            lst.append({"text": f"{s.get('user') or '(signing in)'} from {s.get('ip')} since {when(s.get('since'))}"
+                                + (", TLS" if s.get("tls") else "") + (", API key" if s.get("key") else "")})
+        return {"rows": rows, "list": lst, "live": True,
+                "log": [{"at": e.get("at"), "text": f"{e.get('kind')}" + (" " + e["user"] if e.get("user") else "")
+                         + (f" ({e['ip']})" if e.get("ip") else "") + (": " + e["detail"] if e.get("detail") else "")}
+                        for e in events]}
 
     def api_restart():
         apply()
@@ -216,7 +240,11 @@ def register(host):
 
     host.add_route("/api/ftp/status", api_status, feature="settings." + TAB)
     host.add_route("/api/ftp/restart", api_restart, methods=["POST"], feature="settings." + TAB, level="write")
-    host.add_asset("ftp.js")
+    host.add_settings_section(TAB, "server", status_url="/api/ftp/status", poll=5,
+                              text="Changes take effect when saved. Accounts sign in with their password, or an API key "
+                                   "as the password (needed for accounts with a second factor). Uploads go through the upload queue.",
+                              actions=[{"id": "restart", "label": "Restart server", "url": "/api/ftp/restart",
+                                        "title": "Restart the FTP server with the saved settings"}])
     def apply_now():
         """! @brief Apply the settings now, dropping a restart a save scheduled."""
         t = pending["timer"]

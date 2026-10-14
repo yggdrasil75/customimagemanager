@@ -55,7 +55,7 @@ def register(host):
     host.register_feature("tab.music", "Music tab (read=listen, write=edit tags)",
                           section="gallery_tabs", section_label="Gallery tabs", default="read")
     host.add_asset("music.js")
-    host.register_left_pane("music_pane.html")
+    host.register_left_pane("music_pane.html", tab_id="music", label="Music", feature="tab.music")
 
     # progress shared with the UI
     state = {"indexing": False, "indexed": 0, "total": 0,

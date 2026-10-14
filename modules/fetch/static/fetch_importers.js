@@ -2,7 +2,8 @@
  * UI they share. It belongs to the fetch module because importers ARE fetchers:
  * "Import now" queues a fetch job and "every N hours" is a fetch watch.
  *
- * An importer's own script calls ImportKit.mount({...}) with its fields. The
+ * An importer declares its tab in Python (host.add_import_tab); the declarations
+ * arrive with the page (window.CIM_MODULE_UI.import_tabs) and are mounted here. The
  * tab lists the importer's SOURCES (an account, a folder), each with its
  * schedule, last run and progress, and a form to add or edit one. Saving is an
  * action (it isn't tied to the settings modal's Save button). A source that
@@ -238,4 +239,8 @@
   const st = document.createElement("style"); st.textContent = css; document.head.appendChild(st);
 
   window.ImportKit = { mount };
+  const declared = (window.CIM_MODULE_UI && window.CIM_MODULE_UI.import_tabs) || null;
+  (declared ? Promise.resolve(declared)
+            : fetch("/api/module_ui").then(r => r.json()).then(u => u.import_tabs || []).catch(() => []))
+    .then(tabs => tabs.forEach(mount));
 })();

@@ -104,7 +104,7 @@ class Host:
         # declarative UI (see "Declared UI" below): the core's module_ui.js renders
         # these; a module needs no JS of its own for them
         self.ui = {"buttons": [], "sections": [], "left_tabs": [], "controls_tabs": [],
-                   "tile_badges": []}
+                   "tile_badges": [], "import_tabs": []}
         # the module being registered, so contributions are attributed to it
         self._current_module = None
 
@@ -370,19 +370,37 @@ class Host:
                     + (f" - {help}" if help else ""),
             "module_id": self._current_module}
 
-    def register_left_pane(self, template):
-        """! @brief Add a left-column pane partial; pair it with a left tab of the same pane id."""
-        self.left_panes.append({"template": template,
-                                "module_id": self._current_module})
+    def register_left_pane(self, template, *, tab_id=None, label=None, feature=None,
+                           pane_id=None, controls_tab=None):
+        """! @brief Add a left-column pane partial and, with `tab_id`, the tab that shows it
+        (the page registers it; a module's JS adds behaviour with registerLeftTab({id, onShow})).
+        @param feature      permission gating the tab (default tab.<tab_id>).
+        @param pane_id      the pane element's id (default <tab_id>_pane).
+        @param controls_tab a controls tab shown only while this tab is active."""
+        self.left_panes.append({"template": template, "module_id": self._current_module})
+        if tab_id:
+            self.ui["left_tabs"].append({"id": tab_id, "label": label or tab_id, "feature": feature,
+                                         "pane_id": pane_id, "controls_tab": controls_tab,
+                                         "module_id": self._current_module})
 
-    def register_controls_pane(self, tab_id, template, *, feature=None):
-        """! @brief Add a controls-pane partial, rendered server-side as #controls_pane_<tab_id>.
+    def register_controls_pane(self, tab_id, template, *, feature=None, label=None,
+                               mode_tab=False, loader=None):
+        """! @brief Add a controls-pane partial, rendered server-side as #controls_pane_<tab_id>,
+        and, with `label`, the tab that shows it (the page registers it; a module's JS adds
+        behaviour with registerControlsTab({id, onShow})).
         @param template  template in this module's templates/ folder.
-        @param feature   optional data-feature gate on the pane.
+        @param feature   optional data-feature gate on the pane and tab.
+        @param mode_tab  shown only while a left tab claims it (controls_tab=).
+        @param loader    name of a page global whose .load(filename) fills the pane when
+                         the tab shows (the metadata editors: "exifEditor").
         """
         self.controls_panes.append({
             "tab_id": tab_id, "template": template, "feature": feature,
             "module_id": self._current_module})
+        if label:
+            self.ui["controls_tabs"].append({"id": tab_id, "label": label, "feature": feature,
+                                             "mode_tab": bool(mode_tab), "loader": loader,
+                                             "module_id": self._current_module})
 
     # -- Declared UI ------------------------------------------------------------
     # Widgets a module describes in Python and the core renders (static/module_ui.js):
@@ -459,8 +477,13 @@ class Host:
                            action, and every `poll` seconds while `busy`.
         @param status      fn() -> that view, when no route exists yet.
         @param actions     [{"id", "label", "url" (POST) | "run": fn(body), "variant"?,
-                            "title"?, "confirm"?, "level"?}]; the reply's `message` (or
-                            `note`) is shown, `error` is a failure.
+                            "title"?, "confirm"?, "level"?, "options_from"?}]; the reply's
+                            `message` (or `note`) is shown, `error` is a failure.
+                            options_from names a view key holding [{"value", "label"}]: a
+                            select next to the button, its value posted as `option`.
+                           The view may also carry "pre" (a log: text or lines), "link"
+                           ({"url", "label"}) and "live": true (re-read every `poll`
+                           seconds while the pane is on screen).
         @param feature     gate; defaults to the pane's settings.<pane> permission.
         """
         feature = feature or f"settings.{pane}"
@@ -471,27 +494,27 @@ class Host:
         for a in actions:
             url = a.get("url") or self._ui_route("section", uid, "action_" + a["id"], a["run"],
                                                  feature=feature, level=a.get("level", "write"))
-            acts.append({k: a.get(k) for k in ("id", "label", "variant", "title", "confirm")} | {"url": url})
+            acts.append({k: a.get(k) for k in ("id", "label", "variant", "title", "confirm", "options_from")} | {"url": url})
         self.ui["sections"].append({
             "pane": pane, "id": uid, "title": title, "text": text, "poll": poll, "order": order,
             "feature": feature, "status_url": status_url, "actions": acts, "mount": mount,
             "module_id": self._current_module})
 
-    def add_left_tab(self, tab_id, label, template, *, feature=None, controls_tab=None):
-        """! @brief A left-column tab whose pane is the server-rendered `template`
-        (register_left_pane + the page-side registration in one)."""
-        self.register_left_pane(template)
-        self.ui["left_tabs"].append({"id": tab_id, "label": label, "feature": feature,
-                                     "controls_tab": controls_tab,
-                                     "module_id": self._current_module})
-
-    def add_controls_tab(self, tab_id, label, template, *, feature=None, mode_tab=False):
-        """! @brief A controls-pane tab whose pane is the server-rendered `template`
-        (register_controls_pane + the page-side registration in one)."""
-        self.register_controls_pane(tab_id, template, feature=feature)
-        self.ui["controls_tabs"].append({"id": tab_id, "label": label, "feature": feature,
-                                         "mode_tab": bool(mode_tab),
-                                         "module_id": self._current_module})
+    def add_import_tab(self, tab_id, label, *, fetcher, title, fields, intro="", sources_label="Sources",
+                       add_label="Add", icon="\U0001f4e5", admin_only=True, common=True):
+        """! @brief A library-importer settings tab (Immich, Takeout, iCloud...): the tab plus
+        the shared importer UI of the fetch module (its ImportKit), described here.
+        @param fetcher  the fetch source id (/api/import/<fetcher>/...).
+        @param fields   [{"key", "label", "kind": text|number|toggle|select|path, "default"?,
+                         "help"?, "secret"?, "placeholder"?, "options"?: [[value, label]]}].
+        @param intro    HTML shown above the sources.
+        @param common   add the shared schedule fields.
+        """
+        self.add_settings_tab(tab_id, label, icon=icon, admin_only=admin_only)
+        self.ui["import_tabs"].append({
+            "tab": tab_id, "fetcher": fetcher, "title": title, "intro": intro, "fields": list(fields),
+            "sourcesLabel": sources_label, "addLabel": add_label, "common": common,
+            "module_id": self._current_module})
 
     def add_tile_badge(self, field, text, *, title=None, tone="accent", feature=None, when=None):
         """! @brief A badge on every gallery tile whose row has `field` (a file enricher's

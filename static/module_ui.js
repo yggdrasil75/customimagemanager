@@ -106,11 +106,29 @@
     if (d.log && d.log.length) h += `<div class="mt-2 text-gray-500">Log</div><ul class="text-[11px] text-gray-400">${d.log.map(l =>
       `<li>${esc(when(l.at))}${l.at ? " - " : ""}${esc(l.text)}</li>`).join("")}</ul>`;
     if (d.note) h += `<div class="text-[10px] text-gray-500 mt-1">${esc(d.note)}</div>`;
+    if (d.link) h += `<a href="${esc(d.link.url)}" target="_blank" class="text-sky-400 hover:text-sky-300 text-[11px]">${esc(d.link.label || d.link.url)} ↗</a>`;
+    if (d.pre != null) h += `<pre data-ui-pre class="bg-black/60 border border-gray-700 rounded p-2 mt-2 max-h-56 overflow-auto text-[10px] font-mono whitespace-pre-wrap">${esc(Array.isArray(d.pre) ? d.pre.join("\n") : d.pre)}</pre>`;
+    const oldPre = el.querySelector("[data-ui-pre]");
+    const atBottom = !oldPre || oldPre.scrollTop + oldPre.clientHeight >= oldPre.scrollHeight - 4;
     el.innerHTML = h;
-    el.closest("[data-ui-section]").querySelectorAll("button[data-ui-action]").forEach(b => { b.disabled = !!d.busy; });
+    const pre = el.querySelector("[data-ui-pre]");
+    if (pre && atBottom) pre.scrollTop = pre.scrollHeight;
+    const box = el.closest("[data-ui-section]");
+    box.querySelectorAll("button[data-ui-action]").forEach(b => { b.disabled = !!d.busy; });
+    // a select an action reads its option from: filled from the view's list of {value, label}
+    box.querySelectorAll("select[data-ui-options-from]").forEach(sel => {
+      const opts = d[sel.dataset.uiOptionsFrom] || [];
+      if (sel.options.length || !opts.length) return;
+      for (const o of opts) { const op = document.createElement("option"); op.value = o.value; op.textContent = o.label || o.value; sel.appendChild(op); }
+    });
     const key = sec.module_id + "/" + sec.id;
-    if (d.busy && sec.poll && !timers[key]) timers[key] = setInterval(() => refresh(sec), sec.poll * 1000);
-    if (!d.busy && timers[key]) { clearInterval(timers[key]); delete timers[key]; }
+    // keep reading while busy (poll=) or while the view says it is live and the pane is on screen
+    const again = (d.busy && sec.poll) || (d.live && sec.poll);
+    if (again && !timers[key]) timers[key] = setInterval(() => {
+      if (!el.isConnected || !el.offsetParent) { clearInterval(timers[key]); delete timers[key]; return; }
+      refresh(sec);
+    }, sec.poll * 1000);
+    if (!again && timers[key]) { clearInterval(timers[key]); delete timers[key]; }
   }
   async function refresh(sec) {
     const el = document.getElementById(`ui_status_${sec.module_id}_${sec.id}`);
@@ -136,7 +154,8 @@
       box.innerHTML = (sec.title ? `<div class="text-xs font-bold text-gray-300 mb-1">${esc(sec.title)}</div>` : "")
         + (sec.text ? `<p class="text-[11px] text-gray-500 mb-2">${esc(sec.text)}</p>` : "")
         + (sec.actions.length ? `<div class="flex flex-wrap items-center gap-2 mb-2">${sec.actions.map(a =>
-            btn({ id: `${sid}_${a.id}`, label: a.label, variant: a.variant || "secondary", size: "sm", title: a.title || undefined,
+            (a.options_from ? `<select data-ui-options-from="${esc(a.options_from)}" data-ui-for="${esc(a.id)}" class="text-xs bg-gray-700 border border-gray-600 rounded px-1 py-1 text-white"></select>` : "")
+            + btn({ id: `${sid}_${a.id}`, label: a.label, variant: a.variant || "secondary", size: "sm", title: a.title || undefined,
                   attrs: { "data-ui-action": a.id } })).join("")}<span class="text-xs text-gray-400" data-ui-msg></span></div>` : "")
         + `<div id="ui_status_${sec.module_id}_${sec.id}" class="text-xs text-gray-300"></div>`;
       pane.appendChild(box);
@@ -145,8 +164,9 @@
         box.querySelector(`#${sid}_${a.id}`).addEventListener("click", async () => {
           if (a.confirm && !confirm(a.confirm)) return;
           msg.textContent = a.label + "...";
+          const sel = box.querySelector(`select[data-ui-for="${a.id}"]`);
           try {
-            const d = await post(a.url, {});
+            const d = await post(a.url, sel ? { option: sel.value } : {});
             msg.textContent = d.success ? (d.message || d.note || "Done.") : "Failed: " + (d.error || "");
           } catch (e) { msg.textContent = "Failed: " + e; }
           refresh(sec);
@@ -160,9 +180,12 @@
   // -- tabs and badges ----------------------------------------------------------
   function tabs(ui) {
     for (const t of ui.left_tabs || []) if (window.registerLeftTab)
-      registerLeftTab({ id: t.id, label: t.label, feature: t.feature || undefined, controlsTab: t.controls_tab || undefined });
+      registerLeftTab({ id: t.id, label: t.label, feature: t.feature || undefined, paneId: t.pane_id || undefined,
+        controlsTab: t.controls_tab || undefined });
     for (const t of ui.controls_tabs || []) if (window.registerControlsTab)
-      registerControlsTab({ id: t.id, label: t.label, feature: t.feature || undefined, modeTab: t.mode_tab });
+      registerControlsTab({ id: t.id, label: t.label, feature: t.feature || undefined, modeTab: t.mode_tab,
+        onShow: t.loader ? fn => { const ed = window[t.loader]; if (ed && typeof ed.load === "function") {
+          try { ed.load(fn); } catch (e) { console.error(t.id + " load failed", e); } } } : undefined });
   }
   function badges(list) {
     if (!list.length || !window.registerGalleryTileHook) return;

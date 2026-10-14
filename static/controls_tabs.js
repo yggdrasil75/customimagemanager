@@ -23,13 +23,17 @@
   // module doesn't know WHERE its tab goes - core places it.
   const REGISTERED = {};   // id -> {label, feature, onShow}
 
+  // A tab is declared in Python (host.register_controls_pane(label=...)) and
+  // arrives with the page; a module's JS registers only what needs code, so a
+  // later call with the same id MERGES (e.g. {id, onShow}) instead of replacing.
   function registerControlsTab(spec) {
     if (!spec || !spec.id) return;
+    const cur = REGISTERED[spec.id] || { label: spec.id, feature: null, onShow: null, modeTab: false };
     REGISTERED[spec.id] = {
-      label: spec.label || spec.id,
-      feature: spec.feature || null,
-      onShow: typeof spec.onShow === "function" ? spec.onShow : null,
-      modeTab: !!spec.modeTab,   // hidden unless a left tab claims it (panes.js applyControlsMode)
+      label: spec.label || cur.label,
+      feature: spec.feature || cur.feature,
+      onShow: typeof spec.onShow === "function" ? spec.onShow : cur.onShow,
+      modeTab: spec.modeTab != null ? !!spec.modeTab : cur.modeTab,   // hidden unless a left tab claims it
     };
     // The pane (#controls_pane_<id>) is contributed server-side by the module
     // (host.register_controls_pane), so it's already in the DOM - we only wire
@@ -42,16 +46,19 @@
     const bar = document.querySelector('[data-ext-area="controls_tabs"]');
     if (!bar) return;
     for (const id in REGISTERED) {
-      if (bar.querySelector(`[data-tab="${id}"]`)) continue;   // already placed
       const t = REGISTERED[id];
-      const btn = document.createElement("button");
-      btn.dataset.tab = id;
-      btn.className = "controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white";
+      let btn = bar.querySelector(`[data-tab="${id}"]`);
+      if (!btn) {
+        btn = document.createElement("button");
+        btn.dataset.tab = id;
+        btn.className = "controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white";
+        btn.addEventListener("click", () => setControlsTab(id));
+        bar.appendChild(btn);
+        if (t.modeTab) { btn.setAttribute("data-mode-tab", ""); btn.classList.add("hidden"); }
+      }
+      // a merged registration may have brought the label / feature after the button was made
       if (t.feature) btn.setAttribute("data-feature", t.feature);
-      if (t.modeTab) { btn.setAttribute("data-mode-tab", ""); btn.classList.add("hidden"); }
       btn.textContent = t.label;
-      btn.addEventListener("click", () => setControlsTab(id));
-      bar.appendChild(btn);
     }
     if (window.applyFeatureVisibility) applyFeatureVisibility(bar);
   }

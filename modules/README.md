@@ -170,7 +170,6 @@ touching `media_types.py`.
 | `host.add_settings_tab(id, label, icon, admin_only, group=)` | your own Settings tab (fields with `pane=<id>` render in it; gets the permission `settings.<id>`) |
 | `host.add_button(area, id, label, url=, needs=, feature=, options=, on_done=)` | a button the core draws that POSTs to one of your routes (see "Declared UI") |
 | `host.add_settings_section(pane, id, status_url=, actions=, text=, mount=)` | a status + action block in a settings pane, drawn by the core from your routes |
-| `host.add_left_tab(id, label, template, feature=)` / `add_controls_tab(...)` | a tab for a server-rendered pane, registered on the page by the core |
 | `host.add_tile_badge(field, text, tone=)` | a badge on gallery tiles from a file enricher's field |
 | `host.add_user_setting(key, label=, kind=, default=, validate=, options=, feature=)` / `host.user_setting(key)` | a per-user setting in Settings -> User settings / its value for the current user |
 | `host.add_account_field(key, label, options=, scopes=)` | a field an admin sets per account / group in Settings -> Users (`g.user["account"][key]`) |
@@ -184,7 +183,7 @@ touching `media_types.py`.
 | `host.register_gallery_filter(clause)` | hide container members (comic pages) from the flat gallery |
 | `host.extend_media_type(kind, exts=, mime_map=)` | add extensions to a kind another module owns (comics -> book) |
 | `host.add_worker_source(name, claim, handle, ...)` | a background worker source |
-| `host.register_controls_pane(tab_id, template, feature=)` / `register_left_pane` / `register_centre_pane` / `register_app_modal` | server-rendered UI partials from your `templates/` |
+| `host.register_controls_pane(tab_id, template, feature=, label=, mode_tab=, loader=)` / `register_left_pane(template, tab_id=, label=, feature=, controls_tab=)` / `register_centre_pane` / `register_app_modal` | server-rendered UI partials from your `templates/`; with a label / tab_id the tab that shows the pane is declared too |
 | `host.provide_service(name, obj, priority=0)` / `get_service(name)` | publish / consume module-to-module APIs |
 | `host.register_login_check(fn)` | a step between a correct password and the session: `fn(user_row, login_data)` -> None, or `(json, status)` to answer the login instead (2FA) |
 | `host.on(event, fn)` / `host.emit(event, **kw)` | subscribe to / raise core events |
@@ -509,25 +508,40 @@ host.add_settings_section("email", "tools", status_url="/api/email/status", text
                           actions=[{"id": "test", "label": "Send test email", "url": "/api/email/test"}])
 #   status=fn() / "run": fn(body) make the routes for you
 
-# Tabs for server-rendered panes (templates/ of the module), registered on the page too.
-host.add_left_tab("music", "Music", "music_pane.html", feature="tab.music")
-host.add_controls_tab("comic", "Comic", "comic_pane.html", feature="tab.comics")
+# A pane (templates/ of the module) with the tab that shows it. The page registers the
+# tab; JS adds behaviour only where there is any: registerLeftTab({id: "music", onShow})
+# merges into the declared tab (same for registerControlsTab).
+host.register_left_pane("music_pane.html", tab_id="music", label="Music", feature="tab.music")
+host.register_controls_pane("comic", "comic_pane.html", feature="comics.edit", label="Comic", mode_tab=True)
+# a pane holding an editor object: its .load(filename) runs when the tab shows
+host.register_controls_pane("exif", "exif_editor.html", feature="meta.exif", label="EXIF", loader="exifEditor")
 
 # A badge on every tile whose row (from your file enricher) has the field.
 host.add_tile_badge("motion", "LIVE", title="Motion photo", tone="accent")
+
+# A library importer's tab (the fetch module's shared importer UI): the tab, its intro
+# and its source fields, all here; /api/import/<fetcher>/... is what it talks to.
+host.add_import_tab("immich_import", "Immich import", fetcher="immich", title="Import from Immich",
+                    intro="...", fields=[{"key": "url", "label": "Immich URL", "kind": "text"}])
 ```
 
+A status view may also carry `"pre"` (a log block: text or lines), `"link"`
+(`{"url", "label"}`) and `"live": true` (keep re-reading every `poll` seconds while
+the pane is on screen); an action with `"options_from": "<view key>"` gets a select
+filled from that key's `[{"value", "label"}]` and posts its value as `option`.
+
 `modules/example_hello`, `email`, `storage_alerts`, `personal_iqa`, `ocr`,
-`barcodes` and `export` are written this way. The descriptors are inlined in the
+`barcodes`, `export`, `segmentation`, `ftp`, `kobold`, the metadata editors' tabs
+and the three library importers are written this way. The descriptors are inlined in the
 page (`window.CIM_MODULE_UI`, also `/api/module_ui`); only enabled modules' are.
 
 ## Front-end
 
 Assets are served at `/modules/<id>/static/<file>` and injected on page load.
 
-- **Controls-pane tab**: `registerControlsTab({id, label, feature, onShow})`
-  in your JS plus `host.register_controls_pane(id, "pane.html")` for the
-  server-rendered pane.
+- **Controls-pane tab**: `host.register_controls_pane(id, "pane.html", label=...)`
+  declares pane and tab; `registerControlsTab({id, onShow})` in your JS adds
+  behaviour to it if there is any.
 - **Buttons**: `registerControlButton("ai_tools", {label, onclick, variant, id, feature, title})`
   (areas: `ai_tools`, `viewer_toggles`, `gallery_bulk`, ...). The object is a
   `cimButton()` spec: the core builds the button (`cim-btn cim-btn-<variant>
@@ -537,10 +551,11 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   Buttons you render yourself use `cimButton({...})` too. Raw HTML is still
   accepted for non-button controls (a select, a checkbox); wrap several
   elements in one element, an area appends a registration's first element.
-- **Left tab / centre pane**: `registerLeftTab({id, label, feature, paneId, onShow, controlsTab})`
-  (`controlsTab` names a `registerControlsTab({..., modeTab: true})` tab that only
-  shows while your left tab is active - the Trainer does this)
-  pairs with `host.register_left_pane`; a module that takes over the centre
+- **Left tab / centre pane**: `host.register_left_pane("pane.html", tab_id=, label=,
+  feature=, controls_tab=)` declares pane and tab (`controls_tab` names a
+  `mode_tab=True` controls pane shown only while your left tab is active - the
+  Trainer does this); `registerLeftTab({id, onShow})` in your JS adds behaviour;
+  a module that takes over the centre
   (a reader, a person's mesh) pairs `host.register_centre_pane` with
   `registerMediaMode({id, centreId, controlsTab})` and calls `setMediaMode(id)`.
 - **Gallery views**: `registerGalleryView({id, label, title, feature, mount(host, ctx),

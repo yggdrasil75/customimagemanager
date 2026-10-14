@@ -215,9 +215,7 @@ document.addEventListener('keydown', e => {
       registerMediaMode({ id: 'comic', centreId: 'comic_pane', controlsTab: 'comic',
                           tabs: () => comicState.kind === 'archive' && window.booksShowFor ? ['book']
                               : comicState.kind === 'folder' ? ['main', 'exif', 'iptc', 'xmp'] : [] });
-    if (window.registerControlsTab)
-      registerControlsTab({ id: 'comic', label: 'Comic', feature: 'comics.edit', modeTab: true,
-                            onShow: comicRenderEditor });
+    if (window.registerControlsTab) registerControlsTab({ id: 'comic', onShow: comicRenderEditor });   // the tab itself: module.py
     document.getElementById('comic_show_empty')?.addEventListener('change', comicRenderEditor);
     if (window.registerControlButton)
       registerControlButton('gallery_tools', {label: 'Make comic', onclick: 'makeComic()', id: 'btn_make_comic',
