@@ -27,7 +27,7 @@ import time
 
 from flask import request, jsonify, Response
 
-from . import plex
+from . import movie_import
 
 MANIFEST = {
     "id":          "tv",

@@ -8,7 +8,7 @@ import shutil
 
 import pytest
 
-from modules.tv import plex
+from modules.tv import movie_import
 
 
 # -- movie_import.py: pure ---------------------------------------------------------

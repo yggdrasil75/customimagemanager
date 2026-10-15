@@ -1,32 +1,28 @@
 """! @file
-@brief Pure helpers for the Plex movie layout: file-name parsing, sidecar
-discovery, .nfo reading and SRT to VTT. No app imports, no I/O: every
-function takes strings or lists of names and returns plain values, so the
-module's indexer and the unit tests both use them as they are.
+@brief Pure helpers for the Plex TV layout: episode / season / show name
+parsing, sidecar discovery, .nfo reading and SRT to VTT. No app imports, no
+I/O. The nfo / subtitle / VTT helpers are the movies module's, shipped again
+here (modules share nothing through the core).
 
 Layout (what Plex expects):
-    Title (Year)/Title (Year).mkv            the movie
-    Title (Year)/Title (Year) - pt1.mkv      a part of a multi-part movie
-    Title (Year)/Title (Year)-trailer.mkv    an inline extra
-    Title (Year)/Trailers/x.mkv              an extra in an extras folder
-    Title (Year)/poster.jpg, fanart.jpg      art (also Title (Year)-poster.jpg)
-    Title (Year)/Title (Year).nfo            Kodi / Plex metadata (XML)
-    Title (Year)/Title (Year).en.srt         subtitles (lang, .forced, .sdh)
-    Title (Year).mkv                         a loose movie straight in the section
+    Show (Year)/Season 01/Show - s01e01 - Episode Title.mkv
+    Show (Year)/Specials/Show - s00e01 - Title.mkv       (Season 00 too)
+    Show (Year)/Season 1/Show - S01E01.mkv               (no zero-pad, upper-case)
+    Show (Year)/Season 01/Show - 1x01 - Title.mkv        (NxNN)
+    Show (Year)/Season 01/Show - s01e01-e02 - Title.mkv  (a multi-episode file)
+    Show (Year)/poster.jpg, fanart.jpg, tvshow.nfo, season01-poster.jpg,
+    Show (Year)/Season 01/Show - s01e01 - Title.nfo / .en.srt
 """
 import json
 import re
 import xml.etree.ElementTree as ET
 
-## @brief Extras folders Plex recognises inside a movie folder (lower-case).
+## @brief Extras folders Plex recognises inside a show or season folder (lower-case).
 EXTRAS_FOLDERS = {
     "behind the scenes": "behindthescenes", "deleted scenes": "deleted",
     "featurettes": "featurette", "interviews": "interview", "scenes": "scene",
     "shorts": "short", "trailers": "trailer", "other": "other", "extras": "other",
 }
-## @brief Inline extra suffixes: "Title (Year)-trailer.mkv".
-EXTRA_SUFFIXES = {"behindthescenes", "deleted", "featurette", "interview", "scene",
-                  "short", "trailer", "other"}
 ## @brief Image extensions a poster / fanart may have (the app stores uploads as .jxl).
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".jxl", ".avif", ".gif", ".bmp"}
 ## @brief Subtitle extensions.
@@ -34,9 +30,12 @@ SUBTITLE_EXTS = {".srt", ".vtt", ".ass", ".ssa", ".sub"}
 
 _TITLE_YEAR = re.compile(r"^(?P<title>.*?)\s*\((?P<year>(?:18|19|20)\d{2})\)\s*(?P<rest>.*)$")
 _TAGS = re.compile(r"\s*[\[{][^\]}]*[\]}]")
-_PART = re.compile(r"(?:^|[\s._-])(?:pt|part|cd|disc|disk)\s*(?P<n>\d{1,2})$", re.I)
-_EDITION = re.compile(r"\{edition-([^}]+)\}", re.I)
 _ARTICLE = re.compile(r"^(the|a|an)\s+", re.I)
+_SEASON_DIR = re.compile(r"^(?:season\s*(?P<n>\d{1,4})|s(?P<s>\d{1,4})|(?P<sp>specials?))$", re.I)
+# s01e01, S01E01, s01e01-e02, s01e01e02, s1e1, 1x01, 1x01-02
+_SXXEYY = re.compile(r"(?:^|[\s._\-\[(])s(?P<s>\d{1,4})\s*[._-]?\s*e(?P<e>\d{1,4})"
+                     r"(?:\s*[-_]?\s*e(?P<e2>\d{1,4}))?(?=$|[\s._\-\])])", re.I)
+_NXNN = re.compile(r"(?:^|[\s._\-\[(])(?P<s>\d{1,2})x(?P<e>\d{1,4})(?:-(?P<e2>\d{1,4}))?(?=$|[\s._\-\])])", re.I)
 
 
 def _ext(name):
@@ -59,20 +58,12 @@ def clean_title(text):
 
 
 def parse_title_year(name):
-    """! @brief "Title (1999) {edition-Cut}" -> ("Title", 1999, "rest"); without a
-    year ("Title", None, "")."""
-    name = name or ""
-    edition = _EDITION.search(name)
-    m = _TITLE_YEAR.match(_EDITION.sub("", name))
+    """! @brief "Show (2001) {tvdb-123}" -> ("Show", 2001, "rest"); without a year
+    ("Show", None, "")."""
+    m = _TITLE_YEAR.match(name or "")
     if not m:
         return clean_title(name), None, ""
     return clean_title(m.group("title")), int(m.group("year")), clean_title(m.group("rest"))
-
-
-def edition_of(name):
-    """! @brief The `{edition-X}` tag of a folder or file name, or ""."""
-    m = _EDITION.search(name or "")
-    return m.group(1).strip() if m else ""
 
 
 def sort_title(title):
@@ -80,58 +71,90 @@ def sort_title(title):
     return _ARTICLE.sub("", (title or "").strip()).lower()
 
 
-def parse_movie(inner_rel):
-    """! @brief Parse a path relative to a movies section into its parts.
-    @param inner_rel  "Title (Year)/Title (Year).mkv", "Title (Year).mkv",
-                      "Title (Year)/Trailers/clip.mkv", ...
-    @return {"title", "year", "folder" (the movie folder, "" when loose), "edition",
-             "part" (int or None), "extra" (kind or None), "label" (a version label
-             such as "1080p", or an extra's own name), "stem"} or None for a path
-             that is not a movie file (too deep, a folder itself).
+def parse_season_folder(name):
+    """! @brief "Season 01" / "Season 1" / "S02" / "Specials" -> the season number; None
+    for any other folder name."""
+    m = _SEASON_DIR.match((name or "").strip())
+    if not m:
+        return None
+    if m.group("sp"):
+        return 0
+    return int(m.group("n") or m.group("s"))
+
+
+def parse_episode_name(stem):
+    """! @brief The episode numbers in a file stem.
+    @return (season, episode, episode_end, show_prefix, title) with the season None
+            when the stem has no sXXeYY / NxNN marker (then episode is None too).
+            `show_prefix` is the text before the marker ("Show"), `title` the text
+            after it ("Episode Title"), both cleaned."""
+    m = _SXXEYY.search(stem) or _NXNN.search(stem)
+    if not m:
+        return None, None, None, clean_title(stem), ""
+    s, e = int(m.group("s")), int(m.group("e"))
+    e2 = int(m.group("e2")) if m.group("e2") else None
+    if e2 is not None and e2 < e:
+        e2 = None
+    before = clean_title(stem[:m.start()])
+    after = clean_title(stem[m.end():])
+    if " " not in stem:
+        # "Show.S01E03.Episode.Title" (scene style): dots are spaces
+        before, after = before.replace(".", " ").strip(), after.replace(".", " ").strip()
+    return s, e, e2, before, after
+
+
+def parse_episode(inner_rel):
+    """! @brief Parse a path relative to a tv section into its parts.
+    @param inner_rel  "Show (Year)/Season 01/Show - s01e01 - Title.mkv",
+                      "Show (Year)/Specials/Show - s00e01 - Title.mkv",
+                      "Show (Year)/Show - 1x01.mkv" (no season folder), an extras
+                      folder's file, ...
+    @return {"show", "show_year", "show_folder" (the show folder name), "season_folder"
+             ("" without one), "season", "episode", "episode_end", "title", "extra"
+             (kind or None), "stem"} or None for a path that is not an episode file
+             (no show folder, too deep, no episode marker outside an extras folder).
     """
     parts = [p for p in str(inner_rel or "").replace("\\", "/").split("/") if p]
-    if not parts:
+    if len(parts) < 2 or len(parts) > 4 or any(p.startswith(".") for p in parts):
         return None
     name = parts[-1]
     stem = _stem(name)
-    if not stem or any(p.startswith(".") for p in parts):
+    if not stem:
         return None
-    if len(parts) == 1:
-        folder, extra = "", None
-    elif len(parts) == 2:
-        folder, extra = parts[0], None
-    elif len(parts) == 3:
-        folder = parts[0]
-        extra = EXTRAS_FOLDERS.get(parts[1].strip().lower(), "other")
-    else:
-        return None
-    base = folder or stem
-    title, year, _ = parse_title_year(base)
-    edition = edition_of(base) or edition_of(stem)
-    part, label = None, ""
+    show_folder = parts[0]
+    show, show_year, _ = parse_title_year(show_folder)
+    season_folder, folder_season, extra = "", None, None
+    mids = parts[1:-1]
+    if mids:
+        folder_season = parse_season_folder(mids[0])
+        if folder_season is not None:
+            season_folder = mids[0]
+            mids = mids[1:]
+        if mids:
+            if len(mids) == 1 and mids[0].strip().lower() in EXTRAS_FOLDERS:
+                extra = EXTRAS_FOLDERS[mids[0].strip().lower()]
+            else:
+                return None
+    season, episode, episode_end, prefix, title = parse_episode_name(stem)
     if extra is not None:
-        label = clean_title(stem)            # an extra is named by its own file
-    else:
-        tail = stem.rsplit("-", 1)
-        if len(tail) == 2 and tail[1].strip().lower() in EXTRA_SUFFIXES:
-            # an inline extra: "Title (Year)-trailer"
-            extra = tail[1].strip().lower()
-            label = extra
-        else:
-            stem_core = stem
-            pm = _PART.search(stem_core)
-            if pm:
-                part = int(pm.group("n"))
-                stem_core = stem_core[:pm.start()].rstrip(" -_.")
-            # a version label after the title: "Title (Year) - 1080p"
-            label = parse_title_year(stem_core)[2]
-    return {"title": title, "year": year, "folder": folder, "edition": edition,
-            "part": part, "extra": extra, "label": label, "stem": stem}
+        return {"show": show, "show_year": show_year, "show_folder": show_folder,
+                "season_folder": season_folder, "season": folder_season, "episode": None,
+                "episode_end": None, "title": clean_title(stem), "extra": extra, "stem": stem}
+    if season is None:
+        return None
+    if folder_season is not None and season != folder_season and _NXNN.search(stem) and not _SXXEYY.search(stem):
+        season = folder_season          # "Season 02/Show - 1x05": the folder decides
+    if not title and prefix and prefix.lower() != show.lower():
+        # "Episode Title - s01e01" style: the text before the marker is the title
+        title = prefix if parse_title_year(prefix)[0].lower() != show.lower() else ""
+    return {"show": show, "show_year": show_year, "show_folder": show_folder,
+            "season_folder": season_folder, "season": season, "episode": episode,
+            "episode_end": episode_end, "title": title, "extra": None, "stem": stem}
 
 
 def _first(names, candidates, exts):
-    """! @brief The first name in `names` whose stem is one of `candidates` and whose
-    extension is in `exts`, trying the candidates in order; None when absent."""
+    """! @brief The first name in `names` whose stem is one of `candidates` (in order)
+    and whose extension is in `exts`; None when absent."""
     by_stem = {}
     for n in names:
         if _ext(n) in exts:
@@ -143,9 +166,43 @@ def _first(names, candidates, exts):
     return None
 
 
+def show_sidecars(names, image_exts=None):
+    """! @brief The show-level sidecars among the show folder's file names:
+    {"poster", "fanart", "banner", "nfo"} (None when absent)."""
+    image_exts = image_exts or IMAGE_EXTS
+    nfo = _first(names, ["tvshow", "show"], {".nfo"})
+    return {"poster": _first(names, ["poster", "folder", "cover", "show"], image_exts),
+            "fanart": _first(names, ["fanart", "backdrop", "background"], image_exts),
+            "banner": _first(names, ["banner"], image_exts),
+            "nfo": nfo}
+
+
+def season_poster(names, season, image_exts=None):
+    """! @brief The poster of one season among the show folder's names
+    ("season01-poster.jpg", "season-specials-poster.jpg", "Season01.jpg"), or None."""
+    image_exts = image_exts or IMAGE_EXTS
+    cands = [f"season{season:02d}-poster", f"season{season}-poster", f"season{season:02d}",
+             f"season {season:02d}", f"season {season}"]
+    if season == 0:
+        cands = ["season-specials-poster", "season-specials"] + cands
+    return _first(names, cands, image_exts)
+
+
+def episode_sidecars(names, stem, image_exts=None):
+    """! @brief An episode's own sidecars among its folder's names: {"thumb", "nfo",
+    "subtitles": [...]}."""
+    image_exts = image_exts or IMAGE_EXTS
+    out = {"thumb": _first(names, [stem + "-thumb", stem], image_exts),
+           "nfo": _first(names, [stem], {".nfo"}), "subtitles": []}
+    for n in sorted(names):
+        s = parse_subtitle(n, stem)
+        if s:
+            out["subtitles"].append(s)
+    return out
+
+
 def parse_subtitle(name, stem):
-    """! @brief A subtitle file of the movie `stem`: {"file", "lang", "forced", "sdh"} or None.
-    "Title.en.srt", "Title.en.forced.srt", "Title.eng.sdh.srt", "Title.srt"."""
+    """! @brief A subtitle file of the episode `stem`: {"file", "lang", "forced", "sdh"} or None."""
     if _ext(name) not in SUBTITLE_EXTS:
         return None
     rest = _stem(name)
@@ -158,48 +215,17 @@ def parse_subtitle(name, stem):
     return {"file": name, "lang": lang, "forced": forced, "sdh": sdh}
 
 
-def sidecars(names, stem, in_folder=True, image_exts=None):
-    """! @brief The sidecars of a movie among the file names of its folder.
-    @param names      the folder's file names.
-    @param stem       the movie file's stem ("Title (Year)").
-    @param in_folder  the movie has a folder of its own, so generic names
-                      (poster.jpg, fanart.jpg, movie.nfo) are its own too; a
-                      loose movie only owns names carrying its stem.
-    @return {"poster", "fanart", "nfo", "subtitles": [...]}: file names (None
-            when absent) and the subtitle records of parse_subtitle."""
-    image_exts = image_exts or IMAGE_EXTS
-    poster = [stem + "-poster", stem + ".poster", stem]
-    fanart = [stem + "-fanart", stem + ".fanart"]
-    nfo = [stem]
-    if in_folder:
-        poster += ["poster", "folder", "cover", "movie"]
-        fanart += ["fanart", "backdrop", "background"]
-        nfo += ["movie"]
-    out = {"poster": _first(names, poster, image_exts),
-           "fanart": _first(names, fanart, image_exts),
-           "nfo": _first(names, nfo, {".nfo"}),
-           "subtitles": []}
-    if out["nfo"] is None and in_folder:
-        nfos = sorted(n for n in names if _ext(n) == ".nfo")
-        out["nfo"] = nfos[0] if nfos else None
-    for n in sorted(names):
-        s = parse_subtitle(n, stem)
-        if s:
-            out["subtitles"].append(s)
-    return out
-
-
 def _text(el, tag):
     """! @brief The stripped text of a child element, or ""."""
     c = el.find(tag) if el is not None else None
     return (c.text or "").strip() if c is not None else ""
 
 
-def parse_nfo(text, roots=("movie", "tvshow", "episodedetails")):
+def parse_nfo(text, roots=("tvshow", "episodedetails", "movie")):
     """! @brief Read a Kodi / Plex .nfo: the first of `roots` found in it.
-    Tolerates a missing XML declaration, several root elements and trailing
-    junk (an URL after the XML, as scrapers write); falls back to a tag scan
-    when the XML does not parse at all.
+    Tolerates a missing XML declaration, several root elements (a multi-episode
+    file's nfo) and trailing junk; falls back to a tag scan when the XML does
+    not parse at all.
     @return {"root", "title", "year", "plot", "genres", "season", "episode",
              "aired", "sorttitle", "rating"} ("" / None / [] when absent), or
              {} for text without any of the roots."""
@@ -217,7 +243,6 @@ def parse_nfo(text, roots=("movie", "tvshow", "episodedetails")):
     except ET.ParseError:
         el = None
     if el is None:
-        # junk after the document, or not XML at all: cut at the closing root tag
         for r in roots:
             m = re.search(rf"<{r}\b.*?</{r}>", body, re.S | re.I)
             if m:
@@ -231,9 +256,8 @@ def parse_nfo(text, roots=("movie", "tvshow", "episodedetails")):
     if el is None:
         return {}
     genres = [(g.text or "").strip() for g in el.findall("genre")]
-    genres = [g for g in genres if g]
     out = {"root": el.tag, "title": _text(el, "title"), "sorttitle": _text(el, "sorttitle"),
-           "plot": _text(el, "plot") or _text(el, "outline"), "genres": genres,
+           "plot": _text(el, "plot") or _text(el, "outline"), "genres": [g for g in genres if g],
            "aired": _text(el, "aired") or _text(el, "premiered"),
            "year": None, "season": None, "episode": None, "rating": None}
     for k in ("year", "season", "episode"):
