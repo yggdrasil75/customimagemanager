@@ -181,7 +181,7 @@
   function tabs(ui) {
     for (const t of ui.left_tabs || []) if (window.registerLeftTab)
       registerLeftTab({ id: t.id, label: t.label, feature: t.feature || undefined, paneId: t.pane_id || undefined,
-        controlsTab: t.controls_tab || undefined });
+        controlsTab: t.controls_tab || undefined, group: t.group || undefined });
     for (const t of ui.controls_tabs || []) if (window.registerControlsTab)
       registerControlsTab({ id: t.id, label: t.label, feature: t.feature || undefined, modeTab: t.mode_tab,
         onShow: t.loader ? fn => { const ed = window[t.loader]; if (ed && typeof ed.load === "function") {

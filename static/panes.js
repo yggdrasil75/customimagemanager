@@ -56,10 +56,124 @@ function registerLeftTab(spec) {
     // controlsTab: while this left tab is active, show that controls tab
     // (and hide the per-image metadata tabs); leaving restores them.
     controlsTab: spec.controlsTab || cur.controlsTab || null,
+    // group "tools" (training / admin panes): always under the More menu, never
+    // in the bar itself; the default group takes a bar slot while one fits.
+    group: spec.group || cur.group || null,
   };
   _renderLeftTabButtons();
 }
 window.registerLeftTab = registerLeftTab;
+
+/** @brief Drop a registered left tab (a module that moved its pane elsewhere). */
+function unregisterLeftTab(id) {
+  if (!window._leftTabs || !window._leftTabs[id]) return;
+  delete window._leftTabs[id];
+  document.querySelector(`[data-ext-area="left_tabs"] [data-ltab="${id}"]`)?.remove();
+  _layoutLeftTabs();
+}
+window.unregisterLeftTab = unregisterLeftTab;
+
+// -- tab-bar overflow --------------------------------------------------------
+// With a dozen modules the bar cannot hold every tab at the left pane's width:
+// _layoutLeftTabs keeps, in order, the tabs that fit and puts the rest (plus
+// every "tools" tab) under the More menu. When the active tab is under More the
+// button carries its label and the active style. Re-run on resize, after a tab
+// is registered and whenever a button's class changes (feature gating, setPane).
+let _ltabRaf = 0;
+function _scheduleLeftTabLayout() {
+  if (_ltabRaf) return;
+  _ltabRaf = requestAnimationFrame(() => { _ltabRaf = 0; _layoutLeftTabs(); });
+}
+window.layoutLeftTabs = _scheduleLeftTabLayout;
+
+/** @brief The bar's tab buttons in order: built-ins, then registered ones. */
+function _leftTabButtons() {
+  const bar = document.getElementById('left_tabs_bar');
+  if (!bar) return [];
+  const builtin = [...bar.children].filter(el => el.tagName === 'BUTTON');
+  const ext = [...bar.querySelectorAll('[data-ext-area="left_tabs"] [data-ltab]')];
+  return builtin.concat(ext);
+}
+function _leftTabId(btn) {
+  return btn.dataset.ltab || (btn.id || '').replace(/^tab_/, '');
+}
+
+function _layoutLeftTabs() {
+  const bar = document.getElementById('left_tabs_bar');
+  const more = document.getElementById('left_tabs_more');
+  const moreBtn = document.getElementById('left_tabs_more_btn');
+  const menu = document.getElementById('left_tabs_more_menu');
+  if (!bar || !more || !moreBtn || !menu) return;
+  const usable = _leftTabButtons().filter(b => !b.classList.contains('cim-feature-hidden'));
+  const isTool = b => { const t = window._leftTabs && window._leftTabs[_leftTabId(b)]; return !!(t && t.group === 'tools'); };
+  const inBar = usable.filter(b => !isTool(b)), tools = usable.filter(isTool);
+  // measure every candidate at its natural width in one pass
+  for (const b of inBar) { b.style.display = ''; b.style.flex = '0 0 auto'; b.style.whiteSpace = 'nowrap'; }
+  more.style.display = '';
+  const widths = inBar.map(b => b.getBoundingClientRect().width);
+  const moreW = more.getBoundingClientRect().width;
+  for (const b of inBar) { b.style.flex = ''; b.style.whiteSpace = ''; }
+  const total = bar.clientWidth || 0;
+  let fit = inBar.length;
+  if (total > 0) {
+    let sum = widths.reduce((a, w) => a + w, 0);
+    if (sum > total || tools.length) {
+      // the More button takes a slot of its own
+      fit = 0; sum = moreW;
+      while (fit < inBar.length && sum + widths[fit] <= total) { sum += widths[fit]; fit++; }
+    }
+  }
+  const hidden = inBar.slice(fit).concat(tools);
+  inBar.slice(0, fit).forEach(b => { b.style.display = ''; });
+  hidden.forEach(b => { b.style.display = 'none'; });
+  more.style.display = hidden.length ? '' : 'none';
+  // the menu: one entry per hidden tab, the active one marked
+  const active = hidden.find(b => _leftTabId(b) === currentPane);
+  menu.innerHTML = '';
+  for (const b of hidden) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.setAttribute('role', 'menuitem');
+    item.dataset.ltabItem = _leftTabId(b);
+    item.textContent = (b.textContent || '').trim();
+    item.className = 'block w-full text-left px-3 py-1.5 whitespace-nowrap ' +
+      (b === active ? 'text-blue-400 bg-gray-750' : 'text-gray-300 hover:text-white hover:bg-gray-700');
+    item.addEventListener('click', () => { _toggleLeftTabMenu(false); b.click(); });
+    menu.appendChild(item);
+  }
+  const label = (active ? (active.textContent || '').trim() + ' ' : 'More ') + '\u25BE';
+  if (moreBtn.textContent !== label) moreBtn.textContent = label;
+  const cls = 'px-3 py-2 border-b-2 whitespace-nowrap ' + (active
+    ? 'border-blue-500 text-blue-400 bg-gray-750'
+    : 'border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-750');
+  if (moreBtn.className !== cls) moreBtn.className = cls;   // only on change: the class observer below
+}
+window._layoutLeftTabs = _layoutLeftTabs;
+
+function _toggleLeftTabMenu(open) {
+  const btn = document.getElementById('left_tabs_more_btn'), menu = document.getElementById('left_tabs_more_menu');
+  if (!btn || !menu) return;
+  const show = open == null ? menu.classList.contains('hidden') : !!open;
+  menu.classList.toggle('hidden', !show);
+  btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+}
+
+(function _wireLeftTabBar() {
+  function wire() {
+    const bar = document.getElementById('left_tabs_bar'), btn = document.getElementById('left_tabs_more_btn');
+    if (!bar || !btn) return;
+    btn.addEventListener('click', e => { e.stopPropagation(); _toggleLeftTabMenu(); });
+    document.addEventListener('click', e => { if (!e.target.closest('#left_tabs_more')) _toggleLeftTabMenu(false); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') _toggleLeftTabMenu(false); });
+    if (window.ResizeObserver) new ResizeObserver(_scheduleLeftTabLayout).observe(bar);
+    else window.addEventListener('resize', _scheduleLeftTabLayout);
+    // feature gating and setPane rewrite button classes; both change what fits
+    if (window.MutationObserver)
+      new MutationObserver(_scheduleLeftTabLayout).observe(bar, { attributes: true, attributeFilter: ['class'], subtree: true });
+    _scheduleLeftTabLayout();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire); else wire();
+})();
 
 function _renderLeftTabButtons() {
   const bar = document.querySelector('[data-ext-area="left_tabs"]');
@@ -80,6 +194,7 @@ function _renderLeftTabButtons() {
     btn.textContent = t.label;
   }
   if (window.applyFeatureVisibility) applyFeatureVisibility(bar);
+  _scheduleLeftTabLayout();
 }
 
 function _hideRegisteredPanes() {
@@ -106,6 +221,7 @@ function _syncLeftTabChrome(activeId) {
   // registered buttons
   document.querySelectorAll('[data-ltab]').forEach(b =>
     b.className = (b.dataset.ltab===activeId ? on : off));
+  _scheduleLeftTabLayout();
 }
 
 function setPane(pane) {
@@ -155,6 +271,7 @@ function setPane(pane) {
   // ensure their buttons show the inactive style.
   document.querySelectorAll('[data-ltab]').forEach(b => b.className = off);
   if (window.CIMFeatures) window.CIMFeatures.apply(document);
+  _scheduleLeftTabLayout();
   const _fresh = (pane !== window._lastPane);
   if (isReview && typeof loadReviewPane === 'function') {
     const l = document.getElementById('review_pane_list');

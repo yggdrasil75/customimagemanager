@@ -78,7 +78,7 @@ def register(host):
     host.add_asset("trainer.js")
     host.add_asset("trainer.css", kind="css")
     host.register_left_pane("trainer_pane.html", tab_id="trainer", label="Trainer", feature="tab.trainer",
-                            controls_tab="trainer")
+                            controls_tab="trainer", group="tools")
     host.register_controls_pane("trainer", "controls_pane_trainer.html", feature="tab.trainer",
                                 label="Trainer", mode_tab=True)
     def _file_deleted(rel_path):

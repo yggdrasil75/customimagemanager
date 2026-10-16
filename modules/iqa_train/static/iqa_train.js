@@ -194,7 +194,8 @@
       return;
     if (tries++ < 20) { setTimeout(init, 100); return; }
     if (window.registerLeftTab)
-      registerLeftTab({ id: 'iqa_train', label: 'IQA train', feature: 'tab.iqa_train', paneId: 'iqa_train_pane', onShow: iqtStatus });
+      registerLeftTab({ id: 'iqa_train', label: 'IQA train', feature: 'tab.iqa_train', paneId: 'iqa_train_pane',
+                        onShow: iqtStatus, group: 'tools' });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

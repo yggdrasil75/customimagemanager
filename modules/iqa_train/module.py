@@ -157,5 +157,7 @@ def register(host):
     host.add_route("/api/iqa_train/activate", api_activate, methods=["POST"], feature="tab.iqa_train")
     host.add_route("/api/iqa_train/stop", api_stop, methods=["POST"], feature="tab.iqa_train")
     host.add_asset("iqa_train.js")
-    host.register_left_pane("iqa_train_pane.html", tab_id="iqa_train", label="IQA train", feature="tab.iqa_train")
+    # the pane only: it is a Trainer sub-tab when that module is on, else iqa_train.js
+    # registers a left tab of its own (under More)
+    host.register_left_pane("iqa_train_pane.html")
     host.logger.info("iqa_train: registered (Trainer > IQA sub-tab + build routes)")

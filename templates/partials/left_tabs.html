@@ -1,5 +1,7 @@
 <!-- Left-pane tabs. Replaces the old Images/Music pills that lived in the
-         header. Built-in tabs: gallery, albums, review; modules add theirs. -->
+         header. Built-in tabs: gallery, albums, review; modules add theirs. The bar
+         shows the tabs that fit its width; the rest, and every tab registered in the
+         "tools" group (training panes), sit under the More menu (panes.js). -->
     <div id="left_tabs_bar" class="flex bg-gray-800 border-b border-gray-700 flex-shrink-0 text-sm font-bold">
       <button id="tab_gallery" onclick="setPane('gallery')" data-feature="tab.gallery"
         class="flex-1 px-4 py-2 border-b-2 border-blue-500 text-blue-400 bg-gray-750">
@@ -17,4 +19,11 @@
            core places the button, the module doesn't hard-code a slot. The
            seven built-ins above will migrate onto this as they become modules. -->
       <span data-ext-area="left_tabs" class="contents"></span>
+      <div id="left_tabs_more" class="relative flex-shrink-0" style="display:none">
+        <button id="left_tabs_more_btn" type="button" title="More tabs" aria-haspopup="true" aria-expanded="false"
+          class="px-3 py-2 border-b-2 border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-750 whitespace-nowrap">
+          More &#9662;</button>
+        <div id="left_tabs_more_menu" role="menu" class="hidden absolute right-0 top-full z-30 min-w-[10rem] py-1
+          bg-gray-800 border border-gray-700 rounded shadow-lg text-sm font-bold"></div>
+      </div>
     </div>
