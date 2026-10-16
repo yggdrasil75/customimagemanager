@@ -238,6 +238,13 @@ def test_settings_are_registered_and_validated(app, host, client, settings):
     groups = {g["id"]: g for g in j["groups"]}
     assert {"image", "anim", "video", "thumb"} <= set(groups) and "simple" in groups["image"]
     assert all(f["hint"] for g in j["groups"] for f in g["fields"])          # a hover hint everywhere
+    # Re-encode "keep originals": a saved setting the schema reports (off stays off)
+    assert j["values"][enc.KEEP_KEY] is True
+    assert client.post("/api/update_settings", json={enc.KEEP_KEY: False}).get_json()["success"]
+    assert app.state[enc.KEEP_KEY] is False and host.config_tabs.get(enc.KEEP_KEY) == "media"
+    assert client.get("/api/encoding/schema").get_json()["values"][enc.KEEP_KEY] is False
+    assert client.post("/api/update_settings", json={enc.KEEP_KEY: "on"}).get_json()["success"]
+    assert app.state[enc.KEEP_KEY] is True
     # the per-user view
     assert client.post("/api/user/settings", json={enc.VIEW_KEY: "expert"}).get_json()["success"]
     assert client.get("/api/encoding/schema").get_json()["view"] == "expert"

@@ -374,17 +374,19 @@ class Host:
             "module_id": self._current_module}
 
     def register_left_pane(self, template, *, tab_id=None, label=None, feature=None,
-                           pane_id=None, controls_tab=None):
+                           pane_id=None, controls_tab=None, group=None):
         """! @brief Add a left-column pane partial and, with `tab_id`, the tab that shows it
         (the page registers it; a module's JS adds behaviour with registerLeftTab({id, onShow})).
         @param feature      permission gating the tab (default tab.<tab_id>).
         @param pane_id      the pane element's id (default <tab_id>_pane).
-        @param controls_tab a controls tab shown only while this tab is active."""
+        @param controls_tab a controls tab shown only while this tab is active.
+        @param group        "tools" puts the tab under the bar's More menu always (training
+                            and admin panes); None takes a bar slot while one fits."""
         self.left_panes.append({"template": template, "module_id": self._current_module})
         if tab_id:
             self.ui["left_tabs"].append({"id": tab_id, "label": label or tab_id, "feature": feature,
                                          "pane_id": pane_id, "controls_tab": controls_tab,
-                                         "module_id": self._current_module})
+                                         "group": group, "module_id": self._current_module})
 
     def register_controls_pane(self, tab_id, template, *, feature=None, label=None,
                                mode_tab=False, loader=None):

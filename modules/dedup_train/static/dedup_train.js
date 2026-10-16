@@ -203,7 +203,7 @@
     if (tries++ < 20) { setTimeout(init, 100); return; }
     if (window.registerLeftTab)
       registerLeftTab({ id: 'dedup_train', label: 'Dedup train', feature: 'tab.dedup_train',
-                        paneId: 'dedup_train_pane', onShow: ddtStatus });
+                        paneId: 'dedup_train_pane', onShow: ddtStatus, group: 'tools' });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

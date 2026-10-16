@@ -20,6 +20,16 @@ def test_descriptors_are_served_and_inlined(client, host):
     assert "window.CIM_MODULE_UI=" in html
 
 
+def test_left_tabs_carry_their_group(client):
+    """A tab's group ("tools": always under the bar's More menu) reaches the page; the
+    training panes that are Trainer sub-tabs declare no tab of their own."""
+    tabs = {t["id"]: t for t in _ui(client)["left_tabs"]}
+    assert all("group" in t for t in tabs.values())
+    if "trainer" in tabs:
+        assert tabs["trainer"]["group"] == "tools"
+    assert "iqa_train" not in tabs and "dedup_train" not in tabs
+
+
 def _button(client, module_id, uid):
     b = next((b for b in _ui(client)["buttons"] if b["module_id"] == module_id and b["id"] == uid), None)
     if b is None:

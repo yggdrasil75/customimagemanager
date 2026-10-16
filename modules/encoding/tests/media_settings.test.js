@@ -122,3 +122,31 @@ test("simple slider maps through the server and the save payload is complete", a
   assert.ok(p.body.media_storage.video && p.body.media_storage.book, "every kind sent");
   assert.ok(!("keep_raws" in p.body));
 });
+
+test("re-encode 'keep originals' is a saved setting, not reset on every open", async () => {
+  const b = page({ modules: ["encoding"] });
+  // the server reports it off (saved earlier)
+  const snap = require("fs").readFileSync(require("path").join(__dirname, "..", "..", "..", "tests", "js", "_api_snapshot.json"), "utf8");
+  const d = JSON.parse(snap)["/api/encoding/schema"];
+  d.is_admin = true; d.values.enc_reencode_keep_originals = false;
+  b.api.on("GET /api/encoding/schema", d);
+  await b.tick(20);
+  b.run("window._mediaLoaded = false");
+  await b.run("loadMediaSettings()");
+  await b.tick(10);
+  const boxes = [...b.document.querySelectorAll("#media_settings_root .media-keep-orig")];
+  assert.ok(boxes.length >= 2, "a checkbox per re-encodable kind");
+  assert.ok(boxes.every(c => !c.checked), "unchecked as saved");
+  assert.ok(!b.val("CIMMediaSettings.dirty.size"), "loading marks nothing dirty");
+  // ticking one marks the setting dirty, mirrors to every kind and goes out with Save
+  boxes[0].checked = true;
+  boxes[0].dispatchEvent(new b.window.Event("change", { bubbles: true }));
+  assert.ok(boxes.every(c => c.checked));
+  const p = b.val("CIMMediaSettings.payload()");
+  assert.equal(p.body.enc_reencode_keep_originals, true);
+  // and the box alone does not block "Re-encode existing files..."
+  b.api.on("POST /api/encoding/reencode", c => ({ success: true, convert: 0, check: 0, skip: 0, target: ".jxl" }));
+  boxes[0].closest(".media-tools").querySelector(".media-reencode").click();
+  await b.tick(10);
+  assert.ok(b.api.last("/api/encoding/reencode", "POST"), "re-encode ran without saving first");
+});

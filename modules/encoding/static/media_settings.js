@@ -12,6 +12,8 @@
  */
 (function () {
   const ROW = 'flex flex-wrap items-center gap-2 text-sm text-gray-300';
+  // Re-encode existing files: "keep originals" is a saved setting (one for every kind)
+  const KEEP = 'enc_reencode_keep_originals';
   const INPUT = 'p-1 bg-gray-700 rounded border border-gray-600 text-sm text-white';
   const S = window.CIMMediaSettings = {
     schema: null, values: {}, dirty: new Set(), view: 'simple', root: null, poll: null,
@@ -183,8 +185,11 @@
     if ((S.schema.reencode_kinds || []).includes(g.id)) {
       box.innerHTML = cimButton({ label: 'Re-encode existing files...', variant: 'neutral', size: 'xs',
           cls: 'media-reencode', title: 'Convert library files of this kind that are not in the output format yet (counts first, runs in the background).' }) +
-        `<label class="text-[11px] text-gray-400 flex items-center gap-1" title="Copy each original to media/.cim/reencoded before replacing it.">
-           <input type="checkbox" class="accent-amber-500 media-keep-orig" checked> keep originals</label>`;
+        `<label class="text-[11px] text-gray-400 flex items-center gap-1" title="Copy each original to media/.cim/reencoded before replacing it (saved with the pane).">
+           <input type="checkbox" class="accent-amber-500 media-keep-orig"> keep originals</label>`;
+      const keep = box.querySelector('.media-keep-orig');
+      keep.checked = S.values[KEEP] !== false;
+      keep.addEventListener('change', () => setValue(KEEP, keep.checked));
       box.querySelector('.media-reencode').addEventListener('click', () => reencode(g.id, box));
     } else if (g.id === 'thumb') {
       box.innerHTML = cimButton({ label: 'Regenerate thumbnails now', variant: 'neutral', size: 'xs', cls: 'media-regen',
@@ -196,7 +201,7 @@
 
   /** @brief Count, confirm, then queue a re-encode of one kind. */
   async function reencode(kind, box) {
-    if (S.dirty.size) { window.showToast && showToast('Save the media settings first.'); return; }
+    if ([...S.dirty].some(k => k !== KEEP)) { window.showToast && showToast('Save the media settings first.'); return; }
     const post = body => fetch('/api/encoding/reencode', { method: 'POST',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
     const d = await post({ kind, dry_run: true }).catch(() => null);
@@ -206,8 +211,7 @@
       (d.check ? `, ${d.check} more in ${d.target} will be checked and re-encoded if needed` : '') +
       `; ${d.skip} skipped. This runs in the background. Continue?`;
     if (!window.confirm(msg)) return;
-    const keep = box.querySelector('.media-keep-orig');
-    const r = await post({ kind, dry_run: false, keep_originals: keep ? keep.checked : true }).catch(() => null);
+    const r = await post({ kind, dry_run: false, keep_originals: S.values[KEEP] !== false }).catch(() => null);
     if (!r || !r.success) { window.showToast && showToast((r && r.error) || 'Could not start'); return; }
     watchJob();
   }
@@ -266,6 +270,7 @@
       const simple = sec.querySelector('.media-simple');
       if (simple) simple.classList.toggle('hidden', S.view === 'expert' || !g.available || !condOk(g.simple.show));
     }
+    S.root.querySelectorAll('.media-keep-orig').forEach(c => { c.checked = S.values[KEEP] !== false; });
   }
   S.refresh = refresh;
 

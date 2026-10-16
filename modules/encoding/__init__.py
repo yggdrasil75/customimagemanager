@@ -36,6 +36,7 @@ MANIFEST = {
 }
 
 VIEW_KEY = "media_settings_view"
+KEEP_KEY = "enc_reencode_keep_originals"
 
 
 # -- registration ---------------------------------------------------------------
@@ -57,6 +58,12 @@ def _migrate(host):
         host.set_config("enc_settings_version", 2)
     except ValueError as e:
         host.logger.warning(f"media settings migration: {e}")
+
+
+def _keep_originals(host):
+    """! @brief The saved "keep originals" choice of Re-encode existing files."""
+    v = host.config.get(KEEP_KEY)
+    return True if v is None else bool(v)
 
 
 def _kinds(host):
@@ -112,6 +119,10 @@ def register(host):
     for key in schema.CONFIG_KEYS:
         host.add_config_key(key, default=DEFAULTS[key], validate=schema.validator(key), tab="media")
     host.add_config_key("enc_settings_version", default=0, validate=int, tab="media")
+    # Re-encode existing files: copy each original to media/.cim/reencoded first
+    # (the checkbox next to the button; saved with the pane so it stays as set).
+    host.add_config_key(KEEP_KEY, default=True, tab="media",
+                        validate=lambda v: v.strip().lower() in ("1", "true", "yes", "on") if isinstance(v, str) else bool(v))
     host.on_startup(lambda: _migrate(host))
     host.add_user_setting(
         VIEW_KEY, label="Media settings view", kind="select", default="simple",
@@ -126,6 +137,7 @@ def register(host):
         c = probe.capabilities(refresh=refresh)
         view = host.user_setting(VIEW_KEY) or "simple"
         out = schema.build(host.config, c, _kinds(host), expert=view == "expert")
+        out["values"][KEEP_KEY] = _keep_originals(host)
         out.update(success=True, view=view, is_admin=host.is_admin(),
                    reencode_kinds=list(REENCODE_KINDS), job=jobs.status(),
                    encoders=sorted(k[4:] for k, ok in c.items() if k.startswith("enc:") and ok))
@@ -150,7 +162,7 @@ def register(host):
             jobs.plan(kind, folder)  # refuse early when the kind is kept as uploaded
         except ValueError as e:
             return jsonify({"success": False, "error": str(e)}), 400
-        ok, err = jobs.start("reencode", kind, d.get("keep_originals", True), folder)
+        ok, err = jobs.start("reencode", kind, d.get("keep_originals", _keep_originals(host)), folder)
         return jsonify({"success": ok, "error": err or None, "job": jobs.status()}), (200 if ok else 409)
 
     def api_thumbs():
