@@ -266,3 +266,18 @@ def test_module_table_write_reports_a_locked_db(app, host, monkeypatch):
     assert "locked" in r["error"] and "lock_probe" in r["error"] and "every row" in r["error"]
     db.rollback()
     assert app._describe_rows("x.jpg", {"kind": "k"}, None) == "rel_path=x.jpg, kind='k'"
+
+def test_unchanged_file_is_not_offered_to_modules(app, host, upload):
+    """The startup walk visits every file; one whose row carries the same mtime costs a
+    SELECT and no module event (file.index used to fire for each, modules writing)."""
+    rel = upload("idx_quiet.png", seed=41, folder="idxq")
+    seen = []
+    host.on("file.index", lambda rel_path, abs_path=None, force=False: seen.append(rel_path))
+    try:
+        assert app._index_file(rel) is False and seen == []          # unchanged: no event
+        assert app._index_file(rel, force=True) is True and seen == [rel]
+        fp = app.get_safe_path(app.MEDIA_DIR, rel)
+        os.utime(fp, (time.time() + 5, time.time() + 5))             # touched: offered again
+        assert app._index_file(rel) is True and seen == [rel, rel]
+    finally:
+        host.event_hooks["file.index"].remove(host.event_hooks["file.index"][-1])

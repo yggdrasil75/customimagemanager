@@ -295,7 +295,8 @@ def register(host):
             # audio outside a music section is not a track: a stale row goes and the
             # core indexes the file like any other (a stub row, so it is still a
             # library file: in the gallery, playable, taggable)
-            host.update_file(rel_path, table="music", remove=True, dont_write=True)
+            if host.db().execute("SELECT 1 FROM music WHERE rel_path=?", (rel_path,)).fetchone():
+                host.update_file(rel_path, table="music", remove=True, dont_write=True)
             return None
         try:
             upsert(rel_path, abs_path, force=force)

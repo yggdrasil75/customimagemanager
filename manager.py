@@ -1542,15 +1542,23 @@ def _index_file(rel_path: str, force: bool = False,
     abs_path = get_safe_path(MEDIA_DIR, rel_path)
     if not abs_path or not os.path.exists(abs_path):
         return False
+    # An unchanged file (its row carries the same mtime) costs one SELECT and
+    # nothing else: no module gets to look at it. The startup walk visits every
+    # file, and "file.index" handlers used to run for each one - a module with no
+    # row for the file still issued a DELETE for it, hundreds of thousands of
+    # write transactions before the first changed file.
+    try:
+        mtime = _getmtime_loose(abs_path)
+        row   = _get_file_row(rel_path)
+    except Exception as e:
+        access_logger.error(f"_index_file {rel_path}: {e}")
+        return False
+    if not force and row and row['mtime'] is not None and abs(row['mtime'] - mtime) < 0.01:
+        return False
     # kinds a module owns (audio) are indexed by the module
     if module_host.emit("file.index", rel_path=rel_path, abs_path=abs_path, force=force):
         return True
     try:
-        mtime = _getmtime_loose(abs_path)
-        row   = _get_file_row(rel_path)
-        if not force and row and abs(row['mtime'] - mtime) < 0.01:
-            return False
-
         sha = known_sha or _sha256(abs_path)
         img = read_jxl(abs_path)
 

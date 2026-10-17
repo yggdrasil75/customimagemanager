@@ -246,7 +246,10 @@ def register(host):
         if not _is_video(abs_path):
             return None
         if _movie_of(rel_path)[0] is None:
-            host.update_file(rel_path, table="movies", remove=True, dont_write=True)
+            # a stale row (the file moved out of a section) goes; a file that never
+            # had one costs no write
+            if host.db().execute("SELECT 1 FROM movies WHERE rel_path=?", (rel_path,)).fetchone():
+                host.update_file(rel_path, table="movies", remove=True, dont_write=True)
             return None
         try:
             upsert(rel_path, abs_path, force=force)
