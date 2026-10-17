@@ -209,6 +209,55 @@ _all_conns = {}                  # id(conn) -> (conn, thread)
 _all_conns_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = 30000
 
+# What every connection is doing, for the report a "database is locked" error logs:
+# id(conn) -> {"sql": last statement, "at": when it started, "txn": when the open
+# transaction began (None outside one)}. Filled by a trace callback: one small
+# call per statement, so the holder of the write lock can be named instead of
+# guessed at.
+_conn_trace = {}
+_lock_report_at = [0.0]
+
+def _trace_cb(conn_id):
+    def cb(sql):
+        now = time.time()
+        rec = _conn_trace.get(conn_id)
+        if rec is None:
+            rec = _conn_trace[conn_id] = {"sql": "", "at": now, "txn": None}
+        head = sql[:6].upper()
+        if head.startswith("BEGIN"):
+            rec["txn"] = now
+        elif head.startswith(("COMMIT", "ROLLBA")):
+            rec["txn"] = None
+        else:
+            rec["sql"], rec["at"] = sql[:160], now
+    return cb
+
+def _db_lock_report(context: str) -> None:
+    """! @brief Log who holds a transaction open right now (thread, age, last statement):
+    the information a "database is locked" error lacks. At most once every 10 s."""
+    now = time.time()
+    if now - _lock_report_at[0] < 10:
+        return
+    _lock_report_at[0] = now
+    lines = []
+    with _all_conns_lock:
+        conns = list(_all_conns.values())
+    for c, t in conns:
+        try:
+            if not c.in_transaction:
+                continue
+        except Exception:
+            continue
+        rec = _conn_trace.get(id(c)) or {}
+        age = now - rec["txn"] if rec.get("txn") else None
+        lines.append(f"  {t.name}: transaction open"
+                     + (f" for {age:.1f}s" if age is not None else "")
+                     + (f", last: {rec['sql']!r} ({now - rec['at']:.1f}s ago)" if rec.get("sql") else ""))
+    me = threading.current_thread().name
+    access_logger.error(f"database is locked ({context}; thread {me}); open transactions:\n"
+                        + ("\n".join(lines) if lines else "  none in this process: another process "
+                           "(a second instance, a tool on the DB file?) or the filesystem holds it"))
+
 # The gallery's COUNT(*) is a full scan of `files` (every filter is a NOT IN or
 # a LIKE) and runs on every page turn; a page itself is a short index walk. The
 # count is remembered per WHERE and reused while nothing in the DB changed:
@@ -238,6 +287,8 @@ def _register_conn(conn):
         dead = [k for k, (_c, t) in _all_conns.items() if not t.is_alive()]
         stale = [_all_conns.pop(k)[0] for k in dead]
         _all_conns[id(conn)] = (conn, threading.current_thread())
+    for k in dead:
+        _conn_trace.pop(k, None)
     for c in stale:
         try:
             c.close()
@@ -260,6 +311,7 @@ def _db() -> sqlite3.Connection:
         # ORDER BY / GROUP BY spill b-trees go to RAM, not a temp file.
         conn.execute("PRAGMA temp_store=MEMORY")
         conn.row_factory = sqlite3.Row
+        conn.set_trace_callback(_trace_cb(id(conn)))
         _db_local.conn = conn
         _register_conn(conn)
     return conn
@@ -282,6 +334,7 @@ def _db_retry(fn, *args, attempts=6, **kwargs):
             except Exception:
                 pass
             if i == attempts - 1:
+                _db_lock_report(getattr(fn, "__name__", "write"))
                 raise
             # jittered backoff so contending writers don't collide again
             time.sleep(min(2.0, 0.05 * (2 ** i)) * (1.0 + random.random() * 0.25))
@@ -311,17 +364,16 @@ def _db_close():
         with _all_conns_lock:
             _all_conns.pop(id(conn), None)
         _count_cache_forget(id(conn))
+        _conn_trace.pop(id(conn), None)
         try:
             if conn.in_transaction:
                 conn.rollback()
         except Exception:
             pass
-        try:
-            # keeps the planner's statistics fresh; cheap, and what SQLite
-            # recommends before closing a long-lived connection
-            conn.execute("PRAGMA optimize")
-        except Exception:
-            pass
+        # No PRAGMA optimize here: it may run ANALYZE over `files` and its indexes
+        # under the write lock, and worker threads close by the dozen (a sync
+        # pool, every bulk job) - the planner statistics are refreshed once at
+        # startup (_init_db) instead.
         try:
             conn.close()
         except Exception:
@@ -552,6 +604,14 @@ def _init_db():
                 "AND iqa_score IS NOT NULL")
             db.execute("UPDATE files SET iqa_manual=0 WHERE COALESCE(iqa_manual,0)=1")
             db.commit()
+    except Exception:
+        pass
+    # Planner statistics, once, before anything else runs: bounded (analysis_limit)
+    # so a large library does not sit under the write lock for long.
+    try:
+        db.execute("PRAGMA analysis_limit=1000")
+        db.execute("PRAGMA optimize")
+        db.commit()
     except Exception:
         pass
 
@@ -3360,6 +3420,7 @@ def update_file(target=None, *, set=None, add=None, remove=None, exif=None, xmp=
                 what = ("delete from" if remove else "update") + f" {table} where {_describe_rows(target, key, where)}"
                 access_logger.error(f"update_file: database is locked: {what}"
                                     + ("" if own else " (inside the caller's open transaction)"))
+                _db_lock_report(what)
                 return {"success": False, "changed": [], "error": f"database is locked ({what})"}
             return {"success": True, "changed": list(set or {}) if n else [], "rows": n}
 
@@ -3523,6 +3584,8 @@ def update_file(target=None, *, set=None, add=None, remove=None, exif=None, xmp=
         if "no such table" not in str(e):
             access_logger.error(f"update_file {table} {_describe_rows(target, key, where)}: {e}",
                                 exc_info=True)
+        if "locked" in str(e).lower() or "busy" in str(e).lower():
+            _db_lock_report(f"update_file {table}")
         return {"success": False, "changed": [], "error": str(e)}
     except Exception as e:
         access_logger.error(f"update_file {table} {_describe_rows(target, key, where)}: "
