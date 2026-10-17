@@ -32,7 +32,9 @@ fi
 
 # -- system packages (best effort: a missing CLI degrades, it doesn't crash) --
 SYS="build-essential python3-venv python3-dev curl git libjxl-tools libexiv2-dev libboost-python-dev libgomp1"
-[ "$MODE" = ultralight ] || SYS="$SYS ffmpeg libgl1 libglib2.0-0 p7zip-full unrar-free calibre"
+# (calibre is not needed: the books module reads with its pip packages; its
+#  ebook-convert is picked up when you install it yourself)
+[ "$MODE" = ultralight ] || SYS="$SYS ffmpeg libgl1 libglib2.0-0 p7zip-full unrar-free"
 if [ "$SYSTEM" = 1 ]; then
     SUDO=""
     if [ "$(id -u)" != 0 ]; then
@@ -56,19 +58,48 @@ fi
 # -- venv + python deps -----------------------------------------------------
 [ -x venv/bin/python ] || python3 -m venv venv
 PIP="venv/bin/python -m pip"
-$PIP install -q --upgrade pip wheel
+venv/bin/python -c "import wheel" 2>/dev/null || $PIP install -q --upgrade pip wheel
 
-if [ "$MODE" = ultralight ]; then
-    $PIP install -r requirements-ultralight.txt
-elif [ "$MINIMAL" = 1 ]; then
-    $PIP install -r "requirements-$MODE.txt" -r requirements-ultralight.txt
+# The requirement files that apply; pip is run only when they changed since the
+# last successful install (a stamp of their content in the venv), so an update
+# that touched no dependency does not sit through pip resolving everything again.
+if [ "$MODE" = ultralight ]; then REQS="requirements-ultralight.txt"
+elif [ "$MINIMAL" = 1 ]; then REQS="requirements-$MODE.txt requirements-ultralight.txt"
+else REQS="requirements-$MODE.txt requirements.txt"; fi
+STAMP="venv/.cim-deps-$MODE"
+want_stamp=$(venv/bin/python install_check.py stamp $REQS)
+if [ "$(cat "$STAMP" 2>/dev/null)" = "$want_stamp" ]; then
+    echo "==> python deps unchanged ($REQS); skipping pip"
 else
-    $PIP install -r "requirements-$MODE.txt" -r requirements.txt
+    # shellcheck disable=SC2086
+    $PIP install $(for r in $REQS; do printf -- "-r %s " "$r"; done)
+    echo "$want_stamp" > "$STAMP"
 fi
-[ "$MODE" = rocm ] && { $PIP uninstall -qy onnxruntime onnxruntime-gpu || true; \
-    $PIP install onnxruntime-migraphx \
-        -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.0/ \
-        || echo "warn: no ROCm onnxruntime wheels; CPU inference" >&2; }
+# onnxruntime: the CPU package, the CUDA one (onnxruntime-gpu) and the ROCm one
+# (onnxruntime-migraphx) all install the same `onnxruntime/` files; whichever pip
+# wrote last owns them. requirements.txt pulls the CPU package in as a dependency
+# (insightface, rtmlib, rapidocr), on top of the GPU build - and `pip uninstall
+# onnxruntime` then deletes the shared files out from under the GPU package,
+# which stays "installed" with nothing to import. So: drop the other variants,
+# then put the wanted one back with its files (--force-reinstall --no-deps; a
+# plain install is a no-op for a package pip already lists).
+# Nothing is touched while the wanted variant is the only one installed and it
+# imports with its provider (an update that changed nothing stays quick).
+ort_only() {   # $1 = the variant to keep, $2 = its provider, rest = pip index args
+    want="$1"; provider="$2"; shift 2
+    if venv/bin/python install_check.py ort "$want" "$provider"; then echo "==> onnxruntime: $want in place"; return 0; fi
+    for other in onnxruntime onnxruntime-gpu onnxruntime-migraphx onnxruntime-rocm; do
+        [ "$other" = "$want" ] || $PIP uninstall -qy "$other" >/dev/null 2>&1 || true
+    done
+    $PIP install --force-reinstall --no-deps "$want" "$@" \
+        || { echo "warn: $want did not install; falling back to the CPU onnxruntime" >&2
+             $PIP install --force-reinstall --no-deps onnxruntime; }
+}
+case "$MODE" in
+    rocm) ort_only onnxruntime-migraphx MIGraphXExecutionProvider -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.0/ ;;
+    cuda) ort_only onnxruntime-gpu CUDAExecutionProvider ;;
+    cpu)  ort_only onnxruntime "" ;;
+esac
 
 # -- vendored front-end JS (temp file then move: never leave an empty .js) ---
 get() { [ -s "$2" ] && return 0; mkdir -p "$(dirname "$2")"; t=$(mktemp)
@@ -95,7 +126,9 @@ done
 # the sources (see native_build.py). No compiler or --no-compile: they stay
 # plain Python. Runs on every install/update, in the venv, no root needed.
 if [ "$COMPILE" = 1 ]; then
-    $PIP install -q "cython<3.2" 2>/dev/null || echo "warn: cython not installed; helper modules stay plain Python" >&2
+    venv/bin/python -c "import Cython" 2>/dev/null \
+        || $PIP install -q "cython<3.2" 2>/dev/null || echo "warn: cython not installed; helper modules stay plain Python" >&2
+    # incremental: only modules whose source changed (or were never built) compile
     venv/bin/python native_build.py || echo "warn: native build failed; helper modules stay plain Python" >&2
 fi
 

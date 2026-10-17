@@ -14,6 +14,7 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 set "PATH=%~dp0tools;%PATH%"
 set PY=venv\Scripts\python.exe
+if not exist %PY% set PY=python\python.exe
 if not exist %PY% set PY=python
 rem pytest reads a space-separated value of a plugin option as a test path before
 rem the plugin loads; pass --cim-x=VALUE so it can't.

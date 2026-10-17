@@ -1379,7 +1379,9 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
         is_bare      = data[:2] == b'\xff\x0a'
         is_container = data[4:8] == b'JXL '
         if is_bare or is_container:
-            img = mt.jxl_decode(data)
+            # the first frame only: index=None decodes every frame of an animation
+            # into memory (a long 1080p animation is tens of GB) to keep frame 0
+            img = mt.jxl_decode(data, index=0)
         elif mt.is_raw(path):
             # a camera raw found on disk is shown in place (indexed only with rawpy)
             img = mt.decode_raw(path)

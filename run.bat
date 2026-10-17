@@ -5,8 +5,12 @@ rem (--no-auto-install to stop that). Any other argument goes to manager.py
 rem (--no-bundle: serve the JS/CSS files one by one, for debugging).
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
-if not exist venv\Scripts\python.exe (
+rem the venv install.bat made, else the Python a portable release ships in python\
+set PYEXE=venv\Scripts\python.exe
+if not exist %PYEXE% set PYEXE=python\python.exe
+if not exist %PYEXE% (
     echo run install.bat first >&2
+    pause
     exit /b 1
 )
 rem cjxl, ffmpeg, tailwindcss and friends that install.bat put in tools\
@@ -19,11 +23,17 @@ for %%a in (%*) do (
 )
 if "%AUTO%"=="1" (
     echo ==^> checking module deps
-    venv\Scripts\python.exe module_deps.py || echo warn: module dep check failed; starting anyway >&2
+    %PYEXE% module_deps.py || echo warn: module dep check failed; starting anyway >&2
 )
 rem A compiled module older than its .py (you edited the source) is dropped so
 rem the edit runs; install.bat or venv\Scripts\python native_build.py rebuilds.
-venv\Scripts\python.exe native_build.py --check
+%PYEXE% native_build.py --check
 rem CPython's JIT (3.13+ builds that ship it; a no-op elsewhere). set PYTHON_JIT=0 to turn it off.
 if not defined PYTHON_JIT set PYTHON_JIT=1
-venv\Scripts\python.exe manager.py %ARGS%
+echo ==^> starting; open http://localhost:8000 in a browser ^(Ctrl+C here stops it^)
+%PYEXE% manager.py %ARGS%
+if errorlevel 1 (
+    echo.
+    echo  the app stopped with an error ^(see above and logs\^)
+    pause
+)

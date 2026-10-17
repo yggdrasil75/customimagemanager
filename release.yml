@@ -1,0 +1,116 @@
+# A release on every v* tag (and by hand from the Actions tab):
+#   * CustomImageManager-<tag>-windows-portable.zip: unzip, double-click run.bat.
+#     Python 3.12 (the python.org nuget build), the ultralight deps, cjxl / djxl /
+#     jxlinfo, ffmpeg / ffprobe, the Tailwind CLI and the vendored JS are inside;
+#     nothing to install. The ML backends are one `install.bat cuda` (or cpu)
+#     inside the folder later, which makes a venv from the bundled Python.
+#   * the docker image, pushed to ghcr.io/<owner>/customimagemanager:<tag> (cpu).
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+  packages: write
+env:
+  PYTHON_VERSION: 3.12.10
+  LIBJXL_VERSION: v0.11.1
+  TAILWIND_VERSION: v3.4.17
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: version
+        id: v
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"; [ "${GITHUB_REF_TYPE}" = tag ] || tag="v$(cat VERSION)-$(git rev-parse --short HEAD)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=CustomImageManager-$tag-windows-portable" >> "$GITHUB_OUTPUT"
+      - name: Python (python.org nuget build, relocatable)
+        shell: pwsh
+        run: |
+          nuget install python -Version $env:PYTHON_VERSION -OutputDirectory nugetpy -ExcludeVersion
+          New-Item -ItemType Directory -Force dist/app | Out-Null
+          Copy-Item -Recurse nugetpy/python/tools dist/app/python
+          dist/app/python/python.exe -m pip install --upgrade pip wheel
+          dist/app/python/python.exe -m pip install -r requirements-ultralight.txt
+      - name: app files
+        shell: pwsh
+        run: |
+          $skip = @('.git', '.github', 'tests', 'android', 'venv', 'nugetpy', 'dist', 'build', 'gitpics', 'logs', 'media', 'data', 'models')
+          Get-ChildItem -Force | Where-Object { $skip -notcontains $_.Name } | ForEach-Object { Copy-Item -Recurse -Force $_.FullName dist/app/ }
+          Get-ChildItem -Recurse dist/app -Include __pycache__ -Directory | Remove-Item -Recurse -Force
+          foreach ($d in 'media', 'data', 'models', 'logs', 'tools', 'static/vendor') { New-Item -ItemType Directory -Force "dist/app/$d" | Out-Null }
+      - name: tools (libjxl, ffmpeg, tailwind) and vendored JS
+        shell: pwsh
+        run: |
+          $t = "dist/app/tools"
+          Invoke-WebRequest "https://github.com/libjxl/libjxl/releases/download/$env:LIBJXL_VERSION/jxl-x64-windows-static.zip" -OutFile jxl.zip
+          Expand-Archive jxl.zip -DestinationPath jxl -Force
+          Get-ChildItem -Recurse jxl -Include cjxl.exe, djxl.exe, jxlinfo.exe | ForEach-Object { Copy-Item $_.FullName $t/ }
+          Invoke-WebRequest "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffm -Force
+          Get-ChildItem -Recurse ffm -Include ffmpeg.exe, ffprobe.exe | ForEach-Object { Copy-Item $_.FullName $t/ }
+          Invoke-WebRequest "https://github.com/tailwindlabs/tailwindcss/releases/download/$env:TAILWIND_VERSION/tailwindcss-windows-x64.exe" -OutFile $t/tailwindcss.exe
+          Invoke-WebRequest "https://cdn.tailwindcss.com/3.4.17" -OutFile dist/app/static/tailwindcss.js
+          $v = "dist/app/static/vendor"
+          Invoke-WebRequest "https://unpkg.com/three@0.137.5/build/three.min.js" -OutFile $v/three.min.js
+          Invoke-WebRequest "https://unpkg.com/three@0.137.5/examples/js/loaders/OBJLoader.js" -OutFile $v/OBJLoader.js
+          Invoke-WebRequest "https://unpkg.com/three@0.137.5/examples/js/controls/OrbitControls.js" -OutFile $v/OrbitControls.js
+          Invoke-WebRequest "https://unpkg.com/drawflow@0.0.60/dist/drawflow.min.js" -OutFile $v/drawflow.min.js
+          Invoke-WebRequest "https://unpkg.com/drawflow@0.0.60/dist/drawflow.min.css" -OutFile $v/drawflow.min.css
+      - name: smoke test (the bundled Python starts the app)
+        shell: pwsh
+        run: |
+          cd dist/app
+          $p = Start-Process -PassThru -NoNewWindow -FilePath python/python.exe -ArgumentList 'manager.py', '--no-bundle'
+          $ok = $false
+          foreach ($i in 1..60) { try { if ((Invoke-WebRequest http://127.0.0.1:8000/login -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200) { $ok = $true; break } } catch { } ; Start-Sleep 1 }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "the app did not answer on :8000" }
+      - name: zip
+        shell: pwsh
+        run: |
+          Rename-Item dist/app "${{ steps.v.outputs.name }}"
+          Compress-Archive -Path "dist/${{ steps.v.outputs.name }}" -DestinationPath "${{ steps.v.outputs.name }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.v.outputs.name }}
+          path: ${{ steps.v.outputs.name }}.zip
+      - name: release asset
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.v.outputs.name }}.zip
+          generate_release_notes: true
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: image name
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.ref_type == 'tag' }}
+          build-args: |
+            GPU_BACKEND=cpu
+            NATIVE_BUILD=0
+          tags: |
+            ${{ steps.img.outputs.name }}:${{ github.ref_name }}
+            ${{ steps.img.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

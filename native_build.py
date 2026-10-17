@@ -42,6 +42,7 @@ EXCLUDE = {
     "conftest.py",
     "prefetch_models.py",  # scripts
     "module_deps.py",
+    "install_check.py",    # the installers ask it things before anything is built
     "modules/loader.py",   # the plugin loader itself
     "modules/host.py",
     "modules/__init__.py", # core wiring (registry, broker)
@@ -125,14 +126,14 @@ def clean(quiet=False):
 
 
 def check():
-    """! @brief Drop any built module older than its source (an edit must win)."""
+    """! @brief Drop any built module older than its source (an edit must win), and
+    any whose source is gone (removed upstream). The rest stay: a rebuild after an
+    update compiles only what changed."""
     stale = 0
-    for py in COMPILE:
+    for py in COMPILE + [p for p in _manifest().get("built", {}) if p not in COMPILE]:
         src = os.path.join(ROOT, py)
-        if not os.path.exists(src):
-            continue
         for so in _built_for(src):
-            if os.path.getmtime(so) < os.path.getmtime(src):
+            if not os.path.exists(src) or os.path.getmtime(so) < os.path.getmtime(src):
                 os.remove(so)
                 stale += 1
     if stale:

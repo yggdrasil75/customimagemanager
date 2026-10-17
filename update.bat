@@ -4,11 +4,19 @@ rem (the counterpart of update.sh). Never touches system tools: that's install.b
 setlocal
 cd /d "%~dp0"
 set PY=venv\Scripts\python.exe
+if not exist %PY% set PY=python\python.exe
 if not exist %PY% set PY=python
-rem Compiled modules shadow their .py: drop them BEFORE pulling so the pulled
-rem source is what runs (install.bat rebuilds them afterwards).
-%PY% native_build.py --clean
-git pull --ff-only || exit /b 1
+if not exist .git (
+    echo This is a portable release ^(no git checkout^): get the new zip from
+    echo   https://github.com/yggdrasil75/customimagemanager/releases
+    echo and unpack it over this folder; media\, data\, models\ and app_config.json are kept.
+    pause
+    exit /b 1
+)
+git pull --ff-only || ( pause & exit /b 1 )
+rem A compiled module older than its pulled source is dropped; install.bat
+rem rebuilds those alone (the rest stay compiled: no full rebuild per update).
+%PY% native_build.py --check
 set MODE=cpu
 for /f "usebackq delims=" %%m in (`%PY% -c "import json;print(json.load(open('app_config.json')).get('install',{}).get('mode','cpu'))" 2^>nul`) do set MODE=%%m
 call install.bat %MODE% --no-system

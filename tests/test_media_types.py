@@ -142,3 +142,31 @@ def test_jxl_anim_info_still_skips_decode(tmp_path, monkeypatch):
     q.write_bytes(mt.imagecodecs.jpegxl_encode(np.zeros((3, 40, 48, 3), np.uint8), distance=1.0))
     monkeypatch.undo()
     assert mt.jxl_anim_info(str(q))["n_frames"] == 3
+
+def test_animated_jxl_is_never_decoded_whole_past_the_budget(tmp_path, monkeypatch):
+    """A long animation used to be decoded into one (frames, h, w, c) array just to
+    count it or to show a frame (tens of GB for a 1080p clip). The count comes from
+    jxlinfo's frame headers, frames past the budget are decoded one at a time, and a
+    still picture read is the first frame only."""
+    import imagecodecs
+    a = np.random.default_rng(3).integers(0, 255, (6, 24, 20, 3), np.uint8)
+    p = str(tmp_path / "a.jxl")
+    with open(p, "wb") as f:
+        f.write(imagecodecs.jpegxl_encode(a, lossless=True))
+    info = mt.jxl_anim_info(p)
+    assert info["animated"] and info["n_frames"] == 6
+    calls = []
+    real = mt.jxl_decode
+    def spy(data, index=None):
+        calls.append(index)
+        return real(data, index)
+    monkeypatch.setattr(mt, "jxl_decode", spy)
+    monkeypatch.setattr(mt, "JXL_FRAMES_BUDGET", 24 * 20 * 4 * 2)   # room for two frames
+    fr = mt.jxl_decode_frames(p, [1, 5])
+    assert len(fr) == 2 and (fr[0] == a[1]).all() and (fr[1] == a[5]).all()
+    assert None not in calls, "no whole-animation decode past the budget"
+    calls.clear()
+    assert len(mt.jxl_decode_frames(p)) == 2                        # thinned to the budget
+    assert None not in calls
+    monkeypatch.setattr(mt, "JXL_FRAMES_BUDGET", 1 << 30)
+    assert len(mt.jxl_decode_frames(p)) == 6                        # fits: one decode

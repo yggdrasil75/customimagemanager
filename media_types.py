@@ -379,8 +379,53 @@ JXL_DECODE_THREADS = max(2, min(4, (os.cpu_count() or 4) // 2))
 
 
 def jxl_decode(data, index=None):
-    """! @brief imagecodecs.jpegxl_decode with the app's thread count."""
+    """! @brief imagecodecs.jpegxl_decode with the app's thread count.
+    @param index  the frame to decode; None decodes EVERY frame of an animation into
+                  one array (frames x h x w x c - a long 1080p animation is tens of
+                  GB), so callers that want a picture pass 0 and callers that want
+                  frames go through jxl_decode_frames, which bounds the memory."""
     return imagecodecs.jpegxl_decode(data, index, numthreads=JXL_DECODE_THREADS)
+
+
+## @brief Frames decoded in one call at most this many bytes; beyond it, frame by frame.
+JXL_FRAMES_BUDGET = 512 * 1024 * 1024
+
+
+## @brief Without jxlinfo, an animation is decoded whole to count its frames only up
+# to this compressed size (the decoded frames can be 50x bigger); past it the count
+# stays unknown rather than risk the machine's memory.
+JXL_COUNT_DECODE_MAX = 32 * 1024 * 1024
+
+
+def jxl_count_frames(path: str, data: bytes | None = None) -> int | None:
+    """! @brief The number of frames of a JXL without decoding pixels: `jxlinfo -v`
+    (libjxl-tools; the installers put it in) lists each frame header. Without it a
+    small file is decoded whole (JXL_COUNT_DECODE_MAX); a big one stays uncounted
+    (libjxl hands back the last frame for any index past the end, so frames cannot
+    be probed one by one).
+    @return the count, or None when it cannot be told."""
+    if shutil.which("jxlinfo"):
+        try:
+            r = subprocess.run(["jxlinfo", "-v", path], capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                n = sum(1 for line in r.stdout.splitlines() if line.startswith("frame:"))
+                if n:
+                    return n
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        size = len(data) if data is not None else os.path.getsize(path)
+        if size > JXL_COUNT_DECODE_MAX:
+            return None
+        if data is None:
+            with open(path, 'rb') as f:
+                data = f.read()
+        arr = jxl_decode(data)
+    except Exception:
+        return None
+    if arr.ndim == 4 or (arr.ndim == 3 and arr.shape[2] > 16):
+        return int(arr.shape[0])
+    return 1
 
 
 class _JxlBits:
@@ -535,12 +580,11 @@ def jxl_anim_info(path: str) -> dict:
             if hdr is not None and not hdr["animated"]:
                 n = 1                      # a still: settled from the header alone
             else:
-                # animated (or an unreadable header): decode to count the frames
-                arr = jxl_decode(data)
-                if arr.ndim == 4:
-                    n = int(arr.shape[0])
-                elif arr.ndim == 3 and arr.shape[2] > 16:
-                    n = int(arr.shape[0])
+                # animated (or an unreadable header): count the frame headers
+                # (jxlinfo), or decode a small file whole - never a big one
+                n = jxl_count_frames(path, data)
+                if n is None and hdr is not None and hdr["animated"]:
+                    result['animated'] = True      # uncounted, but animated for sure
         if n is not None:
             result['n_frames'] = n
             result['animated'] = n > 1
@@ -585,6 +629,7 @@ def jxl_decode_frames(path: str, indices=None, rgba=False):
     @param indices  frames to decode (None = all).
     @return RGB (or RGBA) uint8 arrays; [] on failure.
     """
+    mapping = None
     try:
         if _ext(path) != '.jxl':
             with Image.open(path) as im:
@@ -593,7 +638,9 @@ def jxl_decode_frames(path: str, indices=None, rgba=False):
         else:
             with open(path, 'rb') as f:
                 data = f.read()
-            arr = jxl_decode(data)
+            arr, mapping = _jxl_frames_bounded(data, path, indices)
+            if arr is None:
+                return []
     except Exception:
         return []
     # normalise to (frames, h, w, c) RGB uint8
@@ -620,6 +667,10 @@ def jxl_decode_frames(path: str, indices=None, rgba=False):
     elif arr.shape[-1] == 3 and rgba:
         arr = np.concatenate([arr, np.full(arr.shape[:-1] + (1,), 255, np.uint8)], axis=-1)
     total = arr.shape[0]
+    if mapping is not None:
+        # rows hold the frames `mapping` names; hand back the ones asked for, in order
+        pos = {orig: row for row, orig in enumerate(mapping)}
+        return [arr[pos[i]] for i in (mapping if indices is None else indices) if i in pos]
     if indices is None:
         indices = list(range(total))
     out = []
@@ -627,6 +678,30 @@ def jxl_decode_frames(path: str, indices=None, rgba=False):
         if 0 <= i < total:
             out.append(arr[i])
     return out
+
+def _jxl_frames_bounded(data, path, indices):
+    """! @brief The frames of a JXL as one (frames, h, w, c) array, within JXL_FRAMES_BUDGET.
+    @return (array, mapping): mapping is None when every frame was decoded in one go
+            (rows = frame numbers); else the frame number of each row - only the
+            wanted frames were decoded, one at a time, thinned to the budget."""
+    hdr = jxl_header(data[:65536]) or {}
+    if not hdr.get("animated"):
+        return jxl_decode(data), None
+    n = jxl_count_frames(path, data)
+    per_frame = int(hdr.get("xsize") or 0) * int(hdr.get("ysize") or 0) * 4
+    if n is None:
+        # uncounted (no jxlinfo, a big file): the first frames only, one at a time
+        n = max(1, JXL_FRAMES_BUDGET // max(1, per_frame))
+    elif per_frame * n <= JXL_FRAMES_BUDGET:
+        return jxl_decode(data), None
+    want = list(range(n)) if indices is None else sorted({i for i in indices if 0 <= i < n})
+    keep = max(1, JXL_FRAMES_BUDGET // max(1, per_frame))
+    if len(want) > keep:
+        want = want[::-(-len(want) // keep)]
+    if not want:
+        return None, None
+    return np.stack([jxl_decode(data, index=i) for i in want]), want
+
 
 def is_animated_jxl(path: str) -> bool:
     """! @brief True for a JXL with more than one frame."""
@@ -921,6 +996,33 @@ def video_probe(path: str) -> dict | None:
         'nb_frames': int(st['nb_frames']) if str(st.get('nb_frames','')).isdigit() else None,
         'codec': st.get('codec_name'),
     }
+
+def video_spherical(path: str) -> dict | None:
+    """! @brief The Spherical Video metadata of a file (Google's V1 `uuid` RDF box or the
+    V2 `sv3d` box; what cameras, YouTube and the spatialmedia tool write), read
+    through ffprobe's "Spherical Mapping" side data.
+    @return {"projection": "equirectangular" | "cubemap" | "equirectangular tile" | ...,
+             "yaw", "pitch", "roll"} or None when the file carries none (or no ffprobe)."""
+    if not _have('ffprobe'):
+        return None
+    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+           '-show_entries', 'stream_side_data_list', '-of', 'json', path]
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=30, text=True).stdout
+        j = json.loads(out or '{}')
+    except Exception:
+        return None
+    for st in j.get('streams') or []:
+        for sd in st.get('side_data_list') or []:
+            if str(sd.get('side_data_type') or '').lower() == 'spherical mapping':
+                def _f(k):
+                    try:
+                        return float(sd.get(k) or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+                return {"projection": str(sd.get('projection') or 'equirectangular').lower(),
+                        "yaw": _f('yaw'), "pitch": _f('pitch'), "roll": _f('roll')}
+    return None
 
 def video_sample_frames(path: str, n: int = 8, max_dim: int = 256) -> "list[np.ndarray]":
     """! @brief Up to `n` evenly spaced RGB frames (ends skipped); [] on failure."""

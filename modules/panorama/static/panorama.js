@@ -83,7 +83,8 @@
       $("pano_info").textContent = `partial sphere ${pano.crop_w}x${pano.crop_h} of ${pano.full_w}x${pano.full_h}`;
     } else {
       tex.repeat.set(1, 1); tex.offset.set(0, 0);
-      $("pano_info").textContent = pano && pano.source === "aspect" ? "wide picture shown as a sphere" : "photo sphere";
+      $("pano_info").textContent = pano && pano.source === "aspect" ? "2:1 picture shown as a sphere"
+        : pano && pano.source === "spherical" ? "360 video" : "photo sphere";
     }
     // the sphere seam sits at +x; shift so heading 0 (image centre) faces the camera
     tex.needsUpdate = true;
@@ -292,7 +293,8 @@
     const b = document.createElement("span");
     b.className = "pano-badge";
     b.textContent = "360";
-    b.title = item.pano.source === "aspect" ? "Wide picture: opens on a sphere" : "Photo sphere";
+    b.title = item.pano.source === "aspect" ? "2:1 picture: opens on a sphere"
+      : item.pano.source === "spherical" ? "360 video (Spherical Video metadata)" : "Photo sphere (GPano)";
     tile.appendChild(b);
   }
 

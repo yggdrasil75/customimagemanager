@@ -1,0 +1,35 @@
+# Core + module tests on every push and pull request (the ultralight profile:
+# no torch, no models; tests that need a model or a missing tool skip themselves).
+name: tests
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-ultralight.txt
+            requirements-cpu.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: system tools (cjxl / jxlinfo, exiv2, ffmpeg)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libjxl-tools libexiv2-dev libboost-python-dev libgomp1 ffmpeg
+      - name: python deps
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install -r requirements-ultralight.txt pytest imagecodecs opencv-python-headless
+      - name: js test deps
+        run: cd tests/js && npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund
+      - name: pytest
+        run: python -m pytest -c pytest.ini --rootdir . --cim-no-models -q -p no:cacheprovider
