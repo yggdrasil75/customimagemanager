@@ -65,8 +65,10 @@ ANIM_MAX_FRAMES: int = 30          # HEURDU's animation limit; longer clips are 
 ARCH_V09, ARCH_V10 = "changenet", "changenet-t"
 
 
-def parse_sizes(text: str) -> "dict[str, dict]":
-    """! @brief User size table: one "name width depth" per line. Empty/invalid -> defaults."""
+def parse_sizes(text=None) -> "dict[str, dict]":
+    """! @brief User size table: one "name width depth" per line. Empty / None / invalid ->
+    defaults. (No `str` annotation: the compiled build enforces it and the setting is
+    None until the dedup_train module declares it.)"""
     out = {}
     for line in str(text or "").splitlines():
         parts = [x for x in line.replace(",", " ").replace(":", " ").split() if x]
