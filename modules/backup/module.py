@@ -6,7 +6,10 @@ metadata), but some state lives only in it: accounts, sessions, shares and the
 per-user data of non-admins. This module protects that state. A daemon thread
 checks every few minutes whether a copy is due (the newest verified one is
 older than `backup_interval_hours`) and the server has been idle for
-`backup_idle_seconds`; it then copies the live DB with sqlite3's online backup
+`backup_idle_seconds` - no requests, no commits to the DB (PRAGMA data_version
+sampled every few seconds) and no background jobs; it then copies the live DB
+with sqlite3's online backup, and gives the copy up (to retry once idle) when
+live writes keep restarting it
 API (consistent under WAL, in small steps so the app keeps working) into a
 temp file, verifies the copy read-only (`PRAGMA integrity_check` plus a query
 on `files`), fsyncs it and renames it `library-YYYYmmdd-HHMMSS.db` in the
@@ -47,8 +50,11 @@ NAME_RE = re.compile(r"^library-(\d{8})-(\d{6})\.db$")
 TMP_RE = re.compile(r"^\.library-\d{8}-\d{6}\.db\.tmp$")
 STEP_PAGES = 1024
 STEP_SLEEP = 0.005
+## @brief A copy restarted this many times by concurrent writes is given up (retried once idle).
+RESTART_LIMIT = 3
 FIRST_CHECK_DELAY = 600
-CHECK_EVERY = 300
+## @brief The scheduler samples the DB's data_version this often (seconds) to tell idleness.
+POLL_EVERY = 5
 KEEP_RUN_ROWS = 200
 
 DEFAULTS = {
@@ -168,14 +174,37 @@ def _fsync_dir(folder):
         os.close(fd)
 
 
+class BackupRestarted(RuntimeError):
+    """! @brief The online copy kept restarting because the live DB was being written."""
+
+
 def _step_pause(status, remaining, total):
     """! @brief sqlite3 backup progress callback: a short sleep between steps so the live app keeps working."""
     time.sleep(STEP_SLEEP)
 
 
-def make_backup(src_path, folder, name_stamp):
+class _Stepper:
+    """! @brief Progress callback that spots the copy restarting (another connection wrote
+    to the live DB, so sqlite starts the copy over) and gives up after RESTART_LIMIT:
+    fighting the writers only keeps a read snapshot open while the WAL grows."""
+
+    def __init__(self, limit=RESTART_LIMIT):
+        self.limit, self.restarts, self.last = limit, 0, None
+
+    def __call__(self, status, remaining, total):
+        if self.last is not None and remaining > self.last:
+            self.restarts += 1
+            if self.restarts >= self.limit:
+                raise BackupRestarted("the live database kept changing during the copy "
+                                      "(restarted %d times); retrying when it is idle" % self.restarts)
+        self.last = remaining
+        _step_pause(status, remaining, total)
+
+
+def make_backup(src_path, folder, name_stamp, restart_limit=RESTART_LIMIT):
     """! @brief Copy, verify and rename one backup.
-    @return {path, bytes, ok, error, verified}; on a failed copy / verify the temp is removed.
+    @param restart_limit  give up after this many copy restarts caused by live writes.
+    @return {path, bytes, ok, error, verified, restarted}; on a failed copy / verify the temp is removed.
     """
     os.makedirs(folder, exist_ok=True)
     # two runs within one second: step the stamp forward instead of overwriting a copy
@@ -184,7 +213,7 @@ def make_backup(src_path, folder, name_stamp):
             time.mktime(time.strptime(name_stamp, "%Y%m%d-%H%M%S")) + 1))
     tmp = os.path.join(folder, ".library-%s.db.tmp" % name_stamp)
     final = os.path.join(folder, "library-%s.db" % name_stamp)
-    res = {"path": final, "bytes": 0, "ok": False, "error": "", "verified": 0.0}
+    res = {"path": final, "bytes": 0, "ok": False, "error": "", "verified": 0.0, "restarted": False}
     try:
         if not os.path.isfile(src_path):
             raise RuntimeError("live database not found: %s" % src_path)
@@ -194,7 +223,7 @@ def make_backup(src_path, folder, name_stamp):
         try:
             dst = sqlite3.connect(tmp)
             try:
-                src.backup(dst, pages=STEP_PAGES, progress=_step_pause)
+                src.backup(dst, pages=STEP_PAGES, progress=_Stepper(restart_limit))
                 # a self-contained single file: no -wal / -shm needed to read it
                 dst.execute("PRAGMA journal_mode=DELETE")
                 dst.commit()
@@ -211,6 +240,7 @@ def make_backup(src_path, folder, name_stamp):
         res.update(ok=True, bytes=os.path.getsize(final), verified=time.time())
     except Exception as e:
         res["error"] = str(e)
+        res["restarted"] = isinstance(e, BackupRestarted)
         for p in (tmp, tmp + "-journal"):
             try:
                 os.remove(p)
@@ -251,7 +281,8 @@ def clean_stale_temps(folder):
 def is_due(now, last_ok, interval_hours, idle_for, idle_seconds, enabled=True, running=False):
     """! @brief Whether the scheduler should start a backup.
     @param last_ok        epoch of the newest verified backup, or None.
-    @param idle_for       seconds since the last user activity.
+    @param idle_for       seconds the server has been idle: no user request AND no commit
+                          to the database AND no background job (the smallest of them).
     @return True when enabled, not running, the server idle long enough and the copy stale.
     """
     if not enabled or running:
@@ -298,7 +329,8 @@ def register(host):
                             help="Blank: .backups in the media folder. Relative paths are under the media folder.")
     host.add_settings_field(key="backup_idle_seconds", label="Wait for this many idle seconds",
                             kind="number", pane=TAB,
-                            help="A scheduled backup only starts after the server has been quiet this long.")
+                            help="A scheduled backup only starts after the server has been quiet this long: "
+                                 "no requests, no writes to the database and no background jobs.")
 
     roles = set(getattr(core.features, "ROLE_LEVELS", {}) or {}) | {"viewer", "uploader", "custom"}
     host.register_feature(FEATURE, "Database backups", section="admin", section_label="Admin",
@@ -329,7 +361,7 @@ def register(host):
         """! @brief The resolved backup folder."""
         return resolve_dir(host.config.get("backup_dir"), host.media_dir)
 
-    def idle_for():
+    def user_idle_for():
         """! @brief Seconds since the last user request (core activity clock, else the thread manager's)."""
         fn = getattr(core, "last_activity", None)
         if fn is not None:
@@ -341,6 +373,43 @@ def register(host):
             return float(host.thread_manager.seconds_since_activity())
         except Exception:
             return 0.0
+
+    # The DB's own idleness: PRAGMA data_version changes whenever another connection
+    # commits, so sampling it tells when the indexer, autotag, sync and uploads have
+    # stopped writing - a quiet web server says nothing about them.
+    dv = {"value": None, "changed_at": time.time()}
+
+    def db_idle_for():
+        """! @brief Seconds since the last commit by any other connection (sampled by the scheduler)."""
+        try:
+            v = host.db().execute("PRAGMA data_version").fetchone()[0]
+        except Exception:
+            return 0.0
+        now = time.time()
+        if v != dv["value"]:
+            dv.update(value=v, changed_at=now)
+        return now - dv["changed_at"]
+
+    def background_busy():
+        """! @brief True while the core sync runs or the thread manager has jobs in flight."""
+        try:
+            st = getattr(core, "sync_status", None)
+            if st is not None and st().get("running"):
+                return True
+        except Exception:
+            pass
+        try:
+            return host.thread_manager.inflight() > 0
+        except Exception:
+            return False
+
+    def idle_for():
+        """! @brief How long the whole server has been quiet: the user, the DB and the
+        background workers all at once (0 while a job runs)."""
+        if background_busy():
+            dv["changed_at"] = time.time()
+            return 0.0
+        return min(user_idle_for(), db_idle_for())
 
     # -- the run log ------------------------------------------------------------------
     def row_dict(r):
@@ -412,6 +481,10 @@ def register(host):
                     log.info("backup: pruned %s" % ", ".join(removed))
                 log.info("backup: wrote %s (%d bytes)" % (res["path"], res["bytes"]))
                 host.set_status("Database backed up")
+            elif res.get("restarted"):
+                # not a failure of the copy: the library was busy; the scheduler tries again once idle
+                log.info("backup postponed: %s" % res["error"])
+                host.set_status("Database backup postponed: the library is busy")
             else:
                 log.error("backup failed: %s" % res["error"])
                 host.set_status("Database backup failed: %s" % res["error"])
@@ -434,14 +507,15 @@ def register(host):
             run_backup()
 
     def loop():
-        """! @brief First check 10 minutes after start, then every 5 minutes."""
+        """! @brief First check 10 minutes after start, then every few seconds: the sampling
+        is what tells the DB idle, and a due backup starts as soon as the library is quiet."""
         time.sleep(FIRST_CHECK_DELAY)
         while True:
             try:
                 tick()
             except Exception as e:
                 log.error("backup scheduler: %s" % e)
-            time.sleep(CHECK_EVERY)
+            time.sleep(POLL_EVERY)
 
     def start():
         """! @brief Start the daemon scheduler thread once the server is up."""
