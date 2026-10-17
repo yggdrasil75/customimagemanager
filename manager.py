@@ -3233,6 +3233,20 @@ def _mirror_exif_db(rel, db_cols):
                        ("" if val is None else str(val), rel))
 
 
+def _describe_rows(target, key, where) -> str:
+    """! @brief The rows a module-table write addresses, for a log line: "rel_path=a.jpg,
+    kind=x" / "stack_id=? (3,)" / "every row"."""
+    parts = []
+    if isinstance(target, str):
+        parts.append(f"rel_path={target}")
+    for k, v in (key or {}).items():
+        parts.append(f"{k}={v!r}")
+    if where:
+        w, prm = where[0], (where[1] if len(where) > 1 else ())
+        parts.append("every row" if w.replace(" ", "") == "1=1" else f"{w} {tuple(prm)}")
+    return ", ".join(parts) or "every row"
+
+
 def _update_table(table, target, *, set_, remove, key, where, defaults=None):
     """! @brief Upsert / update / delete rows of a module table keyed by rel_path (+ key)."""
     table = _ident(table)
@@ -3324,10 +3338,29 @@ def update_file(target=None, *, set=None, add=None, remove=None, exif=None, xmp=
         if table != "files":
             if not dont_write:
                 raise ValueError(f"update_file: table {table!r} is DB-only; pass dont_write=True")
-            n = _update_table(table, target, set_=set, remove=remove, key=key, where=where,
-                              defaults=defaults)
-            if commit:
-                _db().commit()
+            if remove and target is None:
+                # a bulk purge (a module rebuilding its table): say so in the log
+                access_logger.info(f"update_file: deleting from {table} where "
+                                   f"{_describe_rows(target, key, where)}")
+
+            def _go():
+                n = _update_table(table, target, set_=set, remove=remove, key=key, where=where,
+                                  defaults=defaults)
+                if commit:
+                    _db().commit()
+                return n
+            own = commit and not _db().in_transaction
+            try:
+                # a self-contained write waits out a busy DB; one inside the caller's
+                # transaction cannot be retried here (a rollback would lose their work)
+                n = _db_retry(_go) if own else _go()
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e).lower() and "busy" not in str(e).lower():
+                    raise
+                what = ("delete from" if remove else "update") + f" {table} where {_describe_rows(target, key, where)}"
+                access_logger.error(f"update_file: database is locked: {what}"
+                                    + ("" if own else " (inside the caller's open transaction)"))
+                return {"success": False, "changed": [], "error": f"database is locked ({what})"}
             return {"success": True, "changed": list(set or {}) if n else [], "rows": n}
 
         if where is not None:
@@ -3488,10 +3521,12 @@ def update_file(target=None, *, set=None, add=None, remove=None, exif=None, xmp=
         raise
     except sqlite3.OperationalError as e:
         if "no such table" not in str(e):
-            access_logger.error(f"update_file {target}: {e}", exc_info=True)
+            access_logger.error(f"update_file {table} {_describe_rows(target, key, where)}: {e}",
+                                exc_info=True)
         return {"success": False, "changed": [], "error": str(e)}
     except Exception as e:
-        access_logger.error(f"update_file {target}: {type(e).__name__}: {e}", exc_info=True)
+        access_logger.error(f"update_file {table} {_describe_rows(target, key, where)}: "
+                            f"{type(e).__name__}: {e}", exc_info=True)
         return {"success": False, "changed": [], "error": str(e)}
 
 
@@ -7218,6 +7253,9 @@ def _delete_file(rel_path, permanent=False):
 _sync_lock = threading.Lock()
 _sync_state = {"running": False, "mode": "", "phase": "", "done": 0, "total": 0,
                "started": None, "finished": None, "result": None, "error": None}
+## @brief Set while no sync runs; boot waits on it before starting the workers.
+_sync_done = threading.Event()
+_sync_done.set()
 ## @brief A sync the launch check asked for, started once the server is up: {"mode", "reason"}.
 _scheduled_sync = {"mode": None, "reason": ""}
 LAUNCH_MARKER = os.path.join(MEDIA_DIR, ".cim", "last_launch")
@@ -7348,6 +7386,7 @@ def start_sync(mode: str = "quick") -> bool:
             return False
         _sync_state.update(running=True, mode=mode, phase="starting", done=0, total=0,
                            started=time.time(), finished=None, result=None, error=None)
+        _sync_done.clear()
     threading.Thread(target=_run_sync, args=(mode,), daemon=True, name="cim-sync").start()
     return True
 
@@ -7462,6 +7501,7 @@ def _run_sync(mode: str) -> None:
     with _sync_lock:
         _sync_state.update(running=False, phase="done" if not error else "error",
                            finished=time.time(), result=result, error=error)
+        _sync_done.set()
     module_host.set_status(summary)
     access_logger.info(summary)
     try:
@@ -8446,8 +8486,16 @@ if __name__=='__main__':
                   load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg,
                   read_document_id=_document_id, ensure_document_id=_ensure_document_id)
 
-    ## @brief Tiering runs first at boot: an unthrottled rebalance finishes before the
-    # indexer and upload workers start (uploads queue meanwhile).
+    # Module startup hooks run before any background DB work: their tables, checks
+    # and migrations are done when the sync and the workers come along.
+    access_logger.info("Running module startup hooks...")
+    module_host.run_startup_hooks()
+
+    ## @brief Boot work runs one step at a time, each on the finished DB: the tier
+    # rebalance, then the sync the launch check scheduled (a full re-index holds
+    # the write lock for long stretches, so nothing else writes until it is done),
+    # then the indexer / upload workers and the background sources (autotag, face,
+    # sweeps). The web server answers from the start; uploads queue meanwhile.
     def _boot_tiering_then_workers():
         access_logger.info("Boot rebalance: placing library on the right tiers...")
         try:
@@ -8456,17 +8504,17 @@ if __name__=='__main__':
             access_logger.error(f"boot rebalance failed: {e}")
         access_logger.info(f"Boot rebalance done: {tiering._state['run']['phase']}")
         if _run_scheduled_sync():
-            access_logger.info("Starting a full sync (the library DB predates the last launch)...")
+            access_logger.info("Running a full sync (the library DB predates the last launch); "
+                               "background work waits for it...")
+            _sync_done.wait()
+            access_logger.info("Sync finished; starting background work")
         else:
             access_logger.info("Starting background indexer...")
             threading.Thread(target=_build_index_background, daemon=True).start()
         access_logger.info("Registering background sources (autotag, face, upload)...")
         _start_upload_workers()
-    threading.Thread(target=_boot_tiering_then_workers, daemon=True).start()
-    access_logger.info("Starting background book indexer...")
-    access_logger.info("Running module startup hooks...")
-    module_host.run_startup_hooks()
-    thread_manager.wake()
+        thread_manager.wake()
+    threading.Thread(target=_boot_tiering_then_workers, daemon=True, name="cim-boot").start()
     access_logger.info("Serving on :8000")
     serve(app, host='0.0.0.0', port=8000, threads=state["wsgi_threads"], connection_limit=1000,
     channel_timeout=300, channel_request_lookahead=1)

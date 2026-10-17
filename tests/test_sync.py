@@ -226,3 +226,43 @@ def test_restore_rejects_corrupt_copy(app, tmp_path):
     assert os.path.exists(live + ".restore.bad") and not os.path.exists(live + ".restore")
     assert open(live, "rb").read() == before
     assert not [n for n in os.listdir(tmp_path) if "pre-restore" in n]
+
+
+# -- section: boot waits for the sync; a locked DB is reported, not a crash ----
+def test_sync_done_event_tracks_the_job(client, app):
+    _wait_idle(client)
+    assert app._sync_done.is_set()
+    assert app.start_sync("quick") is True
+    # cleared while the job runs (it may already have finished on an empty library)
+    _wait_idle(client)
+    assert app._sync_done.wait(SYNC_TIMEOUT)
+
+
+def test_module_table_write_reports_a_locked_db(app, host, monkeypatch):
+    """A busy DB does not raise out of update_file: a self-contained write retries
+    and the failure names the table and the rows (what would have been deleted)."""
+    import sqlite3 as _sq
+    db = app._db()
+    db.execute("CREATE TABLE IF NOT EXISTS lock_probe (rel_path TEXT PRIMARY KEY, v INTEGER)")
+    db.execute("INSERT OR REPLACE INTO lock_probe(rel_path, v) VALUES ('a.jpg', 1)")
+    db.commit()
+    calls = {"n": 0}
+    real = app._update_table
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _sq.OperationalError("database is locked")
+        return real(*a, **k)
+    monkeypatch.setattr(app, "_update_table", flaky)
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    r = app.update_file(table="lock_probe", where=("rel_path=?", ("a.jpg",)), remove=True, dont_write=True)
+    assert r["success"] is True and r["rows"] == 1 and calls["n"] == 3        # retried, then deleted
+    assert db.execute("SELECT COUNT(*) FROM lock_probe").fetchone()[0] == 0
+    # inside a caller's transaction: no retry (their work would be rolled back), a clear error
+    db.execute("INSERT INTO lock_probe(rel_path, v) VALUES ('b.jpg', 2)")
+    calls["n"] = 0
+    r = app.update_file(table="lock_probe", where=("1=1", ()), remove=True, dont_write=True, commit=False)
+    assert r["success"] is False and calls["n"] == 1
+    assert "locked" in r["error"] and "lock_probe" in r["error"] and "every row" in r["error"]
+    db.rollback()
+    assert app._describe_rows("x.jpg", {"kind": "k"}, None) == "rel_path=x.jpg, kind='k'"
