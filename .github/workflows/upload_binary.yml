@@ -1,0 +1,53 @@
+# The cim-upload executable (packaging/build_upload.py): upload.py with Python,
+# `cryptography` and the Remote access link inside, one file per platform, nothing
+# to install. Built on every v* tag (attached to the release) and by hand from the
+# Actions tab (download it from the run's artifacts).
+#
+# Linux builds run in a Debian 11 container (glibc 2.31), so the binary also runs on
+# older distros than the runner's own (Ubuntu 20.04+, Debian 11+, RHEL 9+).
+name: upload-binary
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,   os: ubuntu-latest,    container: "python:3.12-bullseye" }
+          - { name: linux-aarch64,  os: ubuntu-24.04-arm, container: "python:3.12-bullseye" }
+          - { name: windows-x86_64, os: windows-latest }
+          - { name: macos-arm64,    os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: ${{ !matrix.container }}
+        with:
+          python-version: "3.12"
+      - name: build
+        run: python packaging/build_upload.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cim-upload-${{ matrix.name }}
+          path: dist/cim-upload-*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/cim-upload-*

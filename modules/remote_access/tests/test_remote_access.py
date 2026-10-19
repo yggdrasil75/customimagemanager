@@ -10,7 +10,10 @@ import hashlib
 import os
 import random
 import struct
+import subprocess
+import sys
 import threading
+import time
 
 import pytest
 from werkzeug.serving import make_server
@@ -22,10 +25,20 @@ from modules.remote_access import gateway as gw
 from modules.remote_access import link
 from modules.remote_access import module as ra
 from modules.family_share import crypto as fc
+from cimtest import png_bytes
 
 
 def _priv():
     return link.raw_priv(X25519PrivateKey.generate())
+
+
+def _settle(host, svc, **settings):
+    """! @brief Set remote_access settings, let the module's debounced restart (0.5 s after a
+    change) fire, then apply once more so the link runs with exactly these settings."""
+    for k, v in settings.items():
+        host.set_config("remote_access_" + k, v, save=False)
+    time.sleep(1.0)
+    svc["apply"]()
 
 
 def run(coro, timeout=60):
@@ -310,11 +323,7 @@ def test_a_paired_phone_reaches_the_inbound_api_through_the_running_link(app, cl
     threading.Thread(target=web.serve_forever, daemon=True).start()
     svc = host.get_service("remote_access")
     try:
-        host.set_config("remote_access_enabled", True, save=False)
-        host.set_config("remote_access_dht", False, save=False)
-        host.set_config("remote_access_port", 0, save=False)
-        host.set_config("remote_access_target", "127.0.0.1:%d" % web.server_port, save=False)
-        svc["apply"]()
+        _settle(host, svc, enabled=True, dht=False, port=0, target="127.0.0.1:%d" % web.server_port)
         st = client.get("/api/remote_access/status").get_json()
         assert st["running"] and st["status"]["devices"] >= 1, st
         port = st["status"]["port"]
@@ -443,10 +452,7 @@ def test_family_share_link_route_reaches_a_peer_without_any_url(app, client, hos
         pytest.skip("cannot add a family peer here: %r" % (j,))
     svc = host.get_service("remote_access")
     try:
-        for k, v in (("remote_access_enabled", True), ("remote_access_dht", False), ("remote_access_port", 0),
-                     ("remote_access_gateways", gspec)):
-            host.set_config(k, v, save=False)
-        svc["apply"]()
+        _settle(host, svc, enabled=True, dht=False, port=0, gateways=gspec)
         assert svc["running"]()
         r = client.post("/api/family_share/peers/test", json={"id": j["id"]}).get_json()
         assert r["ok"], r
@@ -460,4 +466,79 @@ def test_family_share_link_route_reaches_a_peer_without_any_url(app, client, hos
         client.post("/api/family_share/peers/delete", json={"id": j["id"]})
         loop.call_soon_threadsafe(mom.close)
         loop.call_soon_threadsafe(web.close)
+        loop.call_soon_threadsafe(gtask.cancel)
+
+
+
+def test_gate_paths_differ_for_devices_and_family_peers():
+    up = b"POST /api/upload/session/abc HTTP/1.1\r\n\r\n"
+    assert not link.HttpGate(link.GATE_PREFIXES).feed(up) and link.HttpGate(link.GATE_PREFIXES).feed(up) == b""
+    g = link.HttpGate(link.DEVICE_PREFIXES)
+    assert g.feed(up) == up and not g.refused
+    g = link.HttpGate(link.DEVICE_PREFIXES)
+    g.feed(b"POST /api/auth/users HTTP/1.1\r\n\r\n")             # not an upload path
+    assert g.refused
+    g = link.HttpGate(link.DEVICE_PREFIXES)
+    g.feed(b"POST /api/uploadx HTTP/1.1\r\n\r\n")                # exact, not a prefix
+    assert g.refused
+
+
+def test_the_uploader_pairs_and_uploads_over_the_link(app, client, host, tmp_path):
+    """! @brief upload.py (or the cim-upload executable, $CIM_UPLOAD_BIN) pairs in My devices,
+    then uploads a folder to a server whose URL doesn't answer: through the gateway and the
+    direct link into the real app, login and chunked path included."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    exe = os.environ.get("CIM_UPLOAD_BIN")
+    cmd = [exe] if exe else [sys.executable, os.path.join(root, "upload.py")]
+    cfg = str(tmp_path / "link.json")
+
+    def tool(*args):
+        r = subprocess.run(cmd + list(args) + ["--link-config", cfg], capture_output=True, text=True, timeout=120)
+        return r.returncode, r.stdout + r.stderr
+
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    gtask, gspec = asyncio.run_coroutine_threadsafe(_gateway(), loop).result(10)
+    web = make_server("127.0.0.1", 0, app.app, threaded=True)
+    threading.Thread(target=web.serve_forever, daemon=True).start()
+    enc = host.get_service("encoding")
+    old_prefs = enc.media_prefs()
+    enc.set_media_prefs(dict(old_prefs, image={"target": ".jxl", "mode": "none"}))  # no cjxl needed
+    svc = host.get_service("remote_access")
+    dev_id = None
+    try:
+        rc, out = tool("--pair", "--name", "nas-uploader")
+        assert rc == 0, out
+        mine = [ln for ln in out.splitlines() if ln.startswith("fs1.")][0]
+        j = client.post("/api/family_share/devices/save", json={"name": "nas-uploader", "pairing_code": mine}).get_json()
+        if not j or not j.get("ok"):
+            pytest.skip("cannot pair a device here: %r" % (j,))
+        dev_id = j["id"]
+        theirs = client.post("/api/family_share/devices/key", json={"id": dev_id}).get_json()["pairing_code"]
+        rc, out = tool("--pair", theirs)
+        assert rc == 0 and "Paired with" in out, out
+        _settle(host, svc, enabled=True, dht=False, port=0, gateways=gspec,
+                target="127.0.0.1:%d" % web.server_port)
+        assert svc["running"]()
+        src = tmp_path / "pics"
+        src.mkdir()
+        for i in range(3):
+            (src / ("link-%d.png" % i)).write_bytes(png_bytes(seed=7700 + i))
+        rc, out = tool(str(src), "--url", "http://127.0.0.1:9", "--gateway", gspec, "--dest", "via-link",
+                       "--mode", "sync", "--chunked", "--workers", "2")
+        assert rc == 0, out
+        assert "direct link" in out and "Linked to" in out and "destroyed" not in out, out
+        for i in range(3):
+            assert os.path.exists(os.path.join(host.media_dir, "via-link", "link-%d.png" % i)), out
+        # unpaired / --link off: nothing changes
+        rc, out = tool(str(src), "--url", "http://127.0.0.1:9", "--link", "off")
+        assert rc == 2 and "direct link" not in out
+    finally:
+        enc.set_media_prefs(old_prefs)
+        host.set_config("remote_access_enabled", False, save=False)
+        host.set_config("remote_access_gateways", "", save=False)
+        svc["stop"]()
+        web.shutdown()
+        if dev_id:
+            client.post("/api/family_share/devices/delete", json={"id": dev_id})
         loop.call_soon_threadsafe(gtask.cancel)

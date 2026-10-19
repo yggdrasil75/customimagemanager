@@ -85,7 +85,15 @@ ACK_DELAY = 0.02
 TICK = 0.01
 PUNCH_FOR = 30.0
 PUNCH_EVERY = 0.3
+# What a link stream may reach. An entry ending in "/" allows everything under it,
+# any other entry exactly that path. Family peers get GATE_PREFIXES; phones and the
+# cim-upload tool (paired as devices) also get the login and upload API they use -
+# an account's password is still needed for those, as on the LAN.
 GATE_PREFIXES = ("/api/family_share/inbound/", "/api/remote_access/pub/")
+UPLOAD_PATHS = ("/api/auth/config", "/api/auth/login", "/api/auth/logout", "/api/auth/me",
+                "/api/upload", "/api/upload/config", "/api/upload/session", "/api/upload/session/",
+                "/api/sections")
+DEVICE_PREFIXES = GATE_PREFIXES + UPLOAD_PATHS
 GATE_HEAD_MAX = 64 * 1024
 REFUSED = (b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 30\r\n"
            b"Connection: close\r\n\r\nnot reachable through the link")
@@ -303,7 +311,11 @@ class HttpGate:
         low = path.lower()
         if not path.startswith(b"/") or b".." in path or b"%2e" in low or b"%2f" in low or b"\\" in path:
             return False
-        return any(path.startswith(p.encode()) for p in self.prefixes)
+        for p in self.prefixes:
+            p = p.encode()
+            if path == p or (p.endswith(b"/") and path.startswith(p)):
+                return True
+        return False
 
     def _framing(self, head):
         cl, te = None, None
@@ -1366,10 +1378,10 @@ def serve_streams(node, get_conn, port=0):
 
 # -- server (responder, and dialler of its family_share peers) -------------------
 class Pair:
-    __slots__ = ("name", "dev_pub", "keys", "knock_ts", "announced", "seq")
+    __slots__ = ("name", "dev_pub", "keys", "knock_ts", "announced", "seq", "prefixes")
 
-    def __init__(self, name, dev_pub, keys):
-        self.name, self.dev_pub, self.keys = name, dev_pub, keys
+    def __init__(self, name, dev_pub, keys, prefixes=GATE_PREFIXES):
+        self.name, self.dev_pub, self.keys, self.prefixes = name, dev_pub, keys, prefixes
         self.knock_ts = 0
         self.announced = None
         self.seq = 0
@@ -1418,16 +1430,19 @@ class Server(Node):
         self._last_cands = None
 
     def set_devices(self, devices):
-        """! @brief devices: [(name, pub_raw)] - every key that may dial in (phones and peers)."""
+        """! @brief devices: [(name, pub_raw[, allowed paths])] - every key that may dial in
+        (phones, the upload tool, family peers); the paths default to this server's gate."""
         keep = {}
-        for name, pub in devices:
+        for d in devices:
+            name, pub = d[0], d[1]
+            prefixes = tuple(d[2]) if len(d) > 2 and d[2] else self.gate_prefixes
             try:
                 k = PairKeys(self.priv, pub, self.pub)
             except Exception:
                 continue
-            old = self.pairs.get(k.token)
-            keep[k.token] = old if old is not None else Pair(name, pub, k)
-            keep[k.token].name = name
+            p = self.pairs.get(k.token) or Pair(name, pub, k)
+            p.name, p.prefixes = name, prefixes
+            keep[k.token] = p
         self.pairs = keep
 
     # -- handshake ---------------------------------------------------------------
@@ -1464,7 +1479,7 @@ class Server(Node):
         hdr = bytes([T_WELCOME, VER]) + sid_i + sid_r + e_r_pub
         pkt = hdr + AESGCM(k_r2i).encrypt(bytes(12), struct.pack("!Q", int(time.time() * 1000)), hdr)
         conn = Conn(self, False, sid_r, sid_i, k_r2i, k_i2r, a, label=pair.name)
-        conn.on_stream = lambda s, c=conn: self._serve_stream(c, s)
+        conn.on_stream = lambda s, c=conn, g=pair.prefixes: self._serve_stream(c, s, g)
         self.conns[sid_r] = conn
         self.hellos[e_i] = (pkt, conn)
         while len(self.hellos) > 256:
@@ -1474,7 +1489,7 @@ class Server(Node):
             self.log.info("remote_access: link up with %s from %s:%s" % (pair.name, a[0], a[1]))
         self.sendto(pkt, a)
 
-    def _serve_stream(self, conn, s):
+    def _serve_stream(self, conn, s, prefixes):
         async def run():
             try:
                 reader, writer = await asyncio.open_connection(*self.target)
@@ -1483,7 +1498,7 @@ class Server(Node):
                 return
             s.writer = writer
             s.tasks.append(self.loop.create_task(pump_out(conn, s, reader)))
-            await pump_in(conn, s, writer, HttpGate(self.gate_prefixes))
+            await pump_in(conn, s, writer, HttpGate(prefixes))
         s.tasks.append(self.loop.create_task(run()))
 
     # -- dialling family peers -------------------------------------------------------

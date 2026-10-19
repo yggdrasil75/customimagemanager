@@ -5,24 +5,36 @@ Runs on an old machine with nothing but Python: urllib.request, a small
 streaming multipart encoder and, for big files, the server's chunked upload
 sessions (/api/upload/session) with resume after a dropped connection.
 
+Away from home: paired once with the server (--pair, like the phone app), it
+reaches a server that has no public address over Remote access's direct link
+(--link). That part needs the `cryptography` package and Python 3.7+, or the
+self-contained `cim-upload` executable (packaging/build_upload.py), which has
+everything inside. Without a pairing nothing changes.
+
 Exit codes: 0 all uploaded (or expected duplicates), 1 some failed after
 retries, 2 all failed (connection or configuration).
 """
 
 import argparse
+import asyncio
+import base64
 import getpass
 import hashlib
 import http.client
 import http.cookiejar
+import importlib.util
 import json
 import os
 import re
+import socket
 import ssl
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
 
@@ -1271,6 +1283,257 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
     return 0
 
 
+# -- remote link (Remote access on the server) ------------------------------
+## @brief Where the pairing (this tool's key, the server's key) is kept.
+LINK_CONFIG = os.path.join(os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config"),
+                           "cim-upload", "link.json")
+DEFAULT_STUN = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"]
+
+
+def _b64e(b):
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def _b64d(s):
+    s = str(s or "")
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def load_link():
+    """! @brief The link client (modules/remote_access/link.py and dht.py): bundled
+    inside the cim-upload executable, else read from the repo next to this script.
+    @return (link, dht) modules; raises RuntimeError with what is missing."""
+    if sys.version_info < (3, 7):
+        raise RuntimeError("the direct link needs Python 3.7+ (or the cim-upload executable)")
+    base = getattr(sys, "_MEIPASS", None)
+    here = os.path.join(base, "cimlink") if base else \
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules", "remote_access")
+    mods = []
+    for name, fname in (("cimlink", "link.py"), ("cimlink_dht", "dht.py")):
+        path = os.path.join(here, fname)
+        if name in sys.modules:
+            mods.append(sys.modules[name])
+            continue
+        if not os.path.exists(path):
+            raise RuntimeError("the direct link code is not here ({}); use the cim-upload executable".format(path))
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except ImportError as e:
+            raise RuntimeError("the direct link needs the 'cryptography' package ({}): pip install "
+                               "cryptography, or use the cim-upload executable".format(e))
+        sys.modules[name] = mod
+        mods.append(mod)
+    return mods[0], mods[1]
+
+
+def read_link_config(path=LINK_CONFIG):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_link_config(cfg, path=LINK_CONFIG):
+    """! @brief Save the pairing, readable by this user only (it holds a private key)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2)
+    os.replace(tmp, path)
+
+
+def pairing_code(cfg):
+    """! @brief This tool's pairing code (same fs1 format as the phone app's)."""
+    body = json.dumps({"v": 1, "name": cfg["name"], "url": "", "pub": cfg["pub"], "key": cfg["key_in"],
+                       "id": cfg["id"], "peer_name": ""}, separators=(",", ":")).encode()
+    return "fs1." + _b64e(body)
+
+
+def parse_pairing_code(code):
+    code = str(code or "").strip()
+    if not code.startswith("fs1."):
+        raise ValueError("not a pairing code (it starts with fs1.)")
+    try:
+        d = json.loads(_b64d(code[4:]).decode())
+    except Exception:
+        raise ValueError("the pairing code is damaged")
+    if not isinstance(d, dict) or not d.get("pub") or len(_b64d(d["pub"])) != 32:
+        raise ValueError("the pairing code has no key")
+    return d
+
+
+def link_pair(code="", name="", path=LINK_CONFIG):
+    """! @brief --pair: make this tool's key (once), take the server's code when given,
+    print this tool's code. @return the exit code."""
+    cfg = read_link_config(path)
+    try:
+        link, _ = load_link()
+    except RuntimeError as e:
+        print("Error: {}".format(e))
+        return 2
+    if not cfg.get("priv"):
+        priv = link.raw_priv(link.X25519PrivateKey.generate())
+        cfg.update(priv=_b64e(priv), pub=_b64e(link.pub_of(priv)), key_in=_b64e(os.urandom(32)),
+                   id=uuid.uuid4().hex, name=name or "upload-" + re.sub(r"[^a-z0-9-]+", "-",
+                                                                         socket.gethostname().lower())[:40])
+    elif name:
+        cfg["name"] = name
+    if code:
+        try:
+            d = parse_pairing_code(code)
+        except ValueError as e:
+            print("Error: {}".format(e))
+            return 2
+        if d["pub"] == cfg["pub"]:
+            print("Error: that is this tool's own pairing code; paste the server's.")
+            return 2
+        cfg.update(server_pub=d["pub"], server_name=str(d.get("name") or ""),
+                   server_url=str(d.get("url") or ""))
+        if d.get("peer_name"):
+            cfg["name"] = str(d["peer_name"])
+    write_link_config(cfg, path)
+    print("This uploader's pairing code (name {}):\n\n{}\n".format(cfg["name"], pairing_code(cfg)))
+    if cfg.get("server_pub"):
+        print("[*] Paired with {} (key {}). Settings saved in {}.".format(
+            cfg.get("server_name") or "the server", fingerprint(cfg["server_pub"]), path))
+        print("    If the server doesn't have the code above yet: Settings -> My devices -> add a device, "
+              "paste it.")
+    else:
+        print("Next: on the server, Settings -> My devices -> add a device and paste the code above,\n"
+              "then click \"Code for the app\" and run:  cim-upload --pair <that code>")
+    return 0
+
+
+def fingerprint(pub_b64):
+    h = hashlib.sha256(_b64d(pub_b64)).hexdigest()[:16]
+    return " ".join(h[i:i + 4] for i in range(0, 16, 4))
+
+
+def reachable(url, timeout=3.0):
+    """! @brief Does anything answer TCP at the URL's host and port?"""
+    u = urllib.parse.urlsplit(url)
+    port = u.port or (443 if u.scheme == "https" else 80)
+    try:
+        socket.create_connection((u.hostname, port), timeout).close()
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def refresh_link_config(url, cfg, verify=True, path=LINK_CONFIG):
+    """! @brief While the server answers directly, keep its gateway list (public endpoint)."""
+    ctx = None
+    if url.startswith("https") and not verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/api/remote_access/pub/client", timeout=5,
+                                    context=ctx) as r:
+            j = _json(r.read())
+    except Exception:
+        return
+    if j.get("ok"):
+        cfg.update(gateways=list(j.get("gateways") or []), stun=list(j.get("stun") or []) or DEFAULT_STUN,
+                   dht=bool(j.get("dht")))
+        try:
+            write_link_config(cfg, path)
+        except OSError:
+            pass
+
+
+class LinkTunnel(object):
+    """! @brief The direct link on its own thread: a 127.0.0.1 port that reaches the
+    server's app. Everything else in this script talks to that port unchanged."""
+
+    def __init__(self, cfg, gateways=(), dht=False):
+        self.cfg = cfg
+        self.gateways = list(cfg.get("gateways") or []) + [g for g in gateways if g not in (cfg.get("gateways") or [])]
+        self.dht = dht or bool(cfg.get("dht"))
+        self.loop = None
+        self.client = None
+        self.via = ""
+
+    def start(self, timeout=45.0):
+        """! @brief Find the server and connect. @return the local base URL."""
+        link, dht = load_link()
+        if not self.gateways and not self.dht:
+            raise RuntimeError("no gateway known and the DHT is off: run once where the server answers, "
+                               "or pass --gateway host:port / --dht")
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, name="cimlink", daemon=True).start()
+
+        async def boot():
+            c = link.Client(_b64d(self.cfg["priv"]), _b64d(self.cfg["server_pub"]), use_dht=self.dht,
+                            gateways=self.gateways, stun=self.cfg.get("stun") or DEFAULT_STUN)
+            await c.open()
+            if self.dht:
+                c.dht = dht.Dht(c.sendto, c.resolve)
+            try:
+                await c.connect(timeout=timeout)
+            except Exception:
+                c.close()
+                raise
+            port = await c.serve_local()
+            return c, port
+        try:
+            self.client, port = asyncio.run_coroutine_threadsafe(boot(), self.loop).result(timeout + 15)
+        except Exception as e:
+            self.close()
+            raise RuntimeError(str(e) or type(e).__name__)
+        self.via = self.client.path_note
+        return "http://127.0.0.1:{}".format(port)
+
+    def close(self):
+        """! @brief Close the link and stop its thread, letting its tasks finish cancelling."""
+        if self.loop is None:
+            return
+
+        async def down():
+            if self.client is not None:
+                self.client.close()
+            tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            asyncio.run_coroutine_threadsafe(down(), self.loop).result(5)
+        except Exception:
+            pass
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.loop = None
+
+
+def open_route(url, link_mode, gateways=(), dht=False, verify=True, path=LINK_CONFIG):
+    """! @brief Pick how to reach the server. @return (base_url, tunnel or None, error)."""
+    if link_mode == "off":
+        return url, None, ""
+    cfg = read_link_config(path)
+    paired = bool(cfg.get("priv") and cfg.get("server_pub"))
+    if not paired:
+        if link_mode == "on":
+            return url, None, "Error: --link on, but this uploader is not paired yet (run --pair)."
+        return url, None, ""
+    if link_mode == "auto" and reachable(url):
+        refresh_link_config(url, cfg, verify, path)
+        return url, None, ""
+    print("[*] {} - connecting over the direct link...".format(
+        "--link on" if link_mode == "on" else "{} does not answer from here".format(url)))
+    tunnel = LinkTunnel(cfg, gateways, dht)
+    try:
+        base = tunnel.start()
+    except RuntimeError as e:
+        tunnel.close()
+        return url, None, "Error: no direct link to the server: {}".format(e)
+    print("[*] Linked to {} via {}.".format(cfg.get("server_name") or "the server", tunnel.via))
+    return base, tunnel, ""
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Bulk-upload media to the AI Media & Asset Manager.",
@@ -1284,7 +1547,7 @@ def main():
                "never a refusal.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("source_dir",
+    parser.add_argument("source_dir", nargs="?",
         help="Local folder to upload (recursively).")
     parser.add_argument("--url", default="http://localhost:8000",
         help="Base URL of the Media Manager server.")
@@ -1343,7 +1606,29 @@ def main():
              "--password for scripts and cron jobs.")
     auth_group.add_argument("--no-verify-tls", action="store_true",
         help="Skip TLS certificate verification (self-signed https servers).")
+
+    link_group = parser.add_argument_group("away from home (Remote access on the server)")
+    link_group.add_argument("--pair", nargs="?", const="", default=None, metavar="CODE",
+        help="Pair this uploader like the phone app: without CODE, print this uploader's pairing "
+             "code (paste it in Settings -> My devices); with the server's code (\"Code for the app\"), "
+             "store it. Then exit.")
+    link_group.add_argument("--name", default="",
+        help="This uploader's name for --pair (default upload-<hostname>).")
+    link_group.add_argument("--link", choices=("auto", "on", "off"), default="auto",
+        help="auto: use the direct link when paired and --url does not answer; on: always; off: never.")
+    link_group.add_argument("--gateway", action="append", default=[], metavar="HOST:PORT",
+        help="A Remote access gateway to try (repeatable); the server's own list is learnt "
+             "whenever it answers directly.")
+    link_group.add_argument("--dht", action="store_true",
+        help="Also look the server up on the BitTorrent DHT (slower; when it has no gateway).")
+    link_group.add_argument("--link-config", default=LINK_CONFIG,
+        help="Where the pairing is kept.")
     args = parser.parse_args()
+
+    if args.pair is not None:
+        sys.exit(link_pair(args.pair, args.name, args.link_config))
+    if not args.source_dir:
+        parser.error("source_dir is required (or --pair)")
 
     # Password: --password-file, then $CIM_PASSWORD, then --password, then a prompt
     # (only with a tty, so cron never hangs).
@@ -1366,24 +1651,34 @@ def main():
             print("\nAborted.")
             sys.exit(2)
 
-    sys.exit(bulk_upload(
-        source_dir      = args.source_dir,
-        server_url      = args.url,
-        workers         = args.workers,
-        max_attempts    = args.retries,
-        initial_backoff = args.backoff,
-        verbose_dupes   = args.verbose_duplicates,
-        aggressive      = args.aggressive,
-        username        = args.username,
-        password        = password,
-        verify_tls      = not args.no_verify_tls,
-        dest            = args.dest,
-        mode            = args.mode,
-        chunked         = args.chunked,
-        validate        = args.validate,
-        delete_source   = args.delete_source,
-        dry_run         = args.dry_run,
-    ))
+    server_url, tunnel, err = open_route(args.url, args.link, args.gateway, args.dht,
+                                         not args.no_verify_tls, args.link_config)
+    if err:
+        print(err)
+        sys.exit(2)
+    try:
+        code = bulk_upload(
+            source_dir      = args.source_dir,
+            server_url      = server_url,
+            workers         = args.workers,
+            max_attempts    = args.retries,
+            initial_backoff = args.backoff,
+            verbose_dupes   = args.verbose_duplicates,
+            aggressive      = args.aggressive,
+            username        = args.username,
+            password        = password,
+            verify_tls      = not args.no_verify_tls,
+            dest            = args.dest,
+            mode            = args.mode,
+            chunked         = args.chunked,
+            validate        = args.validate,
+            delete_source   = args.delete_source,
+            dry_run         = args.dry_run,
+        )
+    finally:
+        if tunnel is not None:
+            tunnel.close()
+    sys.exit(code)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,12 @@ Family share uses the same link between instances: a peer with route "link"
 (or "auto" with no URL) is dialled directly, so two instances without a public
 address share with each other without a mailbox or a hub in between.
 
+The command-line uploader uses it too: `upload.py --pair` (or the cim-upload
+executable, packaging/build_upload.py) pairs like a phone in My devices, and when
+the server URL doesn't answer it uploads over the link. Phones and the uploader
+may reach the inbound, login and upload API through it (an account password is
+still needed for an upload); family peers only the inbound API.
+
 Nothing is announced and no socket is opened until at least one phone or
 peer is paired in family_share.
 """
@@ -261,18 +267,21 @@ def register(host):
         return c
 
     def devices():
-        """! @brief [(name, pub_raw)] of every key family_share pinned: phones and family peers."""
+        """! @brief [(name, pub_raw, allowed paths)] of every key family_share pinned: phones and the
+        upload tool (My devices) reach the inbound, login and upload API; family peers the inbound API."""
         fs = host.get_service("family_share")
         if fs is None or "devices" not in fs:
             return []
         out = []
-        for d in list(fs["devices"]()) + (list(fs["peers"]()) if "peers" in fs else []):
+        rows = [(d, link.DEVICE_PREFIXES) for d in fs["devices"]()]
+        rows += [(d, link.GATE_PREFIXES) for d in (fs["peers"]() if "peers" in fs else [])]
+        for d, allowed in rows:
             try:
                 pub = _b64d(d["pub_key"])
             except (ValueError, TypeError):
                 continue
             if len(pub) == 32:
-                out.append((d["name"], pub))
+                out.append((d["name"], pub, allowed))
         return out
 
     def private_key():

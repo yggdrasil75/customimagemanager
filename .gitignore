@@ -32,3 +32,4 @@ tools/
 /build/
 /data/native_manifest.json
 /static/build/
+/dist/
