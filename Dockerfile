@@ -18,11 +18,12 @@ RUN --mount=type=cache,target=/build/android/.sdk \
     if [ "$BUILD_ANDROID" = "1" ]; then OUT=/build/static/app/cim-family.apk ./android/build.sh; \
     else echo "BUILD_ANDROID=0: skipping the Android app"; fi
 
-FROM python:3.12
+FROM python:3.12-slim
 ARG GPU_BACKEND=cpu
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     YOLO_CONFIG_DIR=/app/data
 
 # System deps. The ultralight profile is an image VIEWER only, so it skips the
@@ -32,12 +33,17 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update \
     && if [ "${GPU_BACKEND}" = "ultralight" ]; then \
         apt-get install -y --no-install-recommends \
+            curl \
+            ca-certificates \
             libjxl-tools \
             libexiv2-dev \
             libboost-python-dev \
             libgomp1 ; \
     else \
         apt-get install -y --no-install-recommends \
+            curl \
+            ca-certificates \
+            git \
             libjxl-tools \
             ffmpeg \
             libgl1 \
@@ -61,7 +67,11 @@ RUN echo "Installing backend: ${GPU_BACKEND}" \
     && if [ "${GPU_BACKEND}" = "ultralight" ]; then \
         pip install -r requirements-ultralight.txt ; \
     else \
-        pip install -r "requirements-${GPU_BACKEND}.txt" -r requirements.txt ; \
+        apt-get update \
+        && apt-get install -y --no-install-recommends build-essential \
+        && pip install -r "requirements-${GPU_BACKEND}.txt" -r requirements.txt \
+        && apt-get purge -y --auto-remove build-essential \
+        && rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache ; \
     fi
 
 RUN if [ "${GPU_BACKEND}" = "rocm" ]; then \
@@ -77,7 +87,16 @@ COPY --from=android /build/static/app/ ./static/app/
 
 # Native build of the Python modules (native_build.py); --build-arg NATIVE_BUILD=0 skips it.
 ARG NATIVE_BUILD=1
-RUN if [ "$NATIVE_BUILD" = "1" ]; then pip install "cython<3.2" && python native_build.py; fi
+# The compiler is installed, used and purged in this one layer so it never ships.
+RUN if [ "$NATIVE_BUILD" = "1" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends build-essential \
+        && pip install "cython<3.2" \
+        && python native_build.py \
+        && pip uninstall -y cython \
+        && apt-get purge -y --auto-remove build-essential \
+        && rm -rf /var/lib/apt/lists/* build /tmp/* ; \
+    fi
 
 RUN mkdir -p static && curl -fsSL https://cdn.tailwindcss.com/3.4.17 -o static/tailwindcss.js
 

@@ -42,6 +42,8 @@ services:
       context: .
       args:
         GPU_BACKEND: ultralight
+    environment:
+      - CIM_NO_AUTO_INSTALL=1
 
   # -- CPU (default) ----------------------------------------------------------
   cim:
