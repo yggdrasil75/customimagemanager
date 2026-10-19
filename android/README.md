@@ -40,8 +40,23 @@ re-enabled); if the account is deleted its phones are removed and must be paired
 again from another account. Phones paired before accounts existed were given to
 the server's first admin and keep working unchanged.
 
+Away from home
+- When the paired server URL doesn't answer (you're not on the home network and
+  the server has no public address), the app finds the server through the
+  server's **Remote access** module: rendezvous gateways and the BitTorrent DHT
+  tell each side where the other is, both punch through their NATs, and the app
+  talks to the server directly over an end-to-end encrypted UDP link
+  (`Link.kt`, same protocol as `modules/remote_access/link.py`). No relay ever
+  carries photos. `Remote.kt` picks direct or link per request; `Api` doesn't
+  know the difference.
+- The app learns the server's gateway list whenever it reaches the server
+  directly. Settings -> *Away from home* turns it off and tests the link.
+- When both ends sit behind strict (symmetric) NATs no link forms; backup waits
+  until the phone is home again. IPv6 on both ends avoids NAT entirely.
+
 Building
 ```
+./install.sh                                        # native install builds it when android/ changed
 ./android/build.sh                                  # JDK 17 + curl + unzip on the host
 docker build --build-arg BUILD_ANDROID=1 -t cim .   # or inside the image
 BUILD_ANDROID=1 docker compose build cim

@@ -64,6 +64,17 @@ class Prefs(ctx: Context) {
     var lastRun: Long get() = p.getLong("last_run", 0); set(v) = p.edit().putLong("last_run", v).apply()
     var lastError: String get() = p.getString("last_error", "") ?: ""; set(v) = p.edit().putString("last_error", v).apply()
 
+    // remote access (Remote.kt): the direct link used when the server URL doesn't answer
+    // off until the user turns it on, or the server says its Remote access is on (and the user never chose)
+    var remoteEnabled: Boolean get() = if (p.contains("remote_on")) p.getBoolean("remote_on", false) else remoteServerOn
+        set(v) = p.edit().putBoolean("remote_on", v).apply()
+    var remoteServerOn: Boolean get() = p.getBoolean("remote_srv_on", false); set(v) = p.edit().putBoolean("remote_srv_on", v).apply()
+    var remoteGateways: String get() = p.getString("remote_gw", null) ?: Remote.DEFAULT_GATEWAYS.joinToString("\n"); set(v) = p.edit().putString("remote_gw", v).apply()
+    var remoteStun: String get() = p.getString("remote_stun", null) ?: Remote.DEFAULT_STUN.joinToString("\n"); set(v) = p.edit().putString("remote_stun", v).apply()
+    var remoteDht: Boolean get() = p.getBoolean("remote_dht", false); set(v) = p.edit().putBoolean("remote_dht", v).apply()
+    var remoteConfigAt: Long get() = p.getLong("remote_cfg_at", 0); set(v) = p.edit().putLong("remote_cfg_at", v).apply()
+    var linkStatus: String get() = p.getString("link_status", "") ?: ""; set(v) = p.edit().putString("link_status", v).apply()
+
     fun applyPairing(code: String) {
         val d = Crypto.parsePairingCode(code)
         if (d.pub.contentEquals(publicKey)) throw IllegalArgumentException("that is this phone's own pairing code")
@@ -165,10 +176,11 @@ private val ACCOUNT_CODES = setOf("account_disabled", "account_deleted", "no_own
 
 /** @brief Talks to the paired server. Every push is sealed to the server's pinned
  *  key; every read comes back sealed to ours. */
-class Api(private val prefs: Prefs) {
+class Api(private val prefs: Prefs, private val baseOverride: String? = null) {
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS).readTimeout(10, TimeUnit.MINUTES).writeTimeout(10, TimeUnit.MINUTES).build()
-    private val base get() = prefs.serverUrl.trimEnd('/') + "/api/family_share/inbound"
+    // the paired URL when it answers, else the local end of the remote link (Remote.kt)
+    private val base get() = (baseOverride ?: Remote.base(prefs)) + "/api/family_share/inbound"
 
     private fun req(path: String) = Request.Builder().url(base + path)
         .header("X-Family-Peer", prefs.deviceName).header("X-Family-Key", prefs.serverKey)

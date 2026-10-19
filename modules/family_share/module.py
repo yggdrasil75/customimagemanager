@@ -257,16 +257,42 @@ def register(host):
 
     MAILBOX_DIR = os.path.abspath(os.path.join(os.path.dirname(core.upload_spool_dir), ".family_mailbox"))
 
+    def _link_target(peer):
+        """! @brief A copy of `peer` whose URL reaches it over the remote_access link
+        (dialled now when needed), or None when that module is off or the peer has
+        no pinned key. Raises when the peer can't be reached."""
+        ra = host.get_service("remote_access")
+        if ra is None or "peer_url" not in ra or not peer.get("pub_key") or not ra["running"]():
+            return None
+        url = ra["peer_url"](peer["name"], peer["pub_key"])
+        return dict(peer, url=url) if url else None
+
     def _route(peer):
-        """! @brief -> ('direct', None) | ('mailbox', None) | ('via', hub_row)."""
+        """! @brief -> ('direct', None) | ('link', peer reached over the link) |
+        ('mailbox', None) | ('via', hub_row). "auto" without a URL takes a direct
+        link when both instances run Remote access, else they poll my mailbox."""
         r = (peer.get("route") or "").strip()
         if r == "via":
             hub = _peer(int(peer.get("via_peer") or 0))
             if not hub or not hub.get("enabled") or not hub.get("url"):
                 raise pc.PeerError("route is 'via' but the hub peer is missing, disabled or has no URL")
             return "via", hub
-        if r == "mailbox" or not peer.get("url"):
+        if r == "link":
+            try:
+                target = _link_target(peer)
+            except Exception as e:
+                raise pc.PeerError(f"no direct link to {peer['name']} right now: {e}")
+            if target is None:
+                raise pc.PeerError("route is 'link' but Remote access is off here (Settings -> Remote access)")
+            return "link", target
+        if r == "mailbox":
             return "mailbox", None
+        if not peer.get("url"):
+            try:
+                target = _link_target(peer)
+            except Exception:
+                target = None               # not reachable now: the mailbox still works
+            return ("link", target) if target is not None else ("mailbox", None)
         return "direct", None
 
     # -- dirty tracking / planning ------------------------------------------
@@ -521,14 +547,15 @@ def register(host):
         try:
             route, hub = _route(peer)
             os.makedirs(core.upload_spool_dir, exist_ok=True)
-            if route == "direct":
+            if route in ("direct", "link"):
+                to = hub if route == "link" else peer       # link: the same peer, at its link URL
                 body = None
                 if job.get("sha") == sha:     # peer has these bytes: metadata only
-                    body = pc.push(peer, _my_name(), _my_id(), _my_priv(), **kw)
+                    body = pc.push(to, _my_name(), _my_id(), _my_priv(), **kw)
                     if body.get("need_file"):
                         body = None
                 if body is None:
-                    body = pc.push(peer, _my_name(), _my_id(), _my_priv(), file_path=fp,
+                    body = pc.push(to, _my_name(), _my_id(), _my_priv(), file_path=fp,
                                    tmp_dir=core.upload_spool_dir, **kw)
             else:
                 # Asynchronous: the recipient can't ask for the file later, so the
@@ -553,8 +580,9 @@ def register(host):
             _del_row(rel, pid); return
         try:
             route, hub = _route(peer)
-            if route == "direct":
-                body = pc.revoke(peer, _my_name(), _my_id(), _my_priv(), job.get("sha") or "")
+            if route in ("direct", "link"):
+                body = pc.revoke(hub if route == "link" else peer, _my_name(), _my_id(), _my_priv(),
+                                 job.get("sha") or "")
             else:
                 body = _send_async(peer, route, hub, "revoke", {"origin_sha": job.get("sha") or ""}, None)
         except pc.PeerError as e:
@@ -1506,16 +1534,19 @@ def register(host):
         via_peer = int(d.get("via_peer") or 0)
         if kind == "device":
             url, route, via_peer = "", "", 0          # phones call in
-        if route not in ("", "direct", "mailbox", "via"):
-            return {"ok": False, "error": "route must be direct, mailbox or via"}, 400
+        if route not in ("", "direct", "mailbox", "via", "link"):
+            return {"ok": False, "error": "route must be direct, link, mailbox or via"}, 400
         if d.get("pairing_code") and not url and not route and kind == "peer":
             # They have no reachable URL. If I do, they poll me; if I don't
             # either, we both reach each other through a hub we share.
             hub = host.db().execute(
                 "SELECT id FROM fs_peers WHERE enabled=1 AND url<>'' AND COALESCE(kind,'peer')<>'device' "
                 "AND COALESCE(route,'') IN ('','direct') ORDER BY id LIMIT 1").fetchone()
+            ra = host.get_service("remote_access")
             if host.config.get("family_share_my_url") or not hub:
                 route = "mailbox"
+            elif ra is not None and ra["running"]():
+                route = "link"              # neither of us has a URL: talk directly
             else:
                 route, via_peer = "via", hub["id"]
         if route == "via":
@@ -1716,6 +1747,18 @@ def register(host):
         p = _peer(pid)
         if not p:
             return jsonify({"ok": False, "error": "no such peer"}), 404
+        r = p.get("route") or ""
+        if (p.get("kind") or "peer") != "device" and (r == "link" or (r == "" and not p.get("url"))):
+            try:
+                lt = _link_target(p)
+                lerr = "" if lt is not None else "Remote access is off here (Settings -> Remote access)"
+            except Exception as e:
+                lt, lerr = None, str(e)
+            if lt is not None:
+                p = lt                      # ping it over the link, below
+            elif r == "link":
+                _peer_status(pid, False, lerr)
+                return jsonify({"ok": False, "error": f"no direct link to {p['name']}: {lerr}"})
         if (p.get("route") or "") == "via" and p.get("pub_key"):
             hub = _peer(int(p.get("via_peer") or 0))
             if not hub:
@@ -1869,7 +1912,22 @@ def register(host):
         return jsonify({"ok": True, "rows": rows})
     host.add_route("/api/family_share/received", api_received, feature=FEATURE)
 
+    def _paired_peers():
+        """! @brief Enabled family instances with a pinned key: [{name, pub_key}] (remote_access
+        answers their links and dials them)."""
+        rows = host.db().execute("SELECT name, pub_key FROM fs_peers WHERE COALESCE(kind,'peer')<>'device' "
+                                 "AND enabled=1 AND COALESCE(pub_key, '') != ''").fetchall()
+        return [{"name": r["name"], "pub_key": r["pub_key"]} for r in rows]
+
+    def _paired_devices():
+        """! @brief Enabled phones with a pinned key: [{name, pub_key}] (remote_access links to these)."""
+        rows = host.db().execute("SELECT name, pub_key FROM fs_peers WHERE kind='device' AND enabled=1 "
+                                 "AND COALESCE(pub_key, '') != ''").fetchall()
+        return [{"name": r["name"], "pub_key": r["pub_key"]} for r in rows]
+
     host.provide_service("family_share", {"mark_dirty": mark_dirty, "plan": run_plan,
                                           "claim": _claim, "handle": _handle,
-                                          "desired": lambda paths=None: sc.desired(host.db(), _cfg(), paths)})
+                                          "desired": lambda paths=None: sc.desired(host.db(), _cfg(), paths),
+                                          "private_key": _my_priv, "devices": _paired_devices,
+                                          "peers": _paired_peers})
     log.info("family_share registered")

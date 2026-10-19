@@ -363,6 +363,19 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
         }
 
         Divider()
+        Text("Away from home", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        var remote by remember { mutableStateOf(prefs.remoteEnabled) }
+        var linkMsg by remember { mutableStateOf(prefs.linkStatus) }
+        Text("When ${prefs.serverUrl} doesn't answer, the app finds the server through its gateways and the BitTorrent DHT " +
+             "and connects to it directly, end-to-end encrypted. Nothing passes through anyone else's server. " +
+             "Needs the Remote access module on the server; turn off \"Only on Wi-Fi\" to back up over mobile data.",
+            color = Color.Gray, fontSize = 12.sp)
+        ToggleRow("Reach the server from anywhere", remote) { remote = it; prefs.remoteEnabled = it; Remote.recheck() }
+        if (linkMsg.isNotEmpty()) Text(linkMsg, color = if (linkMsg.startsWith("No link") || linkMsg.startsWith("Failed")) MaterialTheme.colorScheme.error else Color.LightGray, fontSize = 12.sp)
+        OutlinedButton({ scope.launch { linkMsg = "Connecting..."; linkMsg = withContext(Dispatchers.IO) {
+            runCatching { Remote.test(prefs) }.getOrElse { "Failed: ${it.message}" } } } }, enabled = remote) { Text("Test remote link") }
+
+        Divider()
         Text("This phone's pairing code", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Text("Paste on the server if you ever need to re-pair (rotating the server's key, a restored server).", color = Color.Gray, fontSize = 12.sp)
         QrImage(prefs.myPairingCode())

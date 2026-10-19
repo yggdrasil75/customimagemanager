@@ -7,17 +7,27 @@
 #   ./install.sh cpu --minimal    backend wheels only; modules install their
 #                                 own deps when you enable them in Settings
 #   ./install.sh --no-compile     skip the native build of the Python modules
+#   ./install.sh --no-app         skip building the Android app
+#   ./install.sh --app            rebuild the Android app even if unchanged
+#
+# The Android app (android/) is built into static/app/cim-family.apk whenever
+# its sources changed since the last build. The first build needs a JDK
+# (installed here when missing) and fetches ~1.5 GB of Android SDK + Gradle
+# into android/.sdk and android/.gradle-dist; later builds reuse them. Keep
+# android/keystore/: phones only update over an APK signed with the same key.
 #
 # Then: ./run.sh
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
-MODE=""; MINIMAL=0; SYSTEM=1; COMPILE=1
+MODE=""; MINIMAL=0; SYSTEM=1; COMPILE=1; APP=auto
 for a in "$@"; do case "$a" in
     ultralight|cpu|cuda|rocm) MODE="$a" ;;
     --minimal) MINIMAL=1 ;;
     --no-system) SYSTEM=0 ;;
     --no-compile) COMPILE=0 ;;
+    --no-app) APP=0 ;;
+    --app) APP=1 ;;
     -h|--help) sed -n '2,${/^#/!q; s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
     *) echo "unknown arg '$a' (--help)" >&2; exit 1 ;;
 esac; done
@@ -35,6 +45,7 @@ SYS="build-essential python3-venv python3-dev curl git libjxl-tools libexiv2-dev
 # (calibre is not needed: the books module reads with its pip packages; its
 #  ebook-convert is picked up when you install it yourself)
 [ "$MODE" = ultralight ] || SYS="$SYS ffmpeg libgl1 libglib2.0-0 p7zip-full unrar-free"
+[ "$APP" = 0 ] || SYS="$SYS unzip"
 if [ "$SYSTEM" = 1 ]; then
     SUDO=""
     if [ "$(id -u)" != 0 ]; then
@@ -50,8 +61,14 @@ if [ "$SYSTEM" = 1 ]; then
         echo "==> apt: $SYS"
         $SUDO apt-get update -qq && $SUDO apt-get install -y --no-install-recommends $SYS \
             || echo "warn: some packages failed; continuing" >&2
+        # a JDK for the Android build: 17 where the distro still has it, else 21
+        if [ "$APP" != 0 ] && ! command -v javac >/dev/null; then
+            $SUDO apt-get install -y --no-install-recommends openjdk-17-jdk-headless 2>/dev/null \
+                || $SUDO apt-get install -y --no-install-recommends openjdk-21-jdk-headless \
+                || echo "warn: no JDK installed; the Android app won't be built" >&2
+        fi
     else
-        echo "warn: not apt - install the equivalents of: $SYS" >&2
+        echo "warn: not apt - install the equivalents of: $SYS (and a JDK 17+ for the Android app)" >&2
     fi
 fi
 
@@ -130,6 +147,30 @@ if [ "$COMPILE" = 1 ]; then
         || $PIP install -q "cython<3.2" 2>/dev/null || echo "warn: cython not installed; helper modules stay plain Python" >&2
     # incremental: only modules whose source changed (or were never built) compile
     venv/bin/python native_build.py || echo "warn: native build failed; helper modules stay plain Python" >&2
+fi
+
+# -- Android app (rebuilt only when android/ changed; best effort) ------------
+# Same build as the docker image's BUILD_ANDROID=1 stage: android/build.sh
+# fetches the SDK + Gradle on first use and writes static/app/cim-family.apk,
+# which the server offers at /static/app/cim-family.apk.
+APK=static/app/cim-family.apk
+APP_STAMP=venv/.cim-app-stamp
+if [ "$APP" != 0 ]; then
+    want_app=$(find android -path android/.sdk -prune -o -path android/.gradle-dist -prune -o -path android/.gradle -prune \
+                    -o -path android/build -prune -o -path android/app/build -prune -o -path android/keystore -prune \
+                    -o -type f -print0 | sort -z | xargs -0 sha1sum | sha1sum | cut -d' ' -f1)
+    if [ "$APP" = auto ] && [ -s "$APK" ] && [ "$(cat "$APP_STAMP" 2>/dev/null)" = "$want_app" ]; then
+        echo "==> Android app unchanged; skipping its build ($APK)"
+    elif ! command -v java >/dev/null; then
+        echo "warn: no JDK (java) on PATH - the Android app was not built. Install openjdk-17-jdk-headless and re-run" >&2
+    else
+        echo "==> building the Android app (first run downloads the Android SDK, ~1.5 GB)"
+        if OUT="$PWD/$APK" bash android/build.sh; then
+            echo "$want_app" > "$APP_STAMP"
+        else
+            echo "warn: the Android app build failed; the server runs without a fresh APK (--no-app skips it)" >&2
+        fi
+    fi
 fi
 
 mkdir -p media data logs models

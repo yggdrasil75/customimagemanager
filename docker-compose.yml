@@ -18,6 +18,9 @@
 x-common: &common
   ports:
     - "8000:8000"
+    # remote access: the link to paired phones (Settings -> Remote access -> UDP port).
+    # network_mode: host instead gives the link the host's IPv6 and a better NAT path.
+    - "47100:47100/udp"
   volumes:
     - ./media:/app/media
     - ./data:/app/data

@@ -157,13 +157,15 @@
   }
 
   // -- peers -------------------------------------------------------------
-  /** @brief How a family peer is reached. "auto" = their URL if they have one, else they poll me. */
+  /** @brief How a family peer is reached. "auto" = their URL if they have one, else a direct link
+      (Remote access), else they poll me. */
   function routeSel(p) {
     const cur = p.route === "via" ? `via:${p.via_peer}` : (p.route || "");
     const hubs = state.peers.filter((h) => h.id !== p.id && h.kind !== "device" && h.url && h.route !== "via");
     const opt = (v, label) => `<option value="${v}" ${cur === v ? "selected" : ""}>${esc(label)}</option>`;
     return `<select class="fs-p-route" title="How items reach them" ${p.kind === "device" ? "hidden" : ""}>
-      ${opt("", "auto: their URL, else they poll me")}${opt("direct", "direct to their URL")}
+      ${opt("", "auto: their URL, else a direct link, else they poll me")}${opt("direct", "direct to their URL")}
+      ${opt("link", "direct link (Remote access on both)")}
       ${opt("mailbox", "they poll me (no domain)")}
       ${hubs.map((h) => opt(`via:${h.id}`, `through ${h.name} (both of us poll it)`)).join("")}</select>`;
   }
@@ -250,7 +252,9 @@
       <p class="fs-help"><b>No domain?</b> Only one instance needs a public URL. Turn on <i>Act as a gateway</i> there;
       everyone else leaves their URL empty and pairs with it. Instances without a URL poll the gateway for waiting items.
       Two of them can still share with each other: pair them directly (exchange pairing codes) and set the route to
-      "through &lt;gateway&gt;" - items are sealed to the recipient, so the gateway only ever holds ciphertext.</p>
+      "through &lt;gateway&gt;" - items are sealed to the recipient, so the gateway only ever holds ciphertext.
+      Better: turn on <i>Remote access</i> on both instances and set the route to "direct link" - they find each other
+      through the gateways / DHT and send straight to each other, nobody holds anything in between.</p>
       <p class="fs-help">Set-up: add the peer here (name only is fine), click <b>Pairing code for them</b> and send them
       the string. They paste it in this box on their instance, which creates/pairs the peer entry for you, then they send
       you <i>their</i> pairing code, which you paste here. <b>Test</b> checks the connection and that the pinned key
