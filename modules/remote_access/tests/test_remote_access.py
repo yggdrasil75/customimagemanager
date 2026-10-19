@@ -323,7 +323,7 @@ def test_a_paired_phone_reaches_the_inbound_api_through_the_running_link(app, cl
     threading.Thread(target=web.serve_forever, daemon=True).start()
     svc = host.get_service("remote_access")
     try:
-        _settle(host, svc, enabled=True, dht=False, port=0, target="127.0.0.1:%d" % web.server_port)
+        _settle(host, svc, dht=False, port=0, target="127.0.0.1:%d" % web.server_port)
         st = client.get("/api/remote_access/status").get_json()
         assert st["running"] and st["status"]["devices"] >= 1, st
         port = st["status"]["port"]
@@ -346,14 +346,36 @@ def test_a_paired_phone_reaches_the_inbound_api_through_the_running_link(app, cl
         assert data.startswith(b"HTTP/1.1 200"), data[:200]
         assert b"pub_key" in data
     finally:
-        host.set_config("remote_access_enabled", False, save=False)
         svc["stop"]()
         web.shutdown()
         client.post("/api/family_share/devices/delete", json={"id": j["id"]})
 
 
-def test_remote_access_and_the_dht_are_off_by_default():
-    assert ra.DEFAULTS["remote_access_enabled"] is False and ra.DEFAULTS["remote_access_dht"] is False
+def test_module_and_dht_are_off_by_default_and_settings_live_on_the_module_row(host):
+    assert ra.MANIFEST["default_enabled"] is False and ra.DEFAULTS["remote_access_dht"] is False
+    mine = [f for f in host.settings_fields if f["module_id"] == "remote_access"]
+    assert mine and all(f["pane"] == "module" for f in mine)
+    assert not [t for t in host.settings_tabs if t.get("module_id") == "remote_access"]
+
+
+def test_builtin_gateways_follow_the_code_and_extras_add_to_them(client, host, monkeypatch):
+    monkeypatch.setattr(ra, "DEFAULT_GATEWAYS", ["builtin.example:7777"])
+    old = host.config.get("remote_access_gateways")
+    try:
+        assert client.post("/api/update_settings", json={"remote_access_gateways": "mine.example:7000"}).get_json()["success"]
+        assert host.config["remote_access_gateways"] == "mine.example:7000"            # saved
+        got = client.get("/api/remote_access/pub/client").get_json()["gateways"]
+        assert got == ["builtin.example:7777", "mine.example:7000"]
+        host.set_config("remote_access_builtin_gateways", False, save=False)
+        assert client.get("/api/remote_access/pub/client").get_json()["gateways"] == ["mine.example:7000"]
+    finally:
+        host.set_config("remote_access_builtin_gateways", True, save=False)
+        host.set_config("remote_access_gateways", old or "", save=False)
+
+
+def test_status_is_in_settings_info(client):
+    secs = client.get("/api/info").get_json()["sections"]
+    assert any(sec["id"] == "remote_access" and sec["rows"] for sec in secs)
 
 
 # -- family_share between two instances ------------------------------------------
@@ -452,7 +474,7 @@ def test_family_share_link_route_reaches_a_peer_without_any_url(app, client, hos
         pytest.skip("cannot add a family peer here: %r" % (j,))
     svc = host.get_service("remote_access")
     try:
-        _settle(host, svc, enabled=True, dht=False, port=0, gateways=gspec)
+        _settle(host, svc, dht=False, port=0, gateways=gspec)
         assert svc["running"]()
         r = client.post("/api/family_share/peers/test", json={"id": j["id"]}).get_json()
         assert r["ok"], r
@@ -460,7 +482,6 @@ def test_family_share_link_route_reaches_a_peer_without_any_url(app, client, hos
         st = client.get("/api/remote_access/status").get_json()["status"]
         assert any(o["name"] == "mom" and o["up"] for o in st["peers_out"])
     finally:
-        host.set_config("remote_access_enabled", False, save=False)
         host.set_config("remote_access_gateways", "", save=False)
         svc["stop"]()
         client.post("/api/family_share/peers/delete", json={"id": j["id"]})
@@ -517,7 +538,7 @@ def test_the_uploader_pairs_and_uploads_over_the_link(app, client, host, tmp_pat
         theirs = client.post("/api/family_share/devices/key", json={"id": dev_id}).get_json()["pairing_code"]
         rc, out = tool("--pair", theirs)
         assert rc == 0 and "Paired with" in out, out
-        _settle(host, svc, enabled=True, dht=False, port=0, gateways=gspec,
+        _settle(host, svc, dht=False, port=0, gateways=gspec,
                 target="127.0.0.1:%d" % web.server_port)
         assert svc["running"]()
         src = tmp_path / "pics"
@@ -535,7 +556,6 @@ def test_the_uploader_pairs_and_uploads_over_the_link(app, client, host, tmp_pat
         assert rc == 2 and "direct link" not in out
     finally:
         enc.set_media_prefs(old_prefs)
-        host.set_config("remote_access_enabled", False, save=False)
         host.set_config("remote_access_gateways", "", save=False)
         svc["stop"]()
         web.shutdown()

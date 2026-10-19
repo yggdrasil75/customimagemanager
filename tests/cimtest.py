@@ -46,10 +46,13 @@ Helpers
 
 Module tests (modules/<dir>/tests/test_*.py) are skipped automatically when
 that module isn't registered (disabled, or its deps missing), with the
-loader's reason.
+loader's reason. A module's test file that can't even be imported because a
+third-party package is missing (torch, cryptography, ...) is skipped the same
+way at collection, instead of erroring out the whole run.
 """
+import ast
 import contextlib
-import io, os, sys, shutil, tempfile, logging
+import io, json, os, re, sys, shutil, tempfile, logging
 import numpy as np
 import pytest
 from flask import g
@@ -115,7 +118,35 @@ def pytest_configure(config):
         if not os.path.exists(cfg):
             raise pytest.UsageError(f"--cim-config: no such file {cfg}")
         shutil.copy(cfg, "app_config.json")
+    else:
+        # Modules that are off by default (default_enabled False) are switched on for the
+        # run, so their tests run too; a module whose deps are missing still skips.
+        with open("app_config.json", "w") as fh:
+            json.dump({"modules": {m: True for m in _default_off_modules()}}, fh)
     logging.disable(logging.WARNING)
+
+
+def _default_off_modules():
+    """! @brief Ids of plugins whose MANIFEST says default_enabled False (read, not imported)."""
+    out = []
+    for d in sorted(os.listdir(MODULES)):
+        path = os.path.join(MODULES, d, "module.py")
+        if not os.path.isfile(path):
+            continue
+        try:
+            tree = ast.parse(open(path, encoding="utf-8").read())
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in tree.body:
+            if (isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "MANIFEST" for t in node.targets)):
+                try:
+                    m = ast.literal_eval(node.value)
+                except ValueError:
+                    break
+                if isinstance(m, dict) and m.get("default_enabled") is False and m.get("id"):
+                    out.append(m["id"])
+                break
+    return out
 
 
 def pytest_unconfigure(config):
@@ -131,6 +162,13 @@ def load_app():
         import manager
         manager.state["auth"]["enabled"] = False
         manager.app.config["TESTING"] = True
+        # No background integrity pass during a run: 5 min in, it would start adopting
+        # the files tests write straight into the media folder, between a test's steps
+        # (a stray row in another test, a different "most recent" file). Its own tests
+        # drive the passes directly.
+        ig = manager.module_host.get_service("integrity")
+        if ig is not None:
+            ig["boot"]["at"] = float("inf")
         _APP = manager
     return _APP
 
@@ -272,6 +310,31 @@ def _module_dir_of(path):
     if not p.startswith(MODULES + os.sep):
         return None
     return os.path.relpath(p, MODULES).split(os.sep)[0]
+
+
+_MISSING = re.compile(r"ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'")
+
+
+def _repo_name(top):
+    """! @brief Is `top` one of the repo's own importable names (a .py or package at the root)?"""
+    return os.path.exists(os.path.join(ROOT, top + ".py")) or os.path.isdir(os.path.join(ROOT, top))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector):
+    """! @brief A module's test file that fails to import a THIRD-PARTY package (the module's
+    optional deps are not installed) is reported as skipped, like its tests would be at
+    run time. A missing repo name, any other error, and core tests still fail."""
+    outcome = yield
+    rep = outcome.get_result()
+    if not rep.failed or not isinstance(collector, pytest.Module) or _module_dir_of(collector.path) is None:
+        return
+    m = _MISSING.search(str(rep.longrepr))
+    if not m or _repo_name(m.group(1).split(".")[0]):
+        return
+    rep.outcome = "skipped"
+    rep.longrepr = (str(collector.path), 0, "Skipped: needs %s (not installed)" % m.group(1).split(".")[0])
+    rep.result = []
 
 
 # -- keep one model in memory at a time -------------------------------------

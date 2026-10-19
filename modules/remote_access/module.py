@@ -1,15 +1,15 @@
 """! @file
 @brief Remote access: paired phones and family_share peers reach this server
 (and it reaches its peers) from anywhere, with no port forwarding, no public
-address and no relay carrying their data. Off by default: turn it on in
-Settings -> Remote access.
+address and no relay carrying their data. Off by default (Settings -> Modules);
+its knobs are on its row there (Settings button), its live status in Settings -> Info.
 
 The server keeps one UDP socket and makes itself findable to each paired phone
 in two independent ways:
 
   * gateways - small rendezvous servers (gateway.py, e.g. on a cheap VPS) that
-    swap addresses so both sides can punch through their NATs. A list: add your
-    own, remove the default, any one that answers is enough;
+    swap addresses so both sides can punch through their NATs: the built-in ones
+    (DEFAULT_GATEWAYS, can be switched off) plus any you add; one answering is enough;
   * the BitTorrent DHT - the server stores a sealed, signed address record per
     phone and watches for the phone's "knock" record, so it works with no
     gateway at all (slower to connect: up to a minute).
@@ -57,22 +57,24 @@ MANIFEST = {
     "requires":    ["family_share"],
     "pip":         ["cryptography"],
     "assets":      [],
+    "default_enabled": False,       # opens a UDP port and talks to outside servers: opt-in
 }
 
-# The gateways every install starts with: "host:port" of machines running
-# modules/remote_access/gateway.py. Put your own VPS here to make it the default.
+# The built-in gateways: "host:port" of machines running modules/remote_access/gateway.py.
+# Not a setting's default (a saved settings file would freeze that): every install uses
+# this list as it is in the code unless "Use the built-in gateways" is turned off, and
+# the "Extra gateways" setting adds to it.
 DEFAULT_GATEWAYS = []
 DEFAULT_STUN = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"]
-TAB = "remote_access"
 PUB_PREFIX = "/api/remote_access/pub/"
 DEVICE_REFRESH = 60.0
 
 DEFAULTS = {
-    "remote_access_enabled": False,
-    "remote_access_port": 47100,
-    "remote_access_gateways": "\n".join(DEFAULT_GATEWAYS),
-    "remote_access_stun": "\n".join(DEFAULT_STUN),
+    "remote_access_builtin_gateways": True,
+    "remote_access_gateways": "",
     "remote_access_dht": False,
+    "remote_access_stun": "\n".join(DEFAULT_STUN),
+    "remote_access_port": 47100,
     "remote_access_target": "127.0.0.1:8000",
 }
 
@@ -211,18 +213,19 @@ class Runner:
 
 
 def register(host):
-    """! @brief Settings tab, status, the public client config route and the link's lifecycle."""
+    """! @brief Module settings (Settings -> Modules -> Remote access), the Info section,
+    the public client config route and the link's lifecycle. The module being enabled
+    is the on switch; it does nothing until a phone or family peer is paired."""
     log = host.logger
-    host.add_settings_tab(TAB, "Remote access", icon="", admin_only=True, group="server")
     runner = Runner(log)
     state = {"timer": None, "devices_at": 0.0, "devices": [], "note": ""}
 
     validators = {
-        "remote_access_enabled": bool,
-        "remote_access_port": _port,
+        "remote_access_builtin_gateways": bool,
         "remote_access_gateways": _lines,
-        "remote_access_stun": _lines,
         "remote_access_dht": bool,
+        "remote_access_stun": _lines,
+        "remote_access_port": _port,
         "remote_access_target": _target,
     }
 
@@ -236,19 +239,19 @@ def register(host):
         state["timer"].start()
 
     for key, dflt in DEFAULTS.items():
-        host.add_config_key(key, default=dflt, validate=validators[key], on_change=changed, tab=TAB)
+        host.add_config_key(key, default=dflt, validate=validators[key], on_change=changed)
 
+    builtin = ", ".join(DEFAULT_GATEWAYS) or "none in this build"
     fields = [
-        ("remote_access_enabled", "Let paired phones and family peers connect from anywhere", "toggle",
-         {"help": "Off by default. Uses one UDP port, your gateways and (if on below) the BitTorrent DHT."}),
-        ("remote_access_gateways", "Gateways", "textarea",
-         {"help": "One host:port per line: machines running modules/remote_access/gateway.py (a small VPS is plenty; "
-                  "it only swaps addresses, no photo ever passes through it). Any one that answers is enough. "
-                  "Empty: the DHT alone (connecting takes up to a minute)."}),
-        ("remote_access_dht", "Also announce through the BitTorrent DHT", "toggle",
-         {"help": "Works with no gateway at all. The records are sealed per phone / peer: nobody else can read "
-                  "them or tell they belong to this server. Off by default: some firewalls block or flag "
-                  "BitTorrent traffic."}),
+        ("remote_access_builtin_gateways", "Use the built-in gateways (%s)" % builtin, "toggle",
+         {"help": "Rendezvous servers that only introduce the two ends; no photo ever passes through them."}),
+        ("remote_access_gateways", "Extra gateways", "textarea",
+         {"help": "One host:port per line: your own machines running modules/remote_access/gateway.py "
+                  "(a small VPS is plenty). Any one gateway that answers is enough."}),
+        ("remote_access_dht", "Also use the BitTorrent DHT", "toggle",
+         {"help": "Works with no gateway at all (connecting takes up to a minute). The records are sealed: "
+                  "nobody else can read them or tell they belong to this server. Off by default: some "
+                  "firewalls block or flag BitTorrent traffic."}),
         ("remote_access_stun", "STUN servers", "textarea",
          {"help": "Used to learn this server's public address. One host:port per line."}),
         ("remote_access_port", "UDP port", "number",
@@ -258,11 +261,15 @@ def register(host):
          {"help": "Where link connections are delivered; the app listens on 127.0.0.1:8000 by default."}),
     ]
     for key, label, kind, extra in fields:
-        host.add_settings_field(key=key, label=label, kind=kind, pane=TAB, **extra)
+        host.add_settings_field(key=key, label=label, kind=kind, pane="module", **extra)
 
     def cfg():
         c = {k: host.config.get(k, d) for k, d in DEFAULTS.items()}
-        c["gateways"] = [s for s in str(c["remote_access_gateways"] or "").splitlines() if s.strip()]
+        gws = list(DEFAULT_GATEWAYS) if c["remote_access_builtin_gateways"] else []
+        for g in str(c["remote_access_gateways"] or "").splitlines():
+            if g.strip() and g.strip() not in gws:
+                gws.append(g.strip())
+        c["gateways"] = gws
         c["stun"] = [s for s in str(c["remote_access_stun"] or "").splitlines() if s.strip()]
         return c
 
@@ -289,36 +296,33 @@ def register(host):
         return _b64d(fs["private_key"]()) if fs is not None and "private_key" in fs else None
 
     def apply():
-        """! @brief Start, restart or stop the link to match the settings and the paired phones."""
+        """! @brief (Re)start the link with the current settings and paired keys; idle without any."""
         runner.stop()
+        runner.error = ""
         state["note"] = ""
         c = cfg()
-        if not c["remote_access_enabled"]:
-            return
         devs = devices()
         state["devices"], state["devices_at"] = devs, time.monotonic()
         if not devs:
-            state["note"] = ("No phone or family peer is paired yet (Settings -> My devices / Family share). "
-                             "Nothing is announced until one is.")
+            state["note"] = ("no phone or family peer is paired yet (My devices / Family share); "
+                             "nothing is announced until one is")
             return
         priv = private_key()
         if priv is None:
             runner.error = "family_share is off: it holds the keys the link uses"
             return
         if runner.start(c, priv, devs):
-            log.info("remote_access: link listening on UDP %s for %d phone(s)" % (runner.server.port, len(devs)))
+            log.info("remote_access: link listening on UDP %s for %d key(s)" % (runner.server.port, len(devs)))
         else:
             log.error("remote_access: did not start: %s" % runner.error)
 
     def refresh_devices():
-        """! @brief Pick up phones paired or removed since the last look."""
+        """! @brief Pick up phones and peers paired or removed since the last look."""
         while True:
             time.sleep(DEVICE_REFRESH)
             try:
-                if not cfg()["remote_access_enabled"]:
-                    continue
                 devs = devices()
-                if [d[0] for d in devs] == [d[0] for d in state["devices"]] and devs == state["devices"]:
+                if devs == state["devices"]:
                     continue
                 state["devices"] = devs
                 if runner.running() and devs:
@@ -334,76 +338,66 @@ def register(host):
 
     host.on_startup(on_startup)
 
-    def _view(st):
-        rows, lst = [], []
+    def status_rows():
+        """! @brief The link's state as label / value rows (Settings -> Info, /api/remote_access/status)."""
         c = cfg()
-        if st:
-            rows.append({"label": "Link", "value": "listening on UDP %s for %d phone(s)%s" % (
-                st["port"], st["devices"], "" if st["ipv6"] else ", IPv4 only"), "tone": "ok"})
-            rows.append({"label": "Reachable at", "value": ", ".join(st["candidates"]) or "(no address yet)"})
+        st = runner.call(lambda srv: srv.status()) if runner.running() else None
+        if st is None:
+            why = ("not running: " + runner.error) if runner.error else (state["note"] or "not running")
+            rows = [{"label": "Link", "value": why}]
+        else:
+            rows = [{"label": "Link", "value": "listening on UDP %s for %d phone(s) / peer(s)%s" % (
+                        st["port"], st["devices"], "" if st["ipv6"] else ", IPv4 only")},
+                    {"label": "Reachable at", "value": ", ".join(st["candidates"]) or "(no address yet)"}]
             for g in c["gateways"]:
                 age = st["gateways"].get(g)
                 rows.append({"label": "Gateway " + g,
-                             "value": "answered %ds ago" % age if age is not None else "no answer yet",
-                             "tone": "ok" if age is not None and age < 90 else "warn"})
+                             "value": "answered %ds ago" % age if age is not None else "no answer yet"})
             if c["remote_access_dht"]:
                 d = st["dht"]
                 if d.get("announce_ok") is None:
-                    v, tone = "announcing...", None
+                    v = "announcing..."
                 elif d.get("announce_ok"):
-                    v, tone = "announced on %d node(s), %d node(s) known" % (d["stored"], d["nodes"]), "ok"
+                    v = "announced on %d node(s), %d known" % (d["stored"], d["nodes"])
                 else:
-                    v, tone = "no node accepted the record yet" + (": " + d["error"] if d.get("error") else ""), "warn"
-                rows.append({"label": "DHT", "value": v, "tone": tone} if tone else {"label": "DHT", "value": v})
-            for l in st["links"]:
-                lst.append({"text": "%s via %s, rtt %s ms, %d stream(s), %.1f MB in / %.1f MB out" % (
-                    l["label"], l["peer"], l["rtt_ms"], l["streams"], l["bytes_in"] / 1e6, l["bytes_out"] / 1e6),
-                    "tone": "ok"})
+                    v = "no node took the record yet" + (": " + d["error"] if d.get("error") else "")
+                rows.append({"label": "DHT", "value": v})
+            for ln in st["links"]:
+                rows.append({"label": "Linked: " + ln["label"],
+                             "value": "via %s, rtt %s ms, %.1f MB in / %.1f MB out" % (
+                                 ln["peer"], ln["rtt_ms"], ln["bytes_in"] / 1e6, ln["bytes_out"] / 1e6)})
             for o in st.get("peers_out", []):
-                lst.append({"text": "to family peer %s: %s" % (o["name"], ("linked via " + o["via"]) if o["up"]
-                            else ("not linked" + (": " + o["error"] if o["error"] else ""))),
-                            "tone": "ok" if o["up"] else "muted"})
-            for e in st["errors"][-5:]:
-                lst.append({"text": e, "tone": "muted"})
-        elif runner.error:
-            rows.append({"label": "Link", "value": "not running: " + runner.error, "tone": "danger"})
-        else:
-            rows.append({"label": "Link", "value": "off" if not c["remote_access_enabled"] else "not running"})
-        if state["note"]:
-            lst.append({"text": state["note"], "tone": "warn"})
-        if c["remote_access_enabled"] and not c["gateways"] and not c["remote_access_dht"]:
-            lst.append({"text": "No gateway and the DHT is off: phones cannot find this server.", "tone": "danger"})
-        return {"rows": rows, "list": lst, "live": True}
+                rows.append({"label": "To family peer " + o["name"],
+                             "value": ("linked via " + o["via"]) if o["up"]
+                             else "not linked" + (": " + o["error"] if o["error"] else "")})
+        if not c["gateways"] and not c["remote_access_dht"]:
+            rows.append({"label": "Warning", "value": "no gateway and the DHT is off: phones cannot find this server"})
+        return rows, st
+
+    host.on("info.sections", lambda **_: {"id": "remote_access", "title": "Remote access",
+                                          "description": "The direct link to paired phones and family peers.",
+                                          "rows": status_rows()[0]})
 
     def api_status():
-        st = runner.call(lambda srv: srv.status()) if runner.running() else None
+        rows, st = status_rows()
         return jsonify({"success": True, "running": st is not None, "error": runner.error,
-                        "status": st, "view": _view(st)})
-
-    def api_restart():
-        apply()
-        return api_status()
+                        "status": st, "rows": rows})
 
     def api_client():
-        """! @brief What a phone needs to find this server from outside (no secrets):
-        the gateways, STUN servers and whether the DHT is in use. Public."""
+        """! @brief What a phone or the uploader needs to find this server from outside (no
+        secrets): the gateways, STUN servers and whether the DHT is in use. Public; the
+        route only exists while the module is enabled."""
         c = cfg()
-        return jsonify({"ok": True, "version": link.VER, "enabled": bool(c["remote_access_enabled"]),
+        return jsonify({"ok": True, "version": link.VER, "enabled": True,
                         "gateways": c["gateways"], "stun": c["stun"], "dht": bool(c["remote_access_dht"])})
 
     host.add_public_prefix(PUB_PREFIX)
     host.add_route(PUB_PREFIX + "client", api_client, methods=["GET"])
-    host.add_route("/api/remote_access/status", api_status, feature="settings." + TAB)
-    host.add_route("/api/remote_access/restart", api_restart, methods=["POST"], feature="settings." + TAB,
-                   level="write")
-    host.add_settings_section(TAB, "link", status_url="/api/remote_access/status", poll=5,
-                              text="Phones paired in My devices use this automatically when the server's address "
-                                   "doesn't answer (away from home). Gateways only introduce the two ends; the "
-                                   "link itself is direct and end-to-end encrypted.",
-                              actions=[{"id": "restart", "label": "Restart link", "url": "/api/remote_access/restart"}])
+    host.add_route("/api/remote_access/status", api_status, feature="settings.modules")
+
     def peer_url(name, pub_b64, timeout=45.0):
         """! @brief family_share: a local URL that reaches peer `name` (pinned key pub_b64)
-        over a direct link, dialling it now if needed. None when the link is off;
+        over a direct link, dialling it now if needed. None when the link is not running;
         raises when the peer can't be reached (a failed dial is not retried for 5 min)."""
         if not runner.running():
             return None
