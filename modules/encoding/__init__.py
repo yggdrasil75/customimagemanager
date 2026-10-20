@@ -36,7 +36,12 @@ MANIFEST = {
 }
 
 VIEW_KEY = "media_settings_view"
-KEEP_KEY = "enc_reencode_keep_originals"
+KEEP_KEY = "enc_reencode_keep_originals"   # the old single choice: the default of each kind's
+
+
+def keep_key(kind):
+    """! @brief The saved "keep originals" key of one re-encodable kind."""
+    return f"{KEEP_KEY}_{kind}"
 
 
 # -- registration ---------------------------------------------------------------
@@ -60,9 +65,12 @@ def _migrate(host):
         host.logger.warning(f"media settings migration: {e}")
 
 
-def _keep_originals(host):
-    """! @brief The saved "keep originals" choice of Re-encode existing files."""
-    v = host.config.get(KEEP_KEY)
+def _keep_originals(host, kind):
+    """! @brief The saved "keep originals" choice of Re-encode existing files for one kind
+    (images and videos each have their own); unset, the old shared choice, else on."""
+    v = host.config.get(keep_key(kind))
+    if v is None:
+        v = host.config.get(KEEP_KEY)
     return True if v is None else bool(v)
 
 
@@ -121,8 +129,11 @@ def register(host):
     host.add_config_key("enc_settings_version", default=0, validate=int, tab="media")
     # Re-encode existing files: copy each original to media/.cim/reencoded first
     # (the checkbox next to the button; saved with the pane so it stays as set).
-    host.add_config_key(KEEP_KEY, default=True, tab="media",
-                        validate=lambda v: v.strip().lower() in ("1", "true", "yes", "on") if isinstance(v, str) else bool(v))
+    def _bool(v):
+        return v.strip().lower() in ("1", "true", "yes", "on") if isinstance(v, str) else bool(v)
+    host.add_config_key(KEEP_KEY, default=True, tab="media", validate=_bool)
+    for k in REENCODE_KINDS:  # one checkbox per kind: keep the videos, not the images
+        host.add_config_key(keep_key(k), default=None, tab="media", validate=_bool)
     host.on_startup(lambda: _migrate(host))
     host.add_user_setting(
         VIEW_KEY, label="Media settings view", kind="select", default="simple",
@@ -137,7 +148,8 @@ def register(host):
         c = probe.capabilities(refresh=refresh)
         view = host.user_setting(VIEW_KEY) or "simple"
         out = schema.build(host.config, c, _kinds(host), expert=view == "expert")
-        out["values"][KEEP_KEY] = _keep_originals(host)
+        for k in REENCODE_KINDS:
+            out["values"][keep_key(k)] = _keep_originals(host, k)
         out.update(success=True, view=view, is_admin=host.is_admin(),
                    reencode_kinds=list(REENCODE_KINDS), job=jobs.status(),
                    encoders=sorted(k[4:] for k, ok in c.items() if k.startswith("enc:") and ok))
@@ -162,7 +174,7 @@ def register(host):
             jobs.plan(kind, folder)  # refuse early when the kind is kept as uploaded
         except ValueError as e:
             return jsonify({"success": False, "error": str(e)}), 400
-        ok, err = jobs.start("reencode", kind, d.get("keep_originals", _keep_originals(host)), folder)
+        ok, err = jobs.start("reencode", kind, d.get("keep_originals", _keep_originals(host, kind)), folder)
         return jsonify({"success": ok, "error": err or None, "job": jobs.status()}), (200 if ok else 409)
 
     def api_thumbs():

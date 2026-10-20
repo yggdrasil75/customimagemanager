@@ -405,7 +405,9 @@ def register(host):
                     "lat": hit["lat"] if hit else None, "lon": hit["lon"] if hit else None,
                     "src_mtime": mtime}, dont_write=True, commit=False)
                 if hit is None:
-                    host.update_file(table="places", where=("rel_path=? AND source='approx'", (rel,)),
+                    # no city named (any more): drop this file's stale approximate pin. Addressed
+                    # by its path, so it isn't logged as a bulk purge of the places table
+                    host.update_file(rel, table="places", where=("source='approx'", ()),
                                      remove=True, dont_write=True, commit=False)
                     continue
                 row, _src = places.merge(hit, have)
