@@ -248,5 +248,6 @@ def test_upload_of_a_non_video_kind_is_accepted(app, client, tree):
     j = r.get_json()
     assert j["success"] and j["filename"].startswith(f"{SHOW}/Season 01/song.")
     assert os.path.isfile(os.path.join(app.MEDIA_DIR, j["filename"]))
-    assert app.mt.kind(j["filename"]) == "audio"
+    if app.mt.is_audio("x.mp3"):  # audio is a kind only with the music module (mutagen) on
+        assert app.mt.kind(j["filename"]) == "audio"
     assert _ep(app, j["filename"]) is None

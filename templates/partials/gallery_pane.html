@@ -31,8 +31,10 @@
             placeholder="Search..."
             onfocus="showQuickFilters()"
             class="w-full px-2 py-1 pr-8 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
+          <!-- z-30: the translate makes this span a stacking context, which would otherwise
+               trap the sort / filter popovers inside it, behind the grid and the panes -->
           <span data-ext-area="search_tools"
-            class="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5"></span>
+            class="absolute right-1 top-1/2 -translate-y-1/2 z-30 flex items-center gap-0.5"></span>
           <!-- Quick-filter dropdown: appears on focus, lists the configurable
                chips plus a Date... entry. Clicking a chip drops its query into the
                box; the user can also just keep typing a raw query. -->

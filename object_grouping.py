@@ -190,7 +190,7 @@ def group_embeddings(embeddings, min_cluster=2, eps=0.18):
     n_small = n <= 50000
     low_dim = X.shape[1] <= 30
     try:
-        if n_small and low_dim:
+        if n_small and low_dim and DBSCAN is not None:
             euc_eps = float(np.sqrt(max(2.0 * eps, 1e-9)))
             return DBSCAN(eps=euc_eps, min_samples=min_cluster, metric="euclidean",
                           algorithm="ball_tree", n_jobs=-1).fit_predict(X).astype(int)
@@ -351,7 +351,7 @@ def _greedy_group(X, eps, min_cluster):
     (a KD-tree is useless above ~20 dims). O(n log n), no n x n matrix.
     """
     Xr = X
-    if X.shape[1] > 16 and X.shape[0] > 1000:
+    if X.shape[1] > 16 and X.shape[0] > 1000 and PCA is not None and cKDTree is not None:
         try:
             k = min(16, X.shape[1], X.shape[0] - 1)
             Xr = PCA(n_components=k, svd_solver="randomized",
@@ -360,7 +360,6 @@ def _greedy_group(X, eps, min_cluster):
             Xr = Xr / nn
         except Exception:
             Xr = X
-    tree = cKDTree(Xr)
     euc_eps = float(np.sqrt(max(2.0 * eps, 1e-9)))
     parent = np.arange(len(Xr))
     def find(a):
@@ -368,10 +367,17 @@ def _greedy_group(X, eps, min_cluster):
             parent[a] = parent[parent[a]]; a = parent[a]
         return a
     # batched radius queries keep peak memory flat
-    CH = 4096
+    CH = 4096 if cKDTree is not None else 1024
+    tree = cKDTree(Xr) if cKDTree is not None else None
     for s in range(0, len(Xr), CH):
         e = min(s + CH, len(Xr))
-        neigh = tree.query_ball_point(Xr[s:e], euc_eps, workers=-1)
+        if tree is not None:
+            neigh = tree.query_ball_point(Xr[s:e], euc_eps, workers=-1)
+        else:
+            # no scipy: unit vectors, so |a-b|^2 = 2 - 2 a.b; one (chunk x n) block at a time
+            d2 = 2.0 - 2.0 * (Xr[s:e] @ Xr.T)
+            neigh = [np.flatnonzero(row <= euc_eps * euc_eps) for row in d2]
+            del d2
         for off, nb in enumerate(neigh):
             i = s + off
             for j in nb:

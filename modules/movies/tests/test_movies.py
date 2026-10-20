@@ -259,5 +259,6 @@ def test_upload_into_the_section_is_indexed(app, upload, client, tree):
     j = r.get_json()
     assert j["success"] and j["filename"].startswith("movies/Clip (2020)/song.")
     assert os.path.isfile(os.path.join(app.MEDIA_DIR, j["filename"]))
-    assert app.mt.kind(j["filename"]) == "audio"
+    if app.mt.is_audio("x.mp3"):  # audio is a kind only with the music module (mutagen) on
+        assert app.mt.kind(j["filename"]) == "audio"
     assert app.module_host.db().execute("SELECT 1 FROM movies WHERE rel_path=?", (j["filename"],)).fetchone() is None

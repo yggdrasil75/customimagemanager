@@ -69,14 +69,14 @@ def require_feature(feature_key, action=None, fields=(), level="read"):
         def wrap(*a, **k):
             u = g.get("user")
             if not u:
-                return jsonify({"error": "authentication required"}), 401
+                return jsonify({"success": False, "error": "authentication required"}), 401
             g.cim_write = (level == "write")  # mutating endpoint (access policies read this)
             if capabilities.capability_denials().get(feature_key) is False:
-                return jsonify({"error": "feature unavailable on this server"}), 503
+                return jsonify({"success": False, "error": "feature unavailable on this server"}), 503
             if not u.get("is_admin"):
                 feats = u.get("features") or {}
                 if not features.has_level(feats, feature_key, level):
-                    return jsonify({"error": "feature not permitted"}), 403
+                    return jsonify({"success": False, "error": "feature not permitted"}), 403
             resp = fn(*a, **k)
             if action:
                 try:
@@ -731,7 +731,7 @@ class Auth:
             return None
         if g.user is None:
             if request.path.startswith("/api/"):
-                return jsonify({"error": "authentication required"}), 401
+                return jsonify({"success": False, "error": "authentication required"}), 401
             return redirect("/login")
         if request.method not in ("GET", "HEAD", "OPTIONS") and not g.api_key:
             sent = request.headers.get("X-CSRF-Token", "")
@@ -863,7 +863,7 @@ class Auth:
                 def wrap(*a, **k):
                     u = g.get("user")
                     if not u:
-                        return jsonify({"error": "authentication required"}), 401
+                        return jsonify({"success": False, "error": "authentication required"}), 401
                     if not u.get("is_admin") and not features.has_level(
                             u.get("features") or {}, features.settings_tab_feature("users"), level):
                         return jsonify({"error": "admin required"}), 403

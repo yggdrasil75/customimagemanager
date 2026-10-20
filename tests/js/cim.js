@@ -12,7 +12,7 @@ const { boot, hasModule, moduleAssets } = require("./harness");
 const pages = [];
 after(async () => {
   await new Promise(r => setTimeout(r, 50));
-  for (const b of pages) b.window.close();
+  for (const b of pages) { b.api.closed = true; b.window.close(); }
 });
 function page(opts) {
   const b = boot(opts);

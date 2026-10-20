@@ -37,7 +37,8 @@ def _button(client, module_id, uid):
     return b
 
 
-def test_button_reuses_the_module_route(client):
+def test_button_reuses_the_module_route(client, ungated):
+    # ungated: the button and its route are what is tested, not whether an OCR engine is installed
     b = _button(client, "ocr", "ocr")
     assert b["url"] == "/api/ocr" and b["needs"] == "file" and b["on_done"] == "apply" and b["area"] == "ai_tools"
     r = client.post(b["url"], json={"filename": "nope.jxl"})

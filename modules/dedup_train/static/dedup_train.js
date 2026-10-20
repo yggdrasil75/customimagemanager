@@ -212,7 +212,7 @@
 let _ddtsStatus=null, _ddtsTimer=null;
 async function ddtsRefresh(){
   const s=await fetch('/api/dedup_train/seq/status').then(r=>r.json()).catch(()=>null);
-  if(!s||!s.success) return;
+  if(!s||!s.success||!s.kinds) return;   // no timeline-model status (module off / an error page)
   _ddtsStatus=s;
   const kind=document.getElementById('ddts_kind').value, k=s.kinds[kind]||{};
   const fol=document.getElementById('ddts_folders');

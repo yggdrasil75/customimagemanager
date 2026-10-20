@@ -97,10 +97,11 @@ def test_section_clause_matches_exact_segments(host, testsec):
 def test_one_gallery_filter_hides_every_section(app, host, testsec):
     filters = [f for f in host.gallery_filters if "testsec/" in f]
     assert len(filters) == 1 and filters[0] is host._section_filter
-    if "music" in host.library_sections():
+    music = "music" in host.library_sections()   # the music module needs mutagen
+    if music:
         assert "music/" in filters[0], "the music module's section shares the one filter"
     rows = ["testsec/A/1.jpg", "users/ann/testsec/2.jpg", "music/B/3.flac", "testsecx/4.jpg", "pic.jpg"]
-    assert _rows(filters[0], [], rows) == ["testsecx/4.jpg", "pic.jpg"]
+    assert _rows(filters[0], [], rows) == ([] if music else ["music/B/3.flac"]) + ["testsecx/4.jpg", "pic.jpg"]
     # registering another section rebuilds the filter in place, never adds a second one
     n = len(host.gallery_filters)
     app.mt.register_library_section("another", label="A", kinds=set())

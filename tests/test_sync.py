@@ -246,6 +246,16 @@ def test_module_table_write_reports_a_locked_db(app, host, monkeypatch):
     db.execute("CREATE TABLE IF NOT EXISTS lock_probe (rel_path TEXT PRIMARY KEY, v INTEGER)")
     db.execute("INSERT OR REPLACE INTO lock_probe(rel_path, v) VALUES ('a.jpg', 1)")
     db.commit()
+    try:
+        _locked_db_checks(app, db, monkeypatch, _sq)
+    finally:
+        # a scratch table: left behind it fails test_every_live_table_has_a_kind
+        db.rollback()
+        db.execute("DROP TABLE IF EXISTS lock_probe")
+        db.commit()
+
+
+def _locked_db_checks(app, db, monkeypatch, _sq):
     calls = {"n": 0}
     real = app._update_table
     def flaky(*a, **k):
@@ -265,6 +275,7 @@ def test_module_table_write_reports_a_locked_db(app, host, monkeypatch):
     assert r["success"] is False and calls["n"] == 1
     assert "locked" in r["error"] and "lock_probe" in r["error"] and "every row" in r["error"]
     db.rollback()
+    monkeypatch.undo()
     assert app._describe_rows("x.jpg", {"kind": "k"}, None) == "rel_path=x.jpg, kind='k'"
 
 def test_unchanged_file_is_not_offered_to_modules(app, host, upload):

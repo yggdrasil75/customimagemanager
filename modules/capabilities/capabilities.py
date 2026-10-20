@@ -36,7 +36,8 @@ CAPABILITY_PROBES = {
     # 3D viewer, mesh fitting
     "trimesh":      lambda: _installed("trimesh"),
     "ocr":          lambda: _installed("pytesseract") or _installed("easyocr"),
-    "barcodes":     lambda: _installed("pyzbar") or _installed("zxingcpp"),
+    # OpenCV's QR / barcode decoders work alone (scan.py); zxing-cpp / pyzbar add formats
+    "barcodes":     lambda: _installed("pyzbar") or _installed("zxingcpp") or _installed("cv2"),
     "gallery_dl":   lambda: _installed("gallery_dl"),
     "llm":          lambda: _installed("requests"),
 }
@@ -46,7 +47,7 @@ CAPABILITY_FEATURES = {
     "insightface": ["tab.faces"],
     "trimesh":     ["view.3d"],
     "ultralytics": ["ai.autotag", "ai.segment", "ai.pose"],
-    "torch":       ["ai.smarttag", "ai.iqa", "dedup"],
+    "torch":       ["ai.smarttag", "ai.iqa"],   # dedup itself is sha256 + perceptual hash: no torch
     "ocr":         ["ai.ocr"],
     "barcodes":    ["ai.barcodes"],
     "gallery_dl":  [],

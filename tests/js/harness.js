@@ -62,6 +62,9 @@ function makeApi() {
     },
     last(pathPrefix, method) { const f = api.find(pathPrefix, method); return f[f.length - 1]; },
     fetch(url, init = {}) {
+      // a closed page's late timers must not get answers: their code would run with
+      // no document (an error the test runner pins on whichever test is current)
+      if (api.closed) return new Promise(() => { });
       const u = new URL(String(url), "http://t/");
       const method = (init.method || "GET").toUpperCase();
       let body = init.body;
@@ -113,7 +116,7 @@ function boot(opts = {}) {
   window.fetch = api.fetch;
   window.THREE = {};                       // vendor three.js not loaded
   window.alert = () => { }; window.confirm = () => true; window.prompt = () => opts.prompt ?? null;
-  window.scrollTo = () => { }; window.requestAnimationFrame = fn => setTimeout(fn, 0);
+  window.scrollTo = () => { }; window.requestAnimationFrame = fn => window.setTimeout(fn, 0);   // cleared with the window
   window.ResizeObserver = class { observe() { } disconnect() { } unobserve() { } };
   window.IntersectionObserver = opts.IntersectionObserver || class { observe() { } disconnect() { } unobserve() { } };
   window.URL.createObjectURL = () => "blob:x"; window.URL.revokeObjectURL = () => { };

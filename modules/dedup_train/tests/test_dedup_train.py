@@ -52,7 +52,9 @@ def test_size_table_setting_and_param_count():
     assert tbl == {"pi": {"width": 0.3, "depth": 1}, "big": {"width": 6.0, "depth": 2}}
     assert dc.parse_sizes("") == dc.SIZES and dc.parse_sizes(dc.sizes_text()) == dc.SIZES
     assert dc.size_spec("pi", tbl) == tbl["pi"] and dc.size_spec("bogus") == dc.SIZES["medium"]
-    assert dc.count_params(4.0, 3) == 8_350_849 and dc.count_params(0.25, 1) == 8_449
+    # the changenet sizes (stem + dilated body + head); test_heurdu / the torch test below
+    # check the formula against the real net
+    assert dc.count_params(4.0, 3) == 3_002_369 and dc.count_params(0.25, 1) == 10_145
     b = bd.bench({"pi": tbl["pi"]}, batch=8)          # works without torch (params only)
     assert b["pi"]["params"] == dc.count_params(0.3, 1)
 
