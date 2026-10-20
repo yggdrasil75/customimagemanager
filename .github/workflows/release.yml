@@ -22,7 +22,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: version
         id: v
         shell: bash
@@ -77,13 +77,13 @@ jobs:
         run: |
           Rename-Item dist/app "${{ steps.v.outputs.name }}"
           Compress-Archive -Path "dist/${{ steps.v.outputs.name }}" -DestinationPath "${{ steps.v.outputs.name }}.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.v.outputs.name }}
           path: ${{ steps.v.outputs.name }}.zip
       - name: release asset
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ steps.v.outputs.name }}.zip
           generate_release_notes: true
@@ -92,9 +92,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -102,7 +102,7 @@ jobs:
       - name: image name
         id: img
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: ${{ github.ref_type == 'tag' }}

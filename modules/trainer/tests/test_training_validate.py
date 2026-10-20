@@ -42,14 +42,30 @@ def test_debug_regions_roundtrip_and_stay_out_of_labels(client, upload):
         assert len(f.read().strip().splitlines()) == 1     # only the real box is a label
 
 
-def test_validate_debug_runs_and_snap(app, client, upload, monkeypatch, ungated):
+import pytest
+
+
+@pytest.fixture(params=["jxl", "png"])
+def image_storage(request):
+    """! @brief Stills stored as .jxl (the default), or kept as uploaded (.png): a set's
+    members are validated / trained in either format."""
+    from modules.encoding import convert
+    saved = convert.media_prefs()
+    if request.param == "png":
+        convert.set_media_prefs(dict(saved, image={"target": ".jxl", "mode": "none"}))
+    yield request.param
+    convert.set_media_prefs(saved)
+
+
+def test_validate_debug_runs_and_snap(app, client, upload, monkeypatch, ungated, image_storage):
     """! @brief Validate a numbered run with debug storage, re-validate (replaces, not
     stacks), then snap: one real box on the model's geometry, dup gone."""
     import os
     import numpy as np
     from cimtest import write_meta, read_meta
     from modules.trainer import trainer_core as tc
-    fn = upload(seed=77)
+    fn = upload(f"tv_{image_storage}.png", seed=77)
+    assert fn.endswith("." + image_storage), fn
     j = client.post("/api/trainer/select", json={"strategy": "recent", "n": 1}).get_json()
     assert j["success"], j
     s = j["set"]; wp = j["files"][0]["rel_path"]

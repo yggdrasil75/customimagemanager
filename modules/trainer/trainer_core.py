@@ -50,6 +50,28 @@ def _bind(host):
     })
 
 
+def _is_still(abs_path):
+    """! @brief A member a detector trains / validates on: a still image in any stored
+    format (.jxl, or .webp / .png / .jpg when Settings > Media keeps or converts to
+    those); videos are skipped."""
+    return bool(abs_path) and os.path.exists(abs_path) and HOST.media.is_image(abs_path) \
+        and not HOST.media.is_video(abs_path)
+
+
+def _write_jpg(src_abs, jpg):
+    """! @brief Decode a stored still (any format) to a training jpg. @return True when written."""
+    img = read_jxl(src_abs)
+    if img is None:
+        return False
+    if img.ndim == 2:
+        bgr = img
+    elif img.shape[2] == 4:
+        bgr = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+    else:
+        bgr = img[:, :, 2::-1]
+    return bool(cv2.imwrite(jpg, bgr))
+
+
 def yolo_train_worker(abs_folder: str, dataset_dir: str, yaml_path: str,
                       epochs: int, batch: int, imgsz: int, device, base_model: str) -> None:
     """! @brief Run a local YOLO training subprocess and refresh the model list on completion."""
@@ -623,8 +645,7 @@ def trainer_validate():
         fp = get_safe_path(MEDIA_DIR, rp)
         if not fp or not os.path.exists(fp):
             continue
-        base = os.path.splitext(fp)[0]
-        if not os.path.exists(base + ".jxl"):     # stills only; skip video members
+        if not _is_still(fp):     # stills only (any stored format); skip video members
             continue
         img = read_jxl(fp)
         if img is None:
@@ -804,7 +825,7 @@ def train():
     want_set = set(want) if want else None
 
     # Gather, per still image, only the regions whose class we're training on.
-    labelled = []            # (base, jpg_name, [regions])
+    labelled = []            # (image path, jpg_name, [regions])
     skipped_video = 0
     n_dup_skipped = 0
     present_classes = set()
@@ -813,7 +834,7 @@ def train():
         if not abs_path:
             continue
         base = os.path.splitext(abs_path)[0]
-        if not os.path.exists(base + ".jxl"):
+        if not _is_still(abs_path):
             skipped_video += 1
             continue
         regions = (read_metadata(abs_path) or {}).get("regions", []) or []
@@ -831,7 +852,7 @@ def train():
         keep, dups = tv.split_dups(keep)   # double-tagged object -> train on it once
         n_dup_skipped += len(dups)
         if keep:
-            labelled.append((base, os.path.basename(base), keep))
+            labelled.append((abs_path, os.path.basename(base), keep))
 
     if not labelled:
         HOST.set_status("No matching labelled images in this set!")
@@ -911,10 +932,9 @@ def train():
             img_dst = os.path.join(dset_dir, split)
             os.makedirs(img_dst, exist_ok=True)
             out = []
-            for base, bn, regions in pairs:
+            for src, bn, regions in pairs:
                 jpg = os.path.join(img_dst, bn + ".jpg")
-                subprocess.run(['djxl', base + ".jxl", jpg],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _write_jpg(src, jpg)
                 if crop_to_boxes:
                     regions = _crop_jpg_to_boxes(jpg, regions)
                 out.append((bn, regions))
@@ -967,19 +987,17 @@ def train():
         return made
 
     aug_made = 0
-    for base, bn, regions in tr_set:
+    for src, bn, regions in tr_set:
         jpg = os.path.join(dset_dir, "images/train", bn + ".jpg")
-        subprocess.run(['djxl', base + ".jxl", jpg],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _write_jpg(src, jpg)
         if crop_to_boxes:
             regions = _crop_jpg_to_boxes(jpg, regions)
         _write_label(os.path.join(dset_dir, "labels/train"), bn, regions)
         if aug_on:
             aug_made += (_augment_into(dset_dir, "images/train", "labels/train", bn, regions) or 0)
-    for base, bn, regions in val_set:
+    for src, bn, regions in val_set:
         jpg = os.path.join(dset_dir, "images/val", bn + ".jpg")
-        subprocess.run(['djxl', base + ".jxl", jpg],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _write_jpg(src, jpg)
         if crop_to_boxes:
             regions = _crop_jpg_to_boxes(jpg, regions)
         _write_label(os.path.join(dset_dir, "labels/val"), bn, regions)
