@@ -39,15 +39,16 @@ def test_media_prefs_target_ext():
         assert C.clean_media_prefs({"image": {"target": "exe", "mode": "x"}})["image"] == \
             C.DEFAULT_MEDIA_PREFS["image"]
         mt.register_media_type("book", exts=[".epub"])
-        mt.extend_media_type("book", exts=[".cbr", ".cbz"], group="comic")
+        mt.extend_media_type("book", exts=[".cbr", ".cbz", ".cb7"], group="comic")
         C.set_media_prefs({"book": {"target": ".cbz", "mode": "all"}})
         assert C.target_ext("a.cbr") == ".cbz" and C.target_ext("a.epub") == ".epub"
-        # a comic is never sent to calibre: with an .epub / .pdf target it stays a comic
-        # archive (repacked to .cbz when everything is converted)
+        # a comic is never sent to calibre: with an .epub / .pdf target it stays as uploaded
+        # (the reader opens every comic archive); only a .cbz target repacks it
         mt.extend_media_type("book", exts=[".opf"], unambiguous_exts=[], uploadable_exts=[".opf"],
                              group="sidecar")
         C.set_media_prefs({"book": {"target": ".epub", "mode": "all"}})
-        assert C.target_ext("a.cbr") == ".cbz" and C.target_ext("a.cbz") == ".cbz"
+        assert C.target_ext("a.cbr") == ".cbr" and C.target_ext("a.cb7") == ".cb7"
+        assert C.target_ext("a.cbz") == ".cbz"
         assert C.target_ext("metadata.opf") == ".opf"
         C.set_media_prefs({"book": {"target": ".epub", "mode": "unsafe"}})
         assert C.target_ext("a.cbr") == ".cbr"

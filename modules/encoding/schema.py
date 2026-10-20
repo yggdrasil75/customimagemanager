@@ -304,7 +304,8 @@ FIELDS = [
        "Keep uploads as they are, or convert them.",
        options=_mode_opts("books"), expert=False, store="media_storage"),
     _f("media_storage.book.target", "book", "Format", "select", ".epub",
-       "Books convert with calibre; comic archives repack to CBZ.",
+       "Books convert with calibre. Comic archives (cbz/cbr/cb7) are read as they are; "
+       "they repack only when CBZ is chosen.",
        options=[_opt(".epub", "EPUB", needs="ebook_convert"), _opt(".pdf", "PDF", needs="ebook_convert"),
                 _opt(".cbz", "CBZ (comics only)")],
        expert=False, show=[_conv("book")], store="media_storage"),

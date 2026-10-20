@@ -50,6 +50,8 @@ from flask import request, jsonify, send_file, Response
 from . import book_index as bi
 from . import book_meta_write as bmw
 import hashlib
+import mimetypes
+from urllib.parse import quote
 
 # Filled in by register().
 CTX: dict = {}
@@ -137,9 +139,12 @@ def _upsert_book(rel_path, abs_path, verdict, force=False) -> bool:
 
     db = _db()
     if not force:
-        row = db.execute("SELECT mtime FROM books WHERE rel_path=?",
+        row = db.execute("SELECT mtime, reader FROM books WHERE rel_path=?",
                          (rel_path,)).fetchone()
-        if row and abs(row["mtime"] - mtime) < 1e-6:
+        # unchanged, and still read the same way (an image-only epub shelved as text
+        # before comics were recognised is shelved again, as a comic)
+        if row and abs(row["mtime"] - mtime) < 1e-6 \
+                and row["reader"] == bi.reader_for(verdict.fmt or "", verdict.kind):
             return False
 
     fmt = verdict.fmt or "unknown"
@@ -154,6 +159,14 @@ def _upsert_book(rel_path, abs_path, verdict, force=False) -> bool:
                 kind = "comic"
         except Exception:
             pass
+
+    reader = bi.reader_for(fmt, kind)
+    if reader == "paged" and fmt == "epub":
+        # a comic packed as an epub: its pages are its pictures
+        pages = bi.comic_page_names(abs_path, fmt)
+        meta["page_count"] = len(pages) or None
+        if pages and not meta.get("cover_bytes"):
+            meta["cover_bytes"] = bi.comic_page_bytes(abs_path, fmt, pages[0])
 
     cover_name = ""
     if meta.get("cover_bytes"):
@@ -198,7 +211,7 @@ def _upsert_book(rel_path, abs_path, verdict, force=False) -> bool:
             cover=CASE WHEN excluded.cover!='' THEN excluded.cover ELSE books.cover END,
             source=excluded.source, indexed=excluded.indexed,
             text_status='pending'
-    """, (rel_path, mtime, size, fmt, kind, bi.reader_for(fmt),
+    """, (rel_path, mtime, size, fmt, kind, reader,
           title, bi.sort_title(title), json.dumps(meta["authors"]),
           meta["series"], meta["series_index"], meta["publisher"],
           meta["published"], meta["language"], meta["isbn"],
@@ -352,7 +365,7 @@ def index_one(rel_path: str) -> dict:
         # "readable", and doing it lazily means the first person to open the
         # book pays a multi-second stall with no explanation.
         try:
-            if bi.reader_for(v.fmt or "") == "flow":
+            if bi.reader_for(v.fmt or "", v.kind) == "flow":
                 _extract_one(rel_path)
         except Exception as e:
             _log().warning(f"book extract after upload {rel_path}: {e}")
@@ -501,6 +514,7 @@ def _extract_one(rel_path) -> str:
     if not ap or not os.path.exists(ap):
         return "missing"
     if row["reader"] == "paged":
+        _uf(rel_path, table="book_sections", remove=True, commit=False)  # read as text before
         _uf(rel_path, table="books", set={"text_status": "unsupported",
                                           "text_error": "paged format - pages render on demand"})
         return "unsupported"
@@ -1237,8 +1251,29 @@ def register(host, ctx: dict):
                 return jsonify({"success": False, "error": "no such section"}), 404
         total = _db().execute("SELECT COUNT(*) n FROM book_sections WHERE rel_path=?",
                               (rel_path,)).fetchone()["n"]
+        # an epub's pictures come from the book itself
+        html = (r["html"] or "").replace(
+            bi.EPUB_ASSET, f"/api/books/asset/{quote(rel_path, safe='/')}?name=")
         return jsonify({"success": True, "idx": r["idx"], "title": r["title"],
-                        "html": r["html"], "total": total})
+                        "html": html, "total": total})
+
+    @host.route("/api/books/asset/<path:rel_path>", feature="tab.books")
+    def books_asset(rel_path):
+        """! @brief A picture inside an epub (the images of its text pages)."""
+        name = request.args.get("name", "")
+        row = _db().execute("SELECT fmt FROM books WHERE rel_path=?", (rel_path,)).fetchone()
+        ap = _abs(rel_path)
+        if not row or row["fmt"] != "epub" or not ap or not os.path.exists(ap):
+            return jsonify({"success": False, "error": "not found"}), 404
+        if not bi._is_page_image(name):
+            return jsonify({"success": False, "error": "not an image"}), 400
+        data = bi.comic_page_bytes(ap, "epub", name)
+        if data is None:
+            return jsonify({"success": False, "error": "not found"}), 404
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        resp = Response(data, mimetype=mime)
+        resp.headers["Cache-Control"] = "private, max-age=86400"
+        return resp
 
     @host.route("/api/books/page/<path:rel_path>", feature="tab.books")
     def books_page(rel_path):

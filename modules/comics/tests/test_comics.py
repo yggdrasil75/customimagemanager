@@ -100,17 +100,20 @@ def book_mode():
     convert.set_media_prefs(saved)
 
 
-@pytest.mark.parametrize("mode,want", [("all", ".cbz"), ("unsafe", None), ("none", None)])
-def test_comics_are_never_sent_to_calibre(client, upload, book_mode, mode, want):
-    """! @brief With an .epub target a comic stays a comic: repacked to .cbz when everything
-    is converted, else kept as uploaded. A .cbr that is really a zip, a .cbt and a .cb7
-    (py7zr 1.x has no read()) all make it, with or without a ComicInfo.xml."""
-    book_mode(mode)
+@pytest.mark.parametrize("mode,target,want", [("all", ".epub", None), ("unsafe", ".epub", None),
+                                              ("none", ".epub", None), ("all", ".pdf", None),
+                                              ("all", ".cbz", ".cbz"), ("none", ".cbz", None)])
+def test_comics_are_never_sent_to_calibre(client, upload, book_mode, mode, target, want):
+    """! @brief A comic stays a comic: with an .epub / .pdf target it is kept as uploaded
+    (the reader opens every comic archive), repacked only when .cbz is the target. A .cbr
+    that is really a zip, a .cbt and a .cb7 (py7zr 1.x has no read()) all make it, with or
+    without a ComicInfo.xml."""
+    book_mode(mode, target)
     made = [("a.cbr", _zip_bytes(_pages(910))), ("b.cbt", _tar_bytes(_pages(920)))]
     if convert.py7zr is not None:
         made.append(("c.cb7", _7z_bytes(_pages(930))))
     for name, data in made:
-        j = upload._post({"file": (io.BytesIO(data), name), "mode": "sync", "folder": f"cm_{mode}"}, name)
+        j = upload._post({"file": (io.BytesIO(data), name), "mode": "sync", "folder": f"cm_{mode}_{target[1:]}"}, name)
         fn = j["filename"]
         assert fn.endswith(want or name[-4:]), (name, fn)
         b = _shelf(client, fn)

@@ -120,9 +120,10 @@ def target_ext(path: str, src: str | None = None) -> str:
         if e in mt.media_group('book', 'sidecar'):
             return e  # a book's metadata (calibre's metadata.opf) is kept as it is
         if e in mt.media_group('book', 'comic'):
-            # a comic is never handed to calibre: it stays a comic archive, repacked to
-            # .cbz when everything is converted or .cbz is the target
-            return '.cbz' if mode != 'none' and (mode == 'all' or t == '.cbz') else e
+            # a comic is never handed to calibre (that makes an epub of page_N.xhtml
+            # wrappers): the reader opens every comic archive as it is, so it is only
+            # repacked when .cbz is the chosen format
+            return '.cbz' if mode != 'none' and t == '.cbz' else e
         if t == '.cbz':
             return e  # only comics become a cbz
     if e in mt.RAW_INPUT_EXTS:

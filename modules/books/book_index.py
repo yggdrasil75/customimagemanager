@@ -83,6 +83,7 @@ import numpy as np
 import base64 as _b64
 import shutil as _sh
 import tempfile
+from urllib.parse import quote as _quote, unquote as _unquote
 
 from optional_deps import optional_import
 from .book_meta_write import EMBEDDED_FMTS, opf_name, read_pdf_xmp
@@ -508,6 +509,10 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
             if fmt in ('rar', '7z', 'ole2') and canonical in ('epub', 'docx'):
                 return Verdict('triage', fmt, 'book',
                                f'.{ext.lstrip(".")} but content is {fmt}')
+        if canonical == 'epub' and epub_is_comic(abs_path):
+            # a comic packed as an epub (calibre's comic output, a fixed-layout manga):
+            # every page is a picture, so it reads page by page like a .cbz
+            return Verdict('book', 'epub', 'comic', 'image-only epub (a comic)')
         return Verdict('book', canonical, 'book', f'{canonical} by extension')
 
     return Verdict('triage', fmt, 'book', 'unclassified')
@@ -1270,6 +1275,8 @@ def comic_page_names(abs_path: str, fmt: str) -> list[str]:
                 names = [n for n in s.getnames()]
         elif fmt == 'cba':
             return []          # ACE has no maintained Python reader; needs unace
+        elif fmt == 'epub':
+            return epub_page_images(abs_path)   # reading order, not name order
     except Exception:
         return []
     names = [n for n in names
@@ -1282,7 +1289,7 @@ def _natural_key(s: str):
 
 def comic_page_bytes(abs_path: str, fmt: str, name: str) -> bytes | None:
     try:
-        if fmt == 'cbz':
+        if fmt in ('cbz', 'epub'):
             with zipfile.ZipFile(abs_path) as z:
                 return z.read(name)
         if fmt == 'cbt':
@@ -1558,6 +1565,131 @@ def _meta_text(path: str, meta: dict):
 # 7. TEXT EXTRACTION -> SECTIONS
 # ==============================================================================
 
+# -- epubs made of pictures ----------------------------------------------------
+# <img src>, and the <svg><image xlink:href> wrapper calibre's comic output uses
+_IMG_REF = re.compile(r'<(?:img|image)\b[^>]*?\s(?:src|xlink:href|href)\s*=\s*(["\'])(.*?)\1',
+                      re.I | re.S)
+_SVG_BLOCK = re.compile(r'<svg\b.*?</svg>', re.I | re.S)
+
+
+def _epub_spine(z: zipfile.ZipFile) -> list[str]:
+    """! @brief The epub's content documents (zip names) in reading order: the OPF spine,
+    else every (x)html file in natural order."""
+    order = []
+    opf = _epub_opf_name(z)
+    if opf:
+        try:
+            root = ET.fromstring(z.read(opf))
+            base = os.path.dirname(opf)
+            manifest = {el.get('id'): el.get('href')
+                        for el in root.iter() if el.tag == _OPF + 'item'}
+            for el in root.iter():
+                if el.tag == _OPF + 'itemref':
+                    h = manifest.get(el.get('idref')) or ''
+                    j = _zip_join(base, _unquote(h), z) or _zip_join(base, h, z)
+                    if j and j not in order:
+                        order.append(j)
+        except Exception:
+            order = []
+    if not order:
+        order = sorted((n for n in z.namelist() if _ext(n) in ('.html', '.xhtml', '.htm')),
+                       key=_natural_key)
+    return order
+
+
+def _epub_ref(z: zipfile.ZipFile, doc: str, href: str) -> str | None:
+    """! @brief The zip name an image reference in content document `doc` points at."""
+    href = _html.unescape(href or '').split('#', 1)[0].strip()
+    if not href or href.lower().startswith(('data:', 'http:', 'https:', '//')):
+        return None
+    base = os.path.dirname(doc)
+    return _zip_join(base, _unquote(href), z) or _zip_join(base, href, z)
+
+
+def _doc_images(z: zipfile.ZipFile, doc: str, raw: str) -> list[str]:
+    out = []
+    for _q, href in _IMG_REF.findall(raw):
+        j = _epub_ref(z, doc, href)
+        if j and _is_page_image(j) and j not in out:
+            out.append(j)
+    return out
+
+
+def _read_doc(z: zipfile.ZipFile, name: str) -> str:
+    try:
+        return z.read(name).decode('utf-8', 'replace')
+    except Exception:
+        return ''
+
+
+def epub_is_comic(abs_path: str) -> bool:
+    """! @brief True when an epub's pages are pictures with (almost) no text: a comic
+    converted by calibre, a fixed-layout manga. A sample of the spine decides, so a
+    big novel costs a few small reads."""
+    try:
+        with zipfile.ZipFile(abs_path) as z:
+            spine = _epub_spine(z)
+            if len(spine) < 2:
+                return False
+            if len(spine) <= 12:
+                sample = spine
+            else:
+                step = len(spine) / 6
+                sample = list(dict.fromkeys(spine[:6] + [spine[int(i * step)] for i in range(6)]))
+            pictures = 0
+            for doc in sample:
+                raw = _read_doc(z, doc)
+                text = _strip_tags(_SVG_BLOCK.sub(' ', _body_of(raw)))
+                if len(text) >= 200:
+                    return False        # a page of prose: a book, even if illustrated
+                if _doc_images(z, doc, raw) and len(text) < 80:
+                    pictures += 1
+            return pictures >= 2 and pictures >= 0.6 * len(sample)
+    except Exception:
+        return False
+
+
+def epub_page_images(abs_path: str) -> list[str]:
+    """! @brief The pictures of an image epub in reading order (each spine document's
+    images); every image in the zip, naturally sorted, when the spine names none."""
+    with zipfile.ZipFile(abs_path) as z:
+        out = []
+        for doc in _epub_spine(z):
+            for j in _doc_images(z, doc, _read_doc(z, doc)):
+                if j not in out:
+                    out.append(j)
+        if not out:
+            out = sorted((n for n in z.namelist()
+                          if not n.endswith('/') and _is_page_image(n)), key=_natural_key)
+        return out
+
+
+# A flow epub's pictures are served from the book (/api/books/asset); a section's html
+# carries them as EPUB_ASSET + the quoted zip name, which the section route resolves.
+EPUB_ASSET = '__epub__/'
+
+
+def _epub_images_to_assets(z: zipfile.ZipFile, doc: str, body: str) -> str:
+    def ref(href):
+        j = _epub_ref(z, doc, href)
+        return EPUB_ASSET + _quote(j, safe='/') if j and _is_page_image(j) else None
+
+    def svg(m):
+        refs = [ref(h) for _q, h in _IMG_REF.findall(m.group(0))]
+        return ''.join(f'<img src="{r}" alt="">' for r in refs if r)
+
+    def img(m):
+        r = ref(m.group(3))
+        return m.group(1) + '"' + (r or m.group(3)) + '"'
+    body = _SVG_BLOCK.sub(svg, body)
+    return re.sub(r'(<img\b[^>]*?\ssrc\s*=\s*)(["\'])(.*?)\2', img, body, flags=re.I | re.S)
+
+
+def _doc_title(raw: str) -> str:
+    m = re.search(r'<title[^>]*>(.*?)</title>', raw or '', re.I | re.S)
+    return _strip_tags(m.group(1))[:120] if m else ''
+
+
 class ExtractResult:
     __slots__ = ('status', 'sections', 'error', 'word_count')
 
@@ -1606,38 +1738,16 @@ def _finish(sections) -> ExtractResult:
 
 def _extract_epub(path: str) -> ExtractResult:
     with zipfile.ZipFile(path) as z:
-        opf_name = _epub_opf_name(z)
-        order = []
-        if opf_name:
-            try:
-                root = ET.fromstring(z.read(opf_name))
-                base = os.path.dirname(opf_name)
-                manifest = {}
-                for el in root.iter():
-                    if el.tag == _OPF + 'item':
-                        manifest[el.get('id')] = el.get('href')
-                for el in root.iter():
-                    if el.tag == _OPF + 'itemref':
-                        href = manifest.get(el.get('idref'))
-                        j = _zip_join(base, href, z)
-                        if j:
-                            order.append(j)
-            except Exception:
-                order = []
-        if not order:
-            order = [n for n in z.namelist()
-                     if _ext(n) in ('.html', '.xhtml', '.htm')]
-            order.sort(key=_natural_key)
-
         sections = []
-        for n in order:
+        for n in _epub_spine(z):
             try:
                 raw = z.read(n).decode('utf-8', 'replace')
             except Exception:
                 continue
-            body = _body_of(raw)
-            sections.append({'title': _first_heading(body) or os.path.basename(n),
-                             'html': sanitize_html(body)})
+            body = _epub_images_to_assets(z, n, _body_of(raw))
+            title = (_first_heading(body) or _doc_title(raw)
+                     or os.path.splitext(os.path.basename(n))[0])
+            sections.append({'title': title, 'html': sanitize_html(body)})
     return _finish(sections)
 
 def _extract_opf_folder(opf_path: str) -> ExtractResult:
@@ -2020,8 +2130,9 @@ def rank_by_vector(qv: np.ndarray, rows) -> list[tuple]:
 # 10. MISC
 # ==============================================================================
 
-def reader_for(fmt: str) -> str:
-    return 'paged' if fmt in PAGED_FORMATS else 'flow'
+def reader_for(fmt: str, kind: str | None = None) -> str:
+    """! @brief 'paged' for PDFs, comic archives and comics packed as an epub."""
+    return 'paged' if fmt in PAGED_FORMATS or (fmt == 'epub' and kind == 'comic') else 'flow'
 
 def sort_title(title: str) -> str:
     """! @brief 'The Hobbit' -> 'hobbit, the' so browsing by title isn't 4000 T's."""
