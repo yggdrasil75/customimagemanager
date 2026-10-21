@@ -326,8 +326,12 @@ def missing_decoder(path: str):
 
 # Live names, recomputed through __getattr__ as modules register kinds.
 
+# Subtitle files: kept as sent beside their video (a fetcher's downloads, a section's
+# items) and moved / deleted with it when they share its name.
+SUBTITLE_EXTS = ('.srt', '.vtt', '.ass', '.ssa', '.lrc')
+
 # Sidecars that move with every asset (.tracks.json: video boxes).
-SIDECAR_EXTS = ('.txt', '.xmp', '.tracks.json')
+SIDECAR_EXTS = ('.txt', '.xmp', '.tracks.json') + SUBTITLE_EXTS
 
 _VIDEO_MIME = {
     '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm',

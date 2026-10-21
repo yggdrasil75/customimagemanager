@@ -148,18 +148,68 @@ def register(host):
             keys.update(s for s in cfg.get(k, {}) if s)
         return sorted(keys)
 
+    # -- per-download options (the Fetch dialog / Settings > Fetch defaults) --
+    _ARCHIVE = os.path.join(os.path.dirname(host.media_dir), "gdl_archive.sqlite3")
+    _IMG = "('jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'jxl', 'bmp', 'tif', 'tiff', 'heic')"
+    _VID = "('mp4', 'webm', 'mkv', 'mov', 'm4v', 'avi')"
+    OPTIONS = [
+        {"key": "media", "label": "Files", "kind": "select", "default": "all",
+         "options": [{"value": "all", "label": "Everything"},
+                     {"value": "images", "label": "Images only"},
+                     {"value": "videos", "label": "Videos only"}],
+         "help": "Which of the post's files to keep."},
+        {"key": "range", "label": "Items", "kind": "text", "default": "",
+         "placeholder": "1-50", "group": "Range",
+         "help": "Which files of a gallery / search: 1-50 | 1,3,5 | 10-. Empty: all."},
+        {"key": "filter", "label": "Filter", "kind": "text", "default": "", "group": "Range",
+         "placeholder": "width >= 1000",
+         "help": "A gallery-dl image-filter expression over the file's fields "
+                 "(see Check fields): width >= 1000 and rating == 's'."},
+        {"key": "archive", "label": "Skip files fetched before", "kind": "toggle",
+         "default": False, "group": "Library",
+         "help": "A download archive, so a watched gallery only pulls new posts "
+                 "(duplicates are caught at ingest either way)."},
+        {"key": "store_as_is", "label": "Store videos exactly as downloaded", "kind": "toggle",
+         "default": False, "group": "Library",
+         "help": "Skip the Settings > Media conversion for downloaded videos and audio "
+                 "(images still follow it)."},
+        {"key": "extra", "label": "Extra gallery-dl options", "kind": "textarea", "default": "",
+         "group": "Advanced", "placeholder": "extractor.timeout=30",
+         "help": "One key=value per line, for this download, after the site's saved options."},
+    ]
+
+    def _job_opts(o):
+        """! @brief gallery-dl key=value options for one download's choices."""
+        out = []
+        flt = [f"({o['filter'].strip()})"] if (o.get("filter") or "").strip() else []
+        if o.get("media") == "images":
+            flt.append(f"extension in {_IMG}")
+        elif o.get("media") == "videos":
+            flt.append(f"extension in {_VID}")
+        if flt:
+            out.append("extractor.image-filter=" + " and ".join(flt))
+        if (o.get("range") or "").strip():
+            out.append("extractor.image-range=" + o["range"].strip())
+        if o.get("archive"):
+            out.append("extractor.archive=" + json.dumps(_ARCHIVE))
+        out += [l.strip() for l in str(o.get("extra") or "").splitlines() if "=" in l]
+        return out
+
     # -- the fetcher ------------------------------------------------------
-    def _fetch(url, tmpdir, on_file=None):
+    def _fetch(url, tmpdir, on_file=None, options=None):
         # A sidecar that never landed (or a site that omits "category") would
         # otherwise map to no site and lose all metadata: pin the category
         # from the extractor so the saved mapping still applies.
+        o = dict(options or {})
         cat = _target_key(url)
         def _on(mpath, meta):
             meta = dict(meta or {})
             meta.setdefault("category", cat)
+            if o.get("store_as_is"):
+                meta["_store_as_is"] = True     # the core applies it to video / audio only
             if on_file:
                 on_file(mpath, meta)
-        return gdl.download(url, tmpdir, opts=_resolve_opts(url), on_file=_on)
+        return gdl.download(url, tmpdir, opts=_resolve_opts(url) + _job_opts(o), on_file=_on)
 
     def _target_key(url):
         try:
@@ -182,6 +232,7 @@ def register(host):
         "target_key": _target_key,
         "fetch": _fetch,
         "map_meta": _map_meta,
+        "options": OPTIONS,
     })
 
     # -- gallery-dl-specific config endpoints -----------------------------

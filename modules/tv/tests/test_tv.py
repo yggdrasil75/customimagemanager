@@ -197,6 +197,14 @@ def test_browse_routes(app, host, tree, client):
     st = client.get("/api/tv/status").get_json()
     assert st["success"] and st["shows"] >= 2 and st["episodes"] >= 5 and st["view"]["rows"]
     assert client.post("/api/tv/reindex", json={}).get_json()["success"]
+    # the scan runs in the background: let it end before the tree is torn down, or it
+    # re-adds rows under the next test (it raced test_rename_delete_and_sync)
+    import time
+    state = app.module_host.get_service("tv")["state"]
+    for _ in range(100):
+        if not state["indexing"]:
+            break
+        time.sleep(0.05)
 
 
 def test_rename_delete_and_sync(app, host, tree):

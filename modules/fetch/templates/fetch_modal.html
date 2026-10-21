@@ -41,7 +41,7 @@
            saved per site and applied to fetches. Secrets aren't sent back to
            the browser once saved (you'll see "on file" instead). #}
         <div class="border-t border-gray-700 pt-2" data-fetcher-only="gallerydl">
-          <label class="text-xs text-gray-400 block mb-1">Login for this site
+          <label class="text-xs text-gray-400 block mb-1">gallery-dl login for this site
             <b id="gdl_auth_site" class="text-green-400"></b></label>
           <p class="text-[10px] text-gray-600 mb-1">Set this before Check fields for API/login-only sites (e.g. reddit).</p>
           <select id="gdl_auth_method" onchange="gdlAuthMethodChange()"
@@ -92,7 +92,7 @@
       <div>
         <label class="text-xs text-gray-400 block mb-1">URLs to queue
           <span class="text-gray-600">(one per line - e.g. an artist's several blogs)</span></label>
-        <textarea id="gdl_urls" rows="3"
+        <textarea id="gdl_urls" rows="3" onblur="gdlUrlChanged()"
           placeholder="https://site-a.com/artist&#10;https://site-b.com/artist&#10;https://site-c.com/artist"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white font-mono"></textarea>
         <p class="text-[10px] text-gray-600 mt-1">
@@ -101,9 +101,29 @@
         </p>
       </div>
 
+      {# -- Fetcher and its download options --------------------------------
+         Rendered by fetch.js from the fetcher's options schema (/api/fetch/fetchers):
+         a preset, then the fields that apply to the current choices. Start from
+         Settings > Fetch defaults; "Save as defaults" writes them back. #}
+      <div class="border-t border-gray-700 pt-3">
+        <div class="flex flex-wrap items-center gap-2 mb-2">
+          <label for="fetch_fetcher" class="text-xs text-gray-400">Fetch with</label>
+          <select id="fetch_fetcher" onchange="fetchFetcherChanged()"
+            class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white"></select>
+          <label for="fetch_preset" class="text-xs text-gray-400 ml-2">Preset</label>
+          <select id="fetch_preset" onchange="fetchPresetChanged()"
+            class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white"></select>
+          <button onclick="fetchSaveDefaults()" id="fetch_save_defaults"
+            title="Make these the starting choices for this fetcher (Settings > Fetch defaults)"
+            class="ml-auto text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Save as defaults</button>
+        </div>
+        <p id="fetch_preset_help" class="text-[10px] text-gray-500 mb-1"></p>
+        <div id="fetch_opts" class="space-y-1"></div>
+      </div>
+
       <div>
         <label class="text-xs text-gray-400 block mb-1">Save into folder <span class="text-gray-600">(optional)</span></label>
-        <input id="gdl_folder" type="text" placeholder="booru/{category}/{artist}"
+        <input id="gdl_folder" type="text" placeholder="videos/{uploader}" oninput="fetchFolderChanged()"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
         <p class="text-[10px] text-gray-600 mt-1">
           <code>{field}</code> inserts any metadata field the fetcher reports (gallery-dl: see Check fields;

@@ -73,6 +73,6 @@ def register(host):
         mode = src["config"].get("edited") or "both"
         yield from run_export_folder(ctx, imp, src, tmpdir, on_file, lambda tree: takeout.items_for(tree, mode))
 
-    fetch.register({"id": "google_photos", "label": "Google Takeout", "available": lambda: True,
+    fetch.register({"id": "google_photos", "url": False, "label": "Google Takeout", "available": lambda: True,
                     "handles": lambda t: str(t).startswith("google_photos:"), "target_key": lambda t: t,
                     "fetch": _fetch, "map_meta": map_meta})

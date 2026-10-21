@@ -69,9 +69,220 @@ function _gdlStatus(msg, kind) {
     : kind === 'ok' ? 'text-green-400' : 'text-gray-400');
 }
 
+// -- fetchers and their per-download options -------------------------------------
+// /api/fetch/fetchers: [{id, label, url, available, options:[field], presets, defaults}]
+let _fetchers = [];
+let _fetchDetected = null;   // {id, label} of the fetcher the URL resolves to (auto)
+let _fetchOptVals = {};      // the options being edited, for _fetchOptFor
+let _fetchOptFor = '';       // ...which fetcher they belong to
+let _fetchPresetTouched = false;
+let _fetchSections = null;   // library section ids, for the preset a folder picks
+
+const _fById = id => _fetchers.find(f => f.id === id) || null;
+
+/** @brief True when every [key, allowed] condition holds ("!key" = not in allowed). */
+function _fetchCondOk(conds, vals) {
+  for (const [key, allowed] of conds || []) {
+    const neg = key.startsWith('!');
+    const hit = (allowed || []).some(a => String(a) === String(vals[neg ? key.slice(1) : key]));
+    if (hit === neg) return false;
+  }
+  return true;
+}
+
+/** @brief Render an options schema into `box` as labelled controls grouped under small
+ *  headings; fields whose `show` conditions fail are hidden and re-checked on
+ *  every change. Shared by the dialog and Settings > Fetch defaults.
+ *  @return a getter for the current values. */
+function fetchRenderOptions(box, schema, values, onChange) {
+  const vals = Object.assign({}, values);
+  box.innerHTML = '';
+  const rows = [];
+  let group = null;
+  for (const f of schema || []) {
+    if ((f.group || '') !== group) {
+      group = f.group || '';
+      if (group) {
+        const h = document.createElement('div');
+        h.className = 'fetch-opt-group text-[10px] uppercase tracking-wide text-gray-500 pt-2';
+        h.textContent = group;
+        h.dataset.group = group;
+        box.appendChild(h);
+      }
+    }
+    const row = document.createElement('label');
+    row.className = 'fetch-opt flex items-start gap-2 text-xs text-gray-300';
+    row.dataset.key = f.key;
+    row.title = f.help || '';
+    const lab = document.createElement('span');
+    lab.className = 'w-48 shrink-0 text-gray-400 pt-1';
+    lab.textContent = f.label || f.key;
+    row.appendChild(lab);
+    let input;
+    const cls = 'p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white placeholder-gray-500 placeholder:italic';
+    if (f.kind === 'select') {
+      input = document.createElement('select');
+      input.className = cls;
+      input.innerHTML = (f.options || []).map(o =>
+        `<option value="${_esc(o.value)}">${_esc(o.label)}</option>`).join('');
+      input.value = String(vals[f.key] ?? f.default ?? '');
+      input.addEventListener('change', () => set(f, input.value));
+    } else if (f.kind === 'toggle') {
+      input = document.createElement('input');
+      input.type = 'checkbox';
+      input.className = 'accent-green-600 mt-1.5';
+      input.checked = !!(vals[f.key] ?? f.default);
+      input.addEventListener('change', () => set(f, input.checked));
+    } else if (f.kind === 'textarea') {
+      input = document.createElement('textarea');
+      input.rows = 2;
+      input.className = cls + ' flex-1 font-mono';
+      input.value = vals[f.key] ?? f.default ?? '';
+      input.addEventListener('input', () => set(f, input.value, true));
+    } else {
+      input = document.createElement('input');
+      input.type = f.kind === 'number' ? 'number' : 'text';
+      input.className = cls + ' flex-1';
+      input.value = vals[f.key] ?? f.default ?? '';
+      input.addEventListener('input', () => set(f, input.value, true));
+    }
+    if (f.placeholder) input.placeholder = f.placeholder;
+    input.dataset.optKey = f.key;
+    input.title = f.help || '';
+    row.appendChild(input);
+    box.appendChild(row);
+    rows.push([row, f]);
+  }
+  function set(f, v, quiet) {
+    vals[f.key] = v;
+    refresh();
+    if (onChange) onChange(vals, f.key, quiet);
+  }
+  function refresh() {
+    const shownGroups = new Set();
+    for (const [row, f] of rows) {
+      const on = _fetchCondOk(f.show, vals);
+      row.classList.toggle('hidden', !on);
+      if (on) shownGroups.add(f.group || '');
+    }
+    box.querySelectorAll('.fetch-opt-group').forEach(h =>
+      h.classList.toggle('hidden', !shownGroups.has(h.dataset.group)));
+  }
+  refresh();
+  return () => Object.assign({}, vals);
+}
+
+/** @brief The fetcher the options are for: the one picked, else the URL's. */
+function _fetchEffective() {
+  const pick = document.getElementById('fetch_fetcher')?.value || '';
+  return pick || (_fetchDetected && _fetchDetected.id) || '';
+}
+
+/** @brief The library section a folder (template) is in: music, movies... or ''. */
+function _fetchSectionOf(folder) {
+  const parts = String(folder || '').split('/').filter(Boolean);
+  const ids = _fetchSections || [];
+  if (parts.length && ids.includes(parts[0])) return parts[0];
+  if (parts.length > 2 && parts[0] === 'users' && ids.includes(parts[2])) return parts[2];
+  return '';
+}
+
+/** @brief Draw the options of the effective fetcher (keeping edits for the same one). */
+function _fetchShowOptions() {
+  const fid = _fetchEffective();
+  const f = _fById(fid);
+  const box = document.getElementById('fetch_opts');
+  const psel = document.getElementById('fetch_preset');
+  const save = document.getElementById('fetch_save_defaults');
+  if (!box) return;
+  // gallery-dl's own site parts follow the effective fetcher
+  _fetchShowGdl(_fetchHasGdl && (fid === 'gallerydl' || !fid));
+  if (!f || !(f.options || []).length) {
+    box.innerHTML = f ? `<p class="text-[10px] text-gray-600">${_esc(f.label)} has no download options.</p>` : '';
+    psel.classList.add('hidden'); psel.previousElementSibling?.classList.add('hidden');
+    save.classList.add('hidden');
+    document.getElementById('fetch_preset_help').textContent = '';
+    _fetchOptFor = fid; _fetchOptVals = {};
+    return;
+  }
+  if (_fetchOptFor !== fid) {
+    _fetchOptFor = fid;
+    _fetchOptVals = Object.assign({}, f.defaults || {});
+    _fetchPresetTouched = false;
+  }
+  const presets = f.presets || [];
+  psel.innerHTML = '<option value="">Custom</option>' +
+    presets.map(p => `<option value="${_esc(p.id)}">${_esc(p.label)}</option>`).join('');
+  psel.classList.toggle('hidden', !presets.length);
+  psel.previousElementSibling?.classList.toggle('hidden', !presets.length);
+  save.classList.remove('hidden');
+  // a download into a library section starts from that section's preset (a song into Music)
+  if (!_fetchPresetTouched) {
+    const sec = _fetchSectionOf(document.getElementById('gdl_folder').value);
+    const p = sec && presets.find(x => (x.sections || []).includes(sec));
+    if (p) { Object.assign(_fetchOptVals, p.values || {}); psel.value = p.id; }
+  }
+  _fetchRedrawOptions();
+}
+
+function _fetchRedrawOptions() {
+  const f = _fById(_fetchOptFor);
+  const box = document.getElementById('fetch_opts');
+  if (!f || !box) return;
+  fetchRenderOptions(box, f.options, _fetchOptVals, vals => {
+    _fetchOptVals = vals;
+    // a hand edit leaves the preset: show Custom unless the values still match it
+    const psel = document.getElementById('fetch_preset');
+    const p = (f.presets || []).find(x => x.id === psel.value);
+    if (p && Object.entries(p.values || {}).some(([k, v]) => String(vals[k]) !== String(v))) psel.value = '';
+    _fetchPresetTouched = true;
+    _fetchPresetHelp();
+  });
+  _fetchPresetHelp();
+}
+
+function _fetchPresetHelp() {
+  const f = _fById(_fetchOptFor);
+  const id = document.getElementById('fetch_preset').value;
+  const p = f && (f.presets || []).find(x => x.id === id);
+  document.getElementById('fetch_preset_help').textContent = p ? (p.help || '') : '';
+}
+
+function fetchPresetChanged() {
+  const f = _fById(_fetchOptFor);
+  const id = document.getElementById('fetch_preset').value;
+  const p = f && (f.presets || []).find(x => x.id === id);
+  _fetchPresetTouched = true;
+  if (p) Object.assign(_fetchOptVals, p.values || {});
+  _fetchRedrawOptions();
+}
+
+function fetchFetcherChanged() {
+  _fetchShowOptions();
+}
+
+function fetchFolderChanged() {
+  if (!_fetchPresetTouched) _fetchShowOptions();
+}
+
+async function fetchSaveDefaults() {
+  const fid = _fetchOptFor;
+  if (!fid) return;
+  const r = await fetch('/api/fetch/defaults', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fetcher: fid, values: _fetchOptVals }) })
+    .then(x => x.json()).catch(() => null);
+  if (r && r.success) {
+    const i = _fetchers.findIndex(f => f.id === fid);
+    if (i >= 0) _fetchers[i] = r.fetcher;
+    _gdlStatus(`Saved as the defaults for ${r.fetcher.label}.`, 'ok');
+  } else {
+    _gdlStatus((r && r.error) || 'Could not save the defaults.', 'err');
+  }
+}
+
 /** @brief Show / hide the gallery-dl-only parts of the dialog. */
 function _fetchShowGdl(on) {
-  _fetchHasGdl = !!on;
   document.querySelectorAll('#gdl_modal [data-fetcher-only="gallerydl"]').forEach(el => {
     if (el.id === 'gdl_mapping') { if (!on) el.classList.add('hidden'); }   // shown by Check fields
     else el.classList.toggle('hidden', !on);
@@ -86,32 +297,50 @@ async function gdlOpen() {
   const f = document.getElementById('gdl_folder');
   if (!f.value) { try { f.value = localStorage.getItem('gdl_folder') || ''; } catch (_) {} }
   // which fetchers this server has: the dialog works with any of them
-  const q = await fetch('/api/fetch/queue').then(r => r.json()).catch(() => null);
-  const fetchers = (q && q.fetchers) || [];
-  _fetchShowGdl(fetchers.some(x => x.id === 'gallerydl'));
-  const on = fetchers.filter(x => x.available).map(x => x.label || x.id);
-  const off = fetchers.filter(x => !x.available);
+  const [fr, sr] = await Promise.all([
+    fetch('/api/fetch/fetchers').then(r => r.json()).catch(() => null),
+    _fetchSections ? null : fetch('/api/sections').then(r => r.json()).catch(() => null)]);
+  if (sr) _fetchSections = (sr.sections || []).map(x => x.id);
+  _fetchers = ((fr && fr.fetchers) || []).filter(x => x.url !== false);
+  _fetchHasGdl = _fetchers.some(x => x.id === 'gallerydl');
+  const on = _fetchers.filter(x => x.available);
+  const off = _fetchers.filter(x => !x.available);
   document.getElementById('fetch_fetchers').textContent =
-    on.length ? 'Fetchers: ' + on.join(', ') : '';
+    on.length ? 'Fetchers: ' + on.map(x => x.label || x.id).join(', ') : '';
   const miss = document.getElementById('gdl_missing');
   miss.innerHTML = (on.length ? '' : 'No fetcher is available on this server. ') +
     off.map(x => `${_esc(x.label || x.id)} is on but not installed` +
       (_FETCH_PIP[x.id] ? ` (<code class="bg-gray-900 px-1 rounded">pip install ${_FETCH_PIP[x.id]}</code>, then reload)` : '') + '.')
       .join(' ');
   miss.classList.toggle('hidden', !miss.innerHTML);
+  const sel = document.getElementById('fetch_fetcher');
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">Automatic (by URL)</option>' +
+    on.map(x => `<option value="${_esc(x.id)}">${_esc(x.label || x.id)}</option>`).join('');
+  sel.value = on.some(x => x.id === keep) ? keep : '';
+  _fetchShowOptions();
   gdlQueueStartPolling();
+}
+
+/** @brief The first URL in the dialog (the single box, else the list). */
+function _fetchFirstUrl() {
+  const single = document.getElementById('gdl_url').value.trim();
+  if (single) return single;
+  return (document.getElementById('gdl_urls').value.split('\n').map(x => x.trim()).filter(Boolean)[0]) || '';
 }
 
 /** @brief Under the URL box: the fetcher that will take it. */
 async function _fetchShowWho(url) {
   const el = document.getElementById('fetch_url_who');
   if (!el) return null;
-  if (!url) { el.textContent = ''; return null; }
+  if (!url) { el.textContent = ''; _fetchDetected = null; _fetchShowOptions(); return null; }
   const w = await fetch('/api/fetch/which', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target: url }) }).then(r => r.json()).catch(() => null);
+  _fetchDetected = w && w.id ? { id: w.id, label: w.label } : null;
   el.className = 'text-[10px] mt-1 ' + (w && w.label ? 'text-gray-500' : 'text-amber-400');
   el.textContent = w && w.label ? `Fetched with ${w.label}.` : 'No fetcher on this server handles this URL.';
+  _fetchShowOptions();
   return w;
 }
 
@@ -265,7 +494,7 @@ async function gdlPasteCookies() {
  */
 async function gdlUrlChanged() {
   _gdlSite = '';                                   // force re-resolve for new URL
-  const url = document.getElementById('gdl_url').value.trim();
+  const url = _fetchFirstUrl();
   const who = await _fetchShowWho(url);
   if (!url || !_fetchHasGdl || (who && who.id && who.id !== 'gallerydl')) return;
   const r = await fetch('/api/gdl/site', { method: 'POST',
@@ -380,11 +609,14 @@ async function gdlFetch() {
   // to save - saving here used to wipe the site's stored mapping.
   if (_fetchHasGdl && _gdlSite && document.querySelector('#gdl_rows .gdl-map-sel')) await gdlSaveMapping();
 
+  // the fetcher picked (none: by URL) and this download's options for it
+  const fetcher = document.getElementById('fetch_fetcher').value || '';
+  const options = _fetchOptFor && _fetchOptFor === _fetchEffective() ? _fetchOptVals : {};
   const btn = document.getElementById('gdl_fetch_btn');
   btn.disabled = true; btn.classList.add('opacity-50');
   const r = await fetch('/api/fetch/add', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ targets: urls, folder }) }).then(r => r.json()).catch(() => null);
+    body: JSON.stringify({ targets: urls, folder, fetcher, options }) }).then(r => r.json()).catch(() => null);
   btn.disabled = false; btn.classList.remove('opacity-50');
 
   if (!r || !r.success) { _gdlStatus(r?.error || 'Could not queue.', 'err'); return; }
@@ -396,7 +628,7 @@ async function gdlFetch() {
     const every_h = Math.max(1, parseFloat(document.getElementById('gdl_watch_h').value) || 24);
     const w = await fetch('/api/fetch/watch', { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: urls, folder, every_h, queued_now: true }) })
+      body: JSON.stringify({ targets: urls, folder, every_h, queued_now: true, fetcher, options }) })
       .then(r => r.json()).catch(() => null);
     msg += w?.success ? ` Watching ${w.added} (every ${every_h}h).` : ' Watch failed.';
   }
@@ -454,7 +686,8 @@ function _gdlQueueRow(it) {
   const where = it.folder ? `<div class="text-[10px] text-gray-500 truncate" title="${_esc(it.folder)}">→ ${_esc(it.folder)}</div>` : '';
   return `<div class="flex items-center gap-2 bg-gray-900/40 rounded px-2 py-1">
     <div class="flex-1 min-w-0">
-      <div class="truncate text-gray-300" title="${_esc(it.target||it.url)}">${_esc(it.target||it.url)}</div>
+      <div class="truncate text-gray-300" title="${_esc(it.target||it.url)}">${_esc(it.target||it.url)}${
+        it.fetcher ? ` <span class="text-[10px] text-gray-500">(${_esc((_fById(it.fetcher) || {}).label || it.fetcher)})</span>` : ''}</div>
       ${where}${err}
     </div>
     <span class="${color} whitespace-nowrap">${it.status}</span>
@@ -540,7 +773,42 @@ ${ws.length ? '' : '<p class="text-xs text-gray-600">No watched fetches.</p>'}
     });
   }
 
+  // -- Settings > Fetch defaults: each fetcher's starting download options -----------
+  async function renderDefaults() {
+    const pane = $('settings_pane_module_fetch_defaults');
+    if (!pane) return;
+    const r = await fetch('/api/fetch/fetchers').then(x => x.json()).catch(() => null);
+    const fs = ((r && r.fetchers) || []).filter(f => (f.options || []).length);
+    pane.innerHTML = `<p class="text-xs text-gray-400 mb-3">What each fetcher's downloads start
+      from in the Fetch dialog (a download can still change any of it). Hover a field for what it does.</p>` +
+      (fs.length ? '' : '<p class="text-xs text-gray-600">No fetcher with download options is on.</p>') +
+      fs.map(f => `<section class="mb-4 border border-gray-700 rounded p-2" data-fetcher="${_esc(f.id)}">
+        <div class="flex items-center gap-2 mb-1">
+          <h3 class="text-sm font-bold text-green-400 flex-1">${_esc(f.label)}${f.available ? '' :
+            ' <span class="text-[10px] text-amber-400 font-normal">(not installed)</span>'}</h3>
+          <button class="fd-reset text-[10px] text-gray-500 hover:text-gray-300">reset</button>
+          <button class="fd-save text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Save</button>
+        </div>
+        <div class="fd-opts space-y-1"></div>
+        <p class="fd-msg text-[10px] text-gray-500"></p></section>`).join('');
+    fs.forEach(f => {
+      const sec = pane.querySelector(`section[data-fetcher="${CSS.escape(f.id)}"]`);
+      const get = fetchRenderOptions(sec.querySelector('.fd-opts'), f.options, f.defaults);
+      const msg = t => { sec.querySelector('.fd-msg').textContent = t; };
+      sec.querySelector('.fd-save').addEventListener('click', async () => {
+        const res = await post('/api/fetch/defaults', { fetcher: f.id, values: get() });
+        msg(res && res.success ? 'Saved.' : ((res && res.error) || 'Could not save.'));
+      });
+      sec.querySelector('.fd-reset').addEventListener('click', async () => {
+        await post('/api/fetch/defaults', { fetcher: f.id, reset: true });
+        renderDefaults();
+      });
+    });
+  }
+  window.fetchRenderDefaults = renderDefaults;
+
   document.addEventListener('module-settings-tab', ev => {
     if (ev.detail === 'fetch_watch') render();
+    if (ev.detail === 'fetch_defaults') renderDefaults();
   });
 })();

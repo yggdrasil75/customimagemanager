@@ -415,6 +415,6 @@ def register(host):
                 except Exception as e:
                     host.logger.warning(f"immich: album sync for {row['rel_path']}: {e}")
 
-    fetch.register({"id": "immich", "label": "Immich", "available": lambda: True,
+    fetch.register({"id": "immich", "url": False, "label": "Immich", "available": lambda: True,
                     "handles": lambda t: str(t).startswith("immich:"), "target_key": lambda t: t,
                     "fetch": _fetch, "map_meta": map_meta})

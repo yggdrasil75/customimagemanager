@@ -4,9 +4,30 @@
 const { page, test, assert, skipUnless } = require("cim");
 const skip = skipUnless("fetch");
 
+const YT_OPTS = [
+  { key: "mode", label: "Download", kind: "select", default: "video",
+    options: [{ value: "video", label: "Video" }, { value: "audio", label: "Audio only" }] },
+  { key: "audio_format", label: "Audio format", kind: "select", default: "best", group: "Audio",
+    options: [{ value: "best", label: "Original" }, { value: "mp3", label: "MP3" }],
+    show: [["mode", ["audio"]]] },
+  { key: "subtitles", label: "Subtitles", kind: "select", default: "none", group: "Subtitles",
+    options: [{ value: "none", label: "None" }, { value: "files", label: "Files" }],
+    show: [["mode", ["video"]]] },
+  { key: "store_as_is", label: "Store as downloaded", kind: "toggle", default: true },
+];
+const YT_PRESETS = [{ id: "song", label: "Song", help: "Just the audio.", values: { mode: "audio" },
+                      sections: ["music"] }];
+
 function boot(fetchers) {
   const b = page({ modules: ["fetch"] });
+  fetchers = fetchers.map(f => Object.assign({ url: true, options: [], presets: [], defaults: {} },
+    f.id === "ytdlp" ? { options: YT_OPTS, presets: YT_PRESETS,
+      defaults: { mode: "video", audio_format: "best", subtitles: "none", store_as_is: true } } : {}, f));
   b.api.on("/api/fetch/queue", { success: true, queue: [], fetchers, paused: "" });
+  b.api.on("/api/fetch/fetchers", { success: true, fetchers });
+  b.api.on("/api/sections", { success: true, sections: [{ id: "music" }, { id: "movies" }] });
+  b.api.on("POST /api/fetch/defaults", c => ({ success: true,
+    fetcher: Object.assign({}, fetchers.find(f => f.id === c.body.fetcher), { defaults: c.body.values }) }));
   b.api.on("POST /api/fetch/which", c => String(c.body.target).includes("youtube")
     ? { success: true, id: "ytdlp", label: "yt-dlp" } : { success: true, id: null, label: null });
   b.api.on("POST /api/fetch/add", c => ({ success: true, added: c.body.targets.length,
@@ -66,4 +87,60 @@ test("gallery-dl parts show with gallery-dl on; missing tools are named", { skip
   assert.ok(!shown($("gdl_mapping")), "the mapping waits for Check fields");
   assert.ok(shown($("gdl_missing")));
   assert.match($("gdl_missing").textContent, /yt-dlp is on but not installed \(pip install yt-dlp/);
+});
+
+const optInput = (b, key) => b.document.querySelector(`#fetch_opts [data-opt-key="${key}"]`);
+const optShown = (b, key) => !optInput(b, key).closest(".fetch-opt").classList.contains("hidden");
+
+test("the URL's fetcher shows its options; the choices go with the download", { skip }, async () => {
+  const b = boot([{ id: "ytdlp", label: "yt-dlp", available: true }]);
+  const $ = id => b.document.getElementById(id);
+  await b.run("gdlOpen()");
+  await b.tick(10);
+  assert.equal(optInput(b, "mode"), null, "no options before a fetcher is known");
+  $("gdl_url").value = "https://www.youtube.com/watch?v=x";
+  await b.run("gdlUrlChanged()");
+  await b.tick(10);
+  assert.equal(optInput(b, "mode").value, "video");
+  assert.ok(optShown(b, "subtitles") && !optShown(b, "audio_format"), "fields follow the choices");
+  const sel = optInput(b, "mode");
+  sel.value = "audio";
+  sel.dispatchEvent(new b.window.Event("change"));
+  assert.ok(!optShown(b, "subtitles") && optShown(b, "audio_format"));
+  await b.run("gdlFetch()");
+  await b.tick(10);
+  const body = b.api.last("/api/fetch/add", "POST").body;
+  assert.equal(body.fetcher, "");
+  assert.deepEqual(body.options, { mode: "audio", audio_format: "best", subtitles: "none", store_as_is: true });
+});
+
+test("a download into Music starts from the Song preset; Save as defaults", { skip }, async () => {
+  const b = boot([{ id: "ytdlp", label: "yt-dlp", available: true }]);
+  const $ = id => b.document.getElementById(id);
+  await b.run("gdlOpen()");
+  await b.tick(10);
+  $("fetch_fetcher").value = "ytdlp";                       // picked by hand
+  await b.run("fetchFetcherChanged()");
+  assert.equal(optInput(b, "mode").value, "video");
+  $("gdl_folder").value = "music/{uploader}";
+  await b.run("fetchFolderChanged()");
+  assert.equal($("fetch_preset").value, "song");
+  assert.equal(optInput(b, "mode").value, "audio");
+  assert.equal($("fetch_preset_help").textContent, "Just the audio.");
+  // a hand edit leaves the preset
+  const sel = optInput(b, "mode");
+  sel.value = "video";
+  sel.dispatchEvent(new b.window.Event("change"));
+  assert.equal($("fetch_preset").value, "");
+  await b.run("fetchSaveDefaults()");
+  await b.tick(10);
+  const saved = b.api.last("/api/fetch/defaults", "POST").body;
+  assert.equal(saved.fetcher, "ytdlp");
+  assert.equal(saved.values.mode, "video");
+  $("gdl_url").value = "https://x.test/v";
+  await b.run("gdlFetch()");
+  await b.tick(10);
+  const body = b.api.last("/api/fetch/add", "POST").body;
+  assert.equal(body.fetcher, "ytdlp");
+  assert.equal(body.folder, "music/{uploader}");
 });
