@@ -111,10 +111,11 @@ def expand_path(template, meta, orig_name):
     metadata; returns (folder, filename).
 
     Keys are the (flattened) fetcher metadata keys plus `original_name`
-    (stem) and `ext`. If the template's last segment holds a placeholder it
-    names the file (missing extension -> original's); otherwise the whole
-    template is the folder and the original filename is kept. Unknown keys
-    expand to '' and empty segments are dropped.
+    (stem) and `ext`. A last segment with a placeholder AND an extension
+    ("{id}_{title}.{ext}", "{title}.mp4") names the file; otherwise the whole
+    template is folders and the original filename is kept, so
+    "music/{uploader}" is a folder per uploader, not one file named after it.
+    Unknown keys expand to '' and empty segments are dropped.
     """
     if not template or "{" not in template:
         return template or "", orig_name
@@ -127,7 +128,8 @@ def expand_path(template, meta, orig_name):
     parts = [p for p in template.replace("\\", "/").split("/") if p.strip()]
     if not parts:
         return "", orig_name
-    name_tpl = parts[-1] if "{" in parts[-1] else ""
+    last = parts[-1]
+    name_tpl = last if "{" in last and "." in _KEY_RE.sub("", last) else ""
     dirs = parts[:-1] if name_tpl else parts
     folder = "/".join(seg for seg in (_KEY_RE.sub(_sub, d) for d in dirs) if seg)
     name = orig_name
@@ -318,6 +320,7 @@ def register(host):
             db.commit()
     host.add_table(_DDL, kind="state", check=_migrate)  # fetch jobs, item ledger and watches
     host.add_asset("fetch_importers.js")
+    host.register_app_modal("fetch_modal.html")   # the Fetch dialog, for every URL fetcher
     host.add_settings_tab("fetch_watch", "Watched fetches", icon="\u23f0")
 
     # Feature: read = view the queue, write = enqueue/cancel/clear downloads.
@@ -680,7 +683,22 @@ def register(host):
             if old is None:
                 return jsonify({"success": False, "error": "no such job"}), 404
             targets, folder, fid_fixed = [old["target"]], old["folder"], old["fetcher"]
-        return jsonify({"success": True, "added": _enqueue(targets, folder, fid_fixed)})
+        # which fetcher takes each target (None: nothing on this server handles it)
+        who = {}
+        for t in targets:
+            t = (t or "").strip()
+            if t:
+                f = registry.get(fid_fixed) if fid_fixed else registry.for_target(t)
+                who[t] = (_attr(f, "label") or _attr(f, "id")) if f else None
+        return jsonify({"success": True, "added": _enqueue(targets, folder, fid_fixed),
+                        "fetchers": who})
+
+    def api_fetch_which():
+        """! @brief POST {target}: the fetcher that would take it (no download)."""
+        t = ((request.get_json(force=True, silent=True) or {}).get("target") or "").strip()
+        f = registry.for_target(t) if t else None
+        return jsonify({"success": True, "id": _attr(f, "id") if f else None,
+                        "label": (_attr(f, "label") or _attr(f, "id")) if f else None})
 
     def api_fetch_queue():
         rows = host.db().execute(
@@ -774,6 +792,8 @@ def register(host):
     host.add_route("/api/fetch/add", api_fetch_add, methods=["POST"], endpoint="fetch_add",
                    feature="fetch", level="write")
     host.add_route("/api/fetch/queue", api_fetch_queue, endpoint="fetch_queue", feature="fetch")
+    host.add_route("/api/fetch/which", api_fetch_which, methods=["POST"], endpoint="fetch_which",
+                   feature="fetch")
     host.add_route("/api/fetch/cancel", api_fetch_cancel, methods=["POST"], endpoint="fetch_cancel",
                    feature="fetch", level="write")
     host.add_route("/api/fetch/clear", api_fetch_clear, methods=["POST"], endpoint="fetch_clear",

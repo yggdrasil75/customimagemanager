@@ -8,7 +8,8 @@ place. This module owns:
     without knowing what it is;
   - the `music` library section (<media>/music and users/<name>/music, laid
     out Artist/Album/01 - Track.flac as Plex expects): audio counts as music
-    only inside it, a video never does; an image in an album folder is the
+    only inside it, and so does a video (a music video: listed and played as a
+    track, its frame as the cover); an image in an album folder is the
     album art, one in the artist folder the artist picture, a book-kind file
     (txt / md / pdf / epub ...) in either its description;
   - the `music` / `music_clusters` tables;
@@ -30,7 +31,9 @@ import random
 import re
 
 import numpy as np
-from flask import request, jsonify, send_file, has_request_context
+from urllib.parse import quote
+
+from flask import request, jsonify, send_file, has_request_context, redirect
 
 from modules.model_broker import NoProviderError
 from . import music_lib as ml
@@ -94,10 +97,17 @@ def register(host):
         """! @brief True inside a music section (public or a user's)."""
         return host.core.library_section(rel_path)[0] == "music"
 
+    def _is_video(path):
+        return bool(host.media.is_video(path))
+
+    def _is_track_file(path):
+        """! @brief Audio, or a video: what a music section lists as a track."""
+        return _is_audio(path) or _is_video(path)
+
     def _is_music(rel_path):
-        """! @brief A track: an audio file inside a music section. Audio elsewhere is
-        not music, and a video never is (AUDIO_EXTS leaves the video containers out)."""
-        return _is_audio(rel_path) and _in_section(rel_path)
+        """! @brief A track: an audio file or a music video inside a music section. Audio
+        elsewhere is not music, nor is a video outside the sections."""
+        return _is_track_file(rel_path) and _in_section(rel_path)
 
     def _book_exts():
         """! @brief The book kind's extensions (empty without the books module)."""
@@ -157,7 +167,8 @@ def register(host):
             if row and abs(row["mtime"] - mtime) < 1e-6:
                 return False
         m = ml.read_audio_metadata(abs_path)
-        has_cover = 1 if ml.read_cover(abs_path, any_image=_in_section(rel_path)) else 0
+        # a music video always has a picture: its own frame when nothing else
+        has_cover = 1 if _is_video(abs_path) or ml.read_cover(abs_path, any_image=_in_section(rel_path)) else 0
         # Index row read from the file: DB only (the tags are already in it).
         host.update_file(rel_path, table="music", dont_write=True, commit=False,
                          defaults={"tags": "[]", "created": time.time()},
@@ -191,7 +202,7 @@ def register(host):
                 for root, dirs, files in os.walk(os.path.join(host.media_dir, folder)):
                     dirs[:] = [d for d in dirs if not d.startswith('.')]
                     for f in files:
-                        if _is_audio(f):
+                        if _is_track_file(f):
                             ap = os.path.join(root, f)
                             paths.append((host.core.rel(ap), ap))
             _drop_outside()
@@ -289,6 +300,17 @@ def register(host):
 
     # -- core events -------------------------------------------------------
     def _file_index(rel_path, abs_path, force=False):
+        if _is_video(abs_path):
+            # a music video: a track inside a section, and still a video for the core
+            # (its poster, playback); outside a section only a stale row goes
+            if _in_section(rel_path):
+                try:
+                    upsert(rel_path, abs_path, force=force)
+                except Exception as e:
+                    log.error(f"music index {rel_path}: {e}")
+            elif host.db().execute("SELECT 1 FROM music WHERE rel_path=?", (rel_path,)).fetchone():
+                host.update_file(rel_path, table="music", remove=True, dont_write=True)
+            return None
         if not _is_audio(abs_path):
             return None
         if not _in_section(rel_path):
@@ -310,7 +332,7 @@ def register(host):
     def _file_renamed(old_rel, new_rel):
         """! @brief A track keeps its row inside the sections; moved out it stops being
         music, moved in it becomes one."""
-        if not _is_audio(old_rel) and not _is_audio(new_rel):
+        if not _is_track_file(old_rel) and not _is_track_file(new_rel):
             return None
         if _is_music(new_rel):
             if _is_music(old_rel):
@@ -712,9 +734,12 @@ def register(host):
         if _NO_COVER.get(filename) == mt:
             return jsonify({"success": False, "error": "no cover"}), 404
         got = ml.read_cover(fp, any_image=_in_section(filename))
+        has = 1 if got or _is_video(fp) else 0
         known = db().execute("SELECT has_cover FROM music WHERE rel_path=?", (filename,)).fetchone()
-        if known is not None and known["has_cover"] != (1 if got else 0):
-            host.update_file(filename, table="music", dont_write=True, set={"has_cover": 1 if got else 0})
+        if known is not None and known["has_cover"] != has:
+            host.update_file(filename, table="music", dont_write=True, set={"has_cover": has})
+        if not got and _is_video(fp):
+            return redirect(f"/api/thumb/{quote(filename)}")    # a music video's own frame
         if not got:
             _NO_COVER[filename] = mt
             return jsonify({"success": False, "error": "no cover"}), 404

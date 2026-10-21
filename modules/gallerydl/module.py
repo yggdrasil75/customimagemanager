@@ -308,7 +308,8 @@ def register(host):
         return jsonify({"success": True, "exif_groups": exif_groups,
                         "xmp_groups": xmp_groups})
 
-    host.register_app_modal("gdl_modal.html")
+    # the Fetch dialog belongs to the fetch module (it works without gallery-dl);
+    # its gallery-dl sections show when this fetcher is registered
     host.add_route("/api/gdl/site", api_site, methods=["POST"], endpoint="gdl_site",
                    feature="fetch", level="write")
     host.add_route("/api/gdl/sites", api_sites, methods=["GET", "POST"], endpoint="gdl_sites",

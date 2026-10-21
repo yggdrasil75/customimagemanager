@@ -139,6 +139,9 @@ def register(host):
             "progress_hooks": [_progress],
             "match_filter": _filter,
             "retries": 3, "fragment_retries": 3,
+            # title / artist / date / description into the file's own tags, so a
+            # music video in the music folder is listed under its song and artist
+            "postprocessors": [{"key": "FFmpegMetadata", "add_metadata": True}],
         }
         if cfg.get("ytdlp_archive", True):
             opts["download_archive"] = _ARCHIVE
@@ -191,6 +194,9 @@ def register(host):
 
     fetch.register({
         "id": "ytdlp", "label": "yt-dlp",
+        # the hosts listed in its setting go to yt-dlp "instead of gallery-dl",
+        # whichever module registered first (gallery-dl has extractors for some)
+        "priority": 10,
         "available": lambda: _HAVE,
         "handles": _handles,
         "target_key": _host_of,

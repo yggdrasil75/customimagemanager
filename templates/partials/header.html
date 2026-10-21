@@ -1,4 +1,4 @@
-    <div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
+<div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
       <div class="flex items-center gap-3">
         <img id="brand_logo_img" src="" alt="" class="h-7 w-7 object-contain hidden">
         <h1 id="brand_name_h1" class="text-xl font-bold text-blue-400">Media Library</h1>
@@ -7,9 +7,10 @@
         <button id="btn_dedup" onclick="runDedup(false)" data-feature="dedup"
           class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Dupes</button>
         <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic" data-feature="dedup"></span>
+        {# hidden until the fetch module's fetch.js loads (the module may be off) #}
         <button id="btn_gdl" onclick="gdlOpen()" data-feature="fetch"
-          title="Fetch media + metadata from a gallery-dl-supported site"
-          class="text-xs bg-green-700 hover:bg-green-600 font-bold px-2 py-1.5 rounded">⬇ Fetch</button>
+          title="Fetch media + metadata from a URL (gallery-dl, yt-dlp, ... whichever fetchers are on)"
+          class="hidden text-xs bg-green-700 hover:bg-green-600 font-bold px-2 py-1.5 rounded">⬇ Fetch</button>
         <button id="btn_settings"
           onclick="openSettings('general')"
           title="settings"

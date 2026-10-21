@@ -1,13 +1,25 @@
-// gallery-dl ingest UI. Talks to /api/gdl/*.
-// Flow: paste URL -> "Check fields" discovers the site's metadata fields (no
-// download) -> for EACH field pick where it goes (ignore/tags/description/
-// regions/custom) -> "Fetch" downloads and queues each file through the normal
-// upload pipeline.
+// The Fetch dialog (fetch_modal.html). Any URL goes to the fetch queue
+// (/api/fetch/*), where the fetcher that handles it (gallery-dl, yt-dlp,
+// datasets, the page scraper...) downloads it through the normal upload pipeline.
+// gallery-dl adds per-site extras, shown only while its module is on
+// (/api/gdl/*): paste URL -> "Check fields" discovers the site's metadata fields
+// (no download) -> for EACH field pick where it goes (ignore/tags/description/
+// regions/custom) -> login and raw options per site.
 
 let _gdlFields = [];   // current site's available fields
 let _gdlSite   = "";   // current site's extractor category
 let _gdlTargetOpts = null;  // cached <option> HTML for the target dropdowns
 let _gdlXmpTokens  = [];    // all XMP tokens, for the per-row datalist typeahead
+let _fetchHasGdl   = false; // the gallery-dl fetcher is registered (its module is on)
+
+// pip package of a fetcher that is on but not installed
+const _FETCH_PIP = { gallerydl: 'gallery-dl', ytdlp: 'yt-dlp' };
+
+// the header button is in the core page; show it only once this module is loaded
+(function () {
+  const show = () => document.getElementById('btn_gdl')?.classList.remove('hidden');
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', show); else show();
+})();
 
 // Base targets every field can go to. EXIF tags are appended (grouped) and an
 // "XMP property..." sentinel is added; picking it reveals a token typeahead.
@@ -57,14 +69,50 @@ function _gdlStatus(msg, kind) {
     : kind === 'ok' ? 'text-green-400' : 'text-gray-400');
 }
 
+/** @brief Show / hide the gallery-dl-only parts of the dialog. */
+function _fetchShowGdl(on) {
+  _fetchHasGdl = !!on;
+  document.querySelectorAll('#gdl_modal [data-fetcher-only="gallerydl"]').forEach(el => {
+    if (el.id === 'gdl_mapping') { if (!on) el.classList.add('hidden'); }   // shown by Check fields
+    else el.classList.toggle('hidden', !on);
+  });
+}
+
 async function gdlOpen() {
-  document.getElementById('gdl_modal').classList.remove('hidden');
+  const modal = document.getElementById('gdl_modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
   _gdlStatus('');
   const f = document.getElementById('gdl_folder');
   if (!f.value) { try { f.value = localStorage.getItem('gdl_folder') || ''; } catch (_) {} }
-  const a = await fetch('/api/gdl/available').then(r => r.json()).catch(() => null);
-  document.getElementById('gdl_missing').classList.toggle('hidden', !!a?.available);
+  // which fetchers this server has: the dialog works with any of them
+  const q = await fetch('/api/fetch/queue').then(r => r.json()).catch(() => null);
+  const fetchers = (q && q.fetchers) || [];
+  _fetchShowGdl(fetchers.some(x => x.id === 'gallerydl'));
+  const on = fetchers.filter(x => x.available).map(x => x.label || x.id);
+  const off = fetchers.filter(x => !x.available);
+  document.getElementById('fetch_fetchers').textContent =
+    on.length ? 'Fetchers: ' + on.join(', ') : '';
+  const miss = document.getElementById('gdl_missing');
+  miss.innerHTML = (on.length ? '' : 'No fetcher is available on this server. ') +
+    off.map(x => `${_esc(x.label || x.id)} is on but not installed` +
+      (_FETCH_PIP[x.id] ? ` (<code class="bg-gray-900 px-1 rounded">pip install ${_FETCH_PIP[x.id]}</code>, then reload)` : '') + '.')
+      .join(' ');
+  miss.classList.toggle('hidden', !miss.innerHTML);
   gdlQueueStartPolling();
+}
+
+/** @brief Under the URL box: the fetcher that will take it. */
+async function _fetchShowWho(url) {
+  const el = document.getElementById('fetch_url_who');
+  if (!el) return null;
+  if (!url) { el.textContent = ''; return null; }
+  const w = await fetch('/api/fetch/which', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target: url }) }).then(r => r.json()).catch(() => null);
+  el.className = 'text-[10px] mt-1 ' + (w && w.label ? 'text-gray-500' : 'text-amber-400');
+  el.textContent = w && w.label ? `Fetched with ${w.label}.` : 'No fetcher on this server handles this URL.';
+  return w;
 }
 
 /** @brief Jump to a fetch settings tab (default: Fetch sites - per-site mapping/login/options). */
@@ -218,7 +266,8 @@ async function gdlPasteCookies() {
 async function gdlUrlChanged() {
   _gdlSite = '';                                   // force re-resolve for new URL
   const url = document.getElementById('gdl_url').value.trim();
-  if (!url) return;
+  const who = await _fetchShowWho(url);
+  if (!url || !_fetchHasGdl || (who && who.id && who.id !== 'gallerydl')) return;
   const r = await fetch('/api/gdl/site', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }) }).then(r => r.json()).catch(() => null);
@@ -237,7 +286,7 @@ async function gdlUrlChanged() {
 async function _gdlResolveSite() {
   if (_gdlSite) return _gdlSite;
   const url = document.getElementById('gdl_url').value.trim();
-  if (!url) return '';
+  if (!url || !_fetchHasGdl) return '';
   const r = await fetch('/api/gdl/site', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }) }).then(r => r.json()).catch(() => null);
@@ -329,7 +378,7 @@ async function gdlFetch() {
   // If a mapping is on screen, persist it so this fetch uses the latest
   // choice. Without rows (URL pasted, Check fields skipped) there is nothing
   // to save - saving here used to wipe the site's stored mapping.
-  if (_gdlSite && document.querySelector('#gdl_rows .gdl-map-sel')) await gdlSaveMapping();
+  if (_fetchHasGdl && _gdlSite && document.querySelector('#gdl_rows .gdl-map-sel')) await gdlSaveMapping();
 
   const btn = document.getElementById('gdl_fetch_btn');
   btn.disabled = true; btn.classList.add('opacity-50');
@@ -340,6 +389,9 @@ async function gdlFetch() {
 
   if (!r || !r.success) { _gdlStatus(r?.error || 'Could not queue.', 'err'); return; }
   let msg = `Added ${r.added} download${r.added === 1 ? '' : 's'} to the queue.`;
+  const none = Object.entries(r.fetchers || {}).filter(([, who]) => !who).map(([t]) => t);
+  if (none.length) msg += ` No fetcher handles ${none.length === 1 ? none[0] : none.length + ' of them'}: ` +
+    'those will fail (turn on the fetcher module for that site, or add the host to its settings).';
   if (document.getElementById('gdl_watch').checked) {
     const every_h = Math.max(1, parseFloat(document.getElementById('gdl_watch_h').value) || 24);
     const w = await fetch('/api/fetch/watch', { method: 'POST',
@@ -348,7 +400,7 @@ async function gdlFetch() {
       .then(r => r.json()).catch(() => null);
     msg += w?.success ? ` Watching ${w.added} (every ${every_h}h).` : ' Watch failed.';
   }
-  _gdlStatus(msg, 'ok');
+  _gdlStatus(msg, none.length ? 'err' : 'ok');
   document.getElementById('gdl_urls').value = '';
   gdlQueueRefresh();
 }

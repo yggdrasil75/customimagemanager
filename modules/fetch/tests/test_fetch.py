@@ -59,3 +59,57 @@ def test_fetched_files_are_moved_into_the_spool(app, client, fake_fetcher):
     assert not any(os.path.exists(p) for p in new)          # ingested: spool files removed
     got = app._db().execute("SELECT COUNT(*) FROM files WHERE rel_path LIKE 'fetch_test/%'").fetchone()[0]
     assert got == 3
+
+def test_the_fetch_dialog_is_the_fetch_modules(app, client):
+    """! @brief The dialog is on the page with the fetch module alone (gallery-dl may be off)
+    and its gallery-dl parts are marked so they hide without that fetcher."""
+    if app.module_host.get_service("fetch") is None:
+        pytest.skip("fetch module off")
+    html = client.get("/").get_data(as_text=True)
+    assert 'id="gdl_modal"' in html and 'id="btn_gdl"' in html
+    assert html.count('data-fetcher-only="gallerydl"') >= 4
+    assert not any(m["module_id"] == "gallerydl" for m in app.module_host.app_modals)
+
+
+def test_which_and_add_name_the_fetcher(app, client, fake_fetcher):
+    w = client.post("/api/fetch/which", json={"target": "fake://x"}).get_json()
+    assert w["success"] and w["id"] == "fake_test" and w["label"] == "fake"
+    w = client.post("/api/fetch/which", json={"target": "nothing-handles-this"}).get_json()
+    assert w["success"] and w["id"] is None
+    r = client.post("/api/fetch/add", json={"targets": ["fake://y", "nothing-handles-this"]}).get_json()
+    assert r["success"] and r["added"] == 2
+    assert r["fetchers"] == {"fake://y": "fake", "nothing-handles-this": None}
+    app._db().execute("DELETE FROM fetch_queue WHERE target='nothing-handles-this'")
+    app._db().commit()
+
+
+def test_ytdlp_hosts_win_over_gallery_dl(app):
+    """! @brief A host in the yt-dlp setting goes to yt-dlp even when gallery-dl (registered
+    first, same default priority) also has an extractor for it."""
+    reg = app.module_host.get_service("fetch")
+    if reg is None or reg.get("ytdlp") is None:
+        pytest.skip("ytdlp module off")
+    yt = reg.get("ytdlp")
+    saved = dict(reg._fetchers)
+    try:
+        reg._fetchers.clear()
+        reg.register({"id": "greedy", "label": "greedy", "available": lambda: True,
+                      "handles": lambda t: True})
+        reg.register(dict(yt, available=lambda: True))
+        assert reg.for_target("https://www.youtube.com/watch?v=x")["id"] == "ytdlp"
+        assert reg.for_target("https://example.org/")["id"] == "greedy"
+    finally:
+        reg._fetchers.clear()
+        reg._fetchers.update(saved)
+
+
+def test_folder_template_names_a_file_only_with_an_extension():
+    """! @brief "music/{uploader}" is a folder per uploader (it used to name every file of
+    that uploader the same); a last segment with an extension still names the file."""
+    from modules.fetch.module import expand_path
+    m = {"uploader": "Some Artist", "title": "Song", "id": "x1"}
+    assert expand_path("music/{uploader}", m, "vid.mp4") == ("music/Some Artist", "vid.mp4")
+    assert expand_path("music/{uploader}/{title}.{ext}", m, "vid.mp4") == ("music/Some Artist", "Song.mp4")
+    assert expand_path("art/{id}_{original_name}.{ext}", m, "a.png") == ("art", "x1_a.png")
+    assert expand_path("{title}.mp4", m, "vid.webm") == ("", "Song.mp4")
+    assert expand_path("music", m, "vid.mp4") == ("music", "vid.mp4")
