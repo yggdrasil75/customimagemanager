@@ -19,6 +19,29 @@ A fetcher is a dict/object providing:
                     downloads target into tmpdir, calling
                     on_file(media_path, meta) per produced file.
     map_meta(meta)-> dict           (optional; normalize meta for ingestion)
+    priority      int, or fn(target) -> int (optional, default 0): who wins
+                    when several fetchers handle a target
+    url           bool (optional, default True): takes URLs typed into the Fetch
+                    dialog (False for library importers with their own panes)
+    options       [field] (optional): the per-download choices this fetcher
+                    offers, shown in the Fetch dialog and as its defaults in
+                    Settings > Fetch defaults. A field is {key, label, kind
+                    (select|toggle|text|number|textarea), default, options
+                    [{value, label}], help, show [[key, [values]], ...] ("!key"
+                    negates), group}.
+    check_options fn(values) -> error str | None (optional): refuse options the
+                    fetcher can't use (a bad extra command line) when queued or saved
+    presets       [{id, label, help, values, sections}] (optional): named sets
+                    of option values; `sections` (library section ids) make the
+                    dialog pick that preset for a download into such a folder.
+
+A fetcher whose fetch() takes an `options` keyword gets the job's options:
+the field defaults, overlaid with the saved defaults (Settings > Fetch
+defaults), overlaid with what the dialog sent. A produced file's meta may
+carry '_sidecar' (store it as sent next to its media: subtitles), '_store_as_is'
+(a video / audio file is kept as downloaded, not converted per Settings >
+Media) and '_name_suffix' (inserted before the extension when the folder
+template names the file: a subtitle's ".en").
 
 A fetcher whose fetch() takes a `ctx` keyword also gets a FetchContext (see
 below): a per-item LEDGER so re-runs and watches only fetch what is new
@@ -57,6 +80,7 @@ CREATE TABLE IF NOT EXISTS fetch_queue (
     attempts    INTEGER NOT NULL DEFAULT 0,
     error       TEXT DEFAULT '',
     site        TEXT DEFAULT '',                -- resolved target_key, once known
+    options     TEXT NOT NULL DEFAULT '',       -- JSON: this job's fetcher options
     created     REAL NOT NULL,
     updated     REAL NOT NULL
 );
@@ -84,6 +108,7 @@ CREATE TABLE IF NOT EXISTS fetch_watch (
     every_h     REAL NOT NULL DEFAULT 24,       -- re-fetch at most this often
     enabled     INTEGER NOT NULL DEFAULT 1,
     last_run    REAL NOT NULL DEFAULT 0,        -- when it was last queued
+    options     TEXT NOT NULL DEFAULT '',       -- JSON: the fetcher options each run uses
     created     REAL NOT NULL
 );
 """
@@ -111,10 +136,11 @@ def expand_path(template, meta, orig_name):
     metadata; returns (folder, filename).
 
     Keys are the (flattened) fetcher metadata keys plus `original_name`
-    (stem) and `ext`. If the template's last segment holds a placeholder it
-    names the file (missing extension -> original's); otherwise the whole
-    template is the folder and the original filename is kept. Unknown keys
-    expand to '' and empty segments are dropped.
+    (stem) and `ext`. A last segment with a placeholder AND an extension
+    ("{id}_{title}.{ext}", "{title}.mp4") names the file; otherwise the whole
+    template is folders and the original filename is kept, so
+    "music/{uploader}" is a folder per uploader, not one file named after it.
+    Unknown keys expand to '' and empty segments are dropped.
     """
     if not template or "{" not in template:
         return template or "", orig_name
@@ -127,7 +153,8 @@ def expand_path(template, meta, orig_name):
     parts = [p for p in template.replace("\\", "/").split("/") if p.strip()]
     if not parts:
         return "", orig_name
-    name_tpl = parts[-1] if "{" in parts[-1] else ""
+    last = parts[-1]
+    name_tpl = last if "{" in last and "." in _KEY_RE.sub("", last) else ""
     dirs = parts[:-1] if name_tpl else parts
     folder = "/".join(seg for seg in (_KEY_RE.sub(_sub, d) for d in dirs) if seg)
     name = orig_name
@@ -135,7 +162,53 @@ def expand_path(template, meta, orig_name):
         name = _KEY_RE.sub(_sub, name_tpl) or stem
         if not os.path.splitext(name)[1]:
             name += ext
+        sfx = str((meta or {}).get("_name_suffix") or "")
+        if sfx:                       # a subtitle's language: Song.en.srt beside Song.mp4
+            b, e = os.path.splitext(name)
+            name = b + sfx + e
     return folder, name
+
+
+# -- per-download options ---------------------------------------------------------
+_OPT_KINDS = ("select", "toggle", "text", "number", "textarea")
+
+
+def option_defaults(schema):
+    """! @brief {key: default} of an options schema."""
+    return {f["key"]: f.get("default") for f in (schema or []) if f.get("key")}
+
+
+def clean_options(schema, values):
+    """! @brief The values that fit the schema: known keys only, a select's value among
+    its options, toggles as bools, numbers as numbers, text as stripped strings.
+    Anything else is dropped (the default applies)."""
+    out = {}
+    if not isinstance(values, dict):
+        return out
+    for f in schema or []:
+        k = f.get("key")
+        if not k or k not in values:
+            continue
+        v, kind = values[k], f.get("kind", "text")
+        if kind == "select":
+            allowed = {str(o.get("value")) for o in f.get("options") or []}
+            if str(v) in allowed:
+                out[k] = next(o.get("value") for o in f["options"] if str(o.get("value")) == str(v))
+        elif kind == "toggle":
+            out[k] = v.strip().lower() in ("1", "true", "yes", "on") if isinstance(v, str) else bool(v)
+        elif kind == "number":
+            try:
+                n = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f.get("min") is not None:
+                n = max(float(f["min"]), n)
+            if f.get("max") is not None:
+                n = min(float(f["max"]), n)
+            out[k] = int(n) if n == int(n) else n
+        else:
+            out[k] = str(v if v is not None else "").strip() if kind == "text" else str(v or "")
+    return out
 
 
 class FetchRegistry:
@@ -169,15 +242,27 @@ class FetchRegistry:
             except Exception:
                 ok = False
             out.append({"id": self._attr(f, "id"), "label": self._attr(f, "label"),
-                        "available": ok})
+                        "available": ok, "url": self._attr(f, "url", True) is not False})
         return out
+
+    def priority_of(self, f, target):
+        """! @brief A fetcher's priority for one target (a number, or fn(target))."""
+        p = self._attr(f, "priority", 0)
+        if callable(p):
+            try:
+                p = p(target)
+            except Exception:
+                p = 0
+        try:
+            return float(p or 0)
+        except (TypeError, ValueError):
+            return 0.0
 
     def for_target(self, target):
         """! @brief The highest-priority available fetcher that handles `target`, or
-        None. `priority` (default 0) lets catch-all fetchers (page scraper)
-        sit behind specific ones regardless of module load order."""
-        ranked = sorted(self._fetchers.values(),
-                        key=lambda f: -(self._attr(f, "priority", 0) or 0))
+        None. `priority` (default 0, or fn(target)) lets catch-all fetchers (page
+        scraper) sit behind specific ones regardless of module load order."""
+        ranked = sorted(self._fetchers.values(), key=lambda f: -self.priority_of(f, target))
         for f in ranked:
             handles = self._attr(f, "handles")
             avail = self._attr(f, "available")
@@ -316,9 +401,20 @@ def register(host):
         if "message" not in cols:
             db.execute("ALTER TABLE fetch_queue ADD COLUMN message TEXT DEFAULT ''")
             db.commit()
+        for table in ("fetch_queue", "fetch_watch"):
+            cols = {r["name"] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+            if cols and "options" not in cols:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN options TEXT NOT NULL DEFAULT ''")
+                db.commit()
     host.add_table(_DDL, kind="state", check=_migrate)  # fetch jobs, item ledger and watches
     host.add_asset("fetch_importers.js")
+    host.register_app_modal("fetch_modal.html")   # the Fetch dialog, for every URL fetcher
     host.add_settings_tab("fetch_watch", "Watched fetches", icon="\u23f0")
+    # each fetcher's default download options ({fetcher id: {key: value}}), edited in
+    # Settings > Fetch defaults; a download's own choices overlay them
+    host.add_config_key("fetch_defaults", default={}, tab="fetch_defaults",
+                        validate=lambda v: v if isinstance(v, dict) else None)
+    host.add_settings_tab("fetch_defaults", "Fetch defaults", icon="\u2b07")
 
     # Feature: read = view the queue, write = enqueue/cancel/clear downloads.
     host.register_feature("fetch", "Fetch / downloads (read=view, write=queue)",
@@ -354,6 +450,47 @@ def register(host):
     def _is_canceled(qid): return qid in _cancel
     def _clear_cancel(qid): _cancel.discard(qid)
 
+    def _schema(f):
+        """! @brief A fetcher's options schema ([] when it offers none)."""
+        sc = _attr(f, "options") if f is not None else None
+        if callable(sc):
+            try:
+                sc = sc()
+            except Exception as e:
+                host.logger.error(f"fetch: options of {_attr(f, 'id')}: {e}")
+                sc = []
+        return [x for x in (sc or []) if isinstance(x, dict) and x.get("key")
+                and x.get("kind", "text") in _OPT_KINDS]
+
+    def _presets(f):
+        pr = _attr(f, "presets") if f is not None else None
+        if callable(pr):
+            try:
+                pr = pr()
+            except Exception:
+                pr = []
+        sc = _schema(f)
+        return [dict(p, values=clean_options(sc, p.get("values") or {}))
+                for p in (pr or []) if isinstance(p, dict) and p.get("id")]
+
+    def _saved_defaults(fid):
+        return dict((host.config.get("fetch_defaults") or {}).get(fid) or {})
+
+    def _job_options(f, job_opts):
+        """! @brief Field defaults < saved defaults < this job's own choices."""
+        sc = _schema(f)
+        out = option_defaults(sc)
+        out.update(clean_options(sc, _saved_defaults(_attr(f, "id") or "")))
+        out.update(clean_options(sc, job_opts or {}))
+        return out
+
+    def _loads(txt):
+        try:
+            v = json.loads(txt or "{}")
+            return v if isinstance(v, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
     def _process(job):
         """! @brief Run the job's fetcher, streaming produced files into upload_queue."""
         qid, target, folder = job["id"], job["target"], job["folder"]
@@ -362,6 +499,7 @@ def register(host):
             return False, "no fetcher handles this target"
         fetch_fn = _attr(fetcher, "fetch")
         map_meta = _attr(fetcher, "map_meta")
+        options = _job_options(fetcher, _loads(job.get("options")))
         os.makedirs(m.upload_spool_dir, exist_ok=True)
         # Download scratch lives on the spool disk: /tmp is often a small tmpfs
         # that would trip the free-space floor and pause the queue forever.
@@ -382,6 +520,10 @@ def register(host):
             if not site_seen["cat"]:
                 site_seen["cat"] = meta.get("category", "")
             packet = map_meta(meta) if callable(map_meta) else dict(meta)
+            packet = dict(packet or {})
+            for flag in ("_sidecar", "_store_as_is"):     # how the core stores this file
+                if meta.get(flag):
+                    packet[flag] = True
             if meta.get("filename"):
                 orig = _BAD_RE.sub("_", os.path.basename(str(meta["filename"]))).strip(" .") or "fetch.bin"
             else:
@@ -422,8 +564,11 @@ def register(host):
         try:
             kw = {"on_file": _on_file}
             try:
-                if "ctx" in inspect.signature(fetch_fn).parameters:
+                params = inspect.signature(fetch_fn).parameters
+                if "ctx" in params:
                     kw["ctx"] = ctx
+                if "options" in params:
+                    kw["options"] = options
             except (TypeError, ValueError):
                 pass
             gen = fetch_fn(target, tmp, **kw)
@@ -534,17 +679,19 @@ def register(host):
     def _key(job):
         return job["bucket"]
 
-    def _enqueue(targets, folder, fid_fixed=None):
+    def _enqueue(targets, folder, fid_fixed=None, options=None):
         added = 0; now = time.time()
         for t in targets:
             t = (t or "").strip()
             if not t:
                 continue
-            f = registry.for_target(t)
+            f = registry.get(fid_fixed) if fid_fixed else registry.for_target(t)
             fid = fid_fixed or (_attr(f, "id") if f else "")
+            # only the choices that differ from nothing: the defaults apply at run time
+            opts = clean_options(_schema(f), options or {}) if f is not None else {}
             host.db().execute(
-                "INSERT INTO fetch_queue(fetcher, target, folder, created, updated) "
-                "VALUES(?,?,?,?,?)", (fid or "", t, folder, now, now))
+                "INSERT INTO fetch_queue(fetcher, target, folder, options, created, updated) "
+                "VALUES(?,?,?,?,?,?)", (fid or "", t, folder, json.dumps(opts) if opts else "", now, now))
             added += 1
         host.db().commit()
         if added:
@@ -573,7 +720,7 @@ def register(host):
             rows = host.db().execute(q + " AND w.enabled=1 AND w.last_run + w.every_h*3600 <= ?",
                                      (now,)).fetchall()
         for w in rows:
-            _enqueue([w["target"]], w["folder"], w["fetcher"] or None)
+            _enqueue([w["target"]], w["folder"], w["fetcher"] or None, _loads(w["options"]))
             host.db().execute("UPDATE fetch_watch SET last_run=? WHERE id=?", (now, w["id"]))
         if rows:
             host.db().commit()
@@ -586,8 +733,8 @@ def register(host):
         reconcile(host)
 
     # -- service API used by importer modules ------------------------------
-    def _svc_enqueue(target, folder, fetcher_id):
-        return _enqueue([target], folder, fetcher_id)
+    def _svc_enqueue(target, folder, fetcher_id, options=None):
+        return _enqueue([target], folder, fetcher_id, options)
 
     def _svc_watch(target, folder, every_h, fetcher_id, enabled=True, queued_now=False):
         """! @brief Create or update the watch for `target`; every_h=None removes it."""
@@ -673,14 +820,92 @@ def register(host):
         d = request.get_json(force=True, silent=True) or {}
         targets = d.get("targets") or ([d["target"]] if d.get("target") else [])
         folder = (d.get("folder") or "").strip()
-        fid_fixed = None
-        if d.get("retry_id") is not None:       # re-run a row with its own folder/fetcher
+        # a fetcher picked in the dialog (none: each target goes to whichever handles it)
+        fid_fixed = (d.get("fetcher") or "").strip() or None
+        if fid_fixed and registry.get(fid_fixed) is None:
+            return jsonify({"success": False, "error": f"no fetcher {fid_fixed!r} on this server"}), 400
+        options = d.get("options") if isinstance(d.get("options"), dict) else {}
+        if d.get("retry_id") is not None:       # re-run a row with its own folder/fetcher/options
             old = host.db().execute("SELECT * FROM fetch_queue WHERE id=?",
                                     (int(d["retry_id"]),)).fetchone()
             if old is None:
                 return jsonify({"success": False, "error": "no such job"}), 404
-            targets, folder, fid_fixed = [old["target"]], old["folder"], old["fetcher"]
-        return jsonify({"success": True, "added": _enqueue(targets, folder, fid_fixed)})
+            targets, folder, fid_fixed = [old["target"]], old["folder"], old["fetcher"] or None
+            options = _loads(old["options"])
+        if options:
+            picked = [registry.get(fid_fixed)] if fid_fixed else \
+                [registry.for_target((t or "").strip()) for t in targets]
+            seen_ids = set()
+            for f in picked:
+                if f is None or _attr(f, "id") in seen_ids:
+                    continue
+                seen_ids.add(_attr(f, "id"))
+                err = _check(f, _job_options(f, options))
+                if err:
+                    return jsonify({"success": False, "error": err}), 400
+        # which fetcher takes each target (None: nothing on this server handles it)
+        who = {}
+        for t in targets:
+            t = (t or "").strip()
+            if t:
+                f = registry.get(fid_fixed) if fid_fixed else registry.for_target(t)
+                who[t] = (_attr(f, "label") or _attr(f, "id")) if f else None
+        return jsonify({"success": True, "added": _enqueue(targets, folder, fid_fixed, options),
+                        "fetchers": who})
+
+    def _check(f, values):
+        chk = _attr(f, "check_options")
+        try:
+            return chk(values) if callable(chk) else None
+        except Exception as e:
+            return str(e)
+
+    def _fetcher_public(f):
+        fid = _attr(f, "id") or ""
+        sc = _schema(f)
+        return {"id": fid, "label": _attr(f, "label") or fid,
+                "url": _attr(f, "url", True) is not False,
+                "available": next((x["available"] for x in registry.available_fetchers()
+                                   if x["id"] == fid), True),
+                "options": sc, "presets": _presets(f),
+                "defaults": {**option_defaults(sc), **clean_options(sc, _saved_defaults(fid))}}
+
+    def api_fetchers():
+        """! @brief GET: every fetcher with its options schema, presets and the defaults
+        a download starts from (field defaults overlaid with the saved ones)."""
+        return jsonify({"success": True, "fetchers": [_fetcher_public(f) for f in registry.all()]})
+
+    def api_defaults():
+        """! @brief POST {fetcher, values}: save that fetcher's default download options
+        ({fetcher, reset: true} goes back to the built-in defaults)."""
+        d = request.get_json(force=True, silent=True) or {}
+        f = registry.get((d.get("fetcher") or "").strip())
+        if f is None:
+            return jsonify({"success": False, "error": "unknown fetcher"}), 400
+        allv = dict(host.config.get("fetch_defaults") or {})
+        fid = _attr(f, "id")
+        if d.get("reset"):
+            allv.pop(fid, None)
+        else:
+            sc = _schema(f)
+            base = option_defaults(sc)
+            err = _check(f, {**base, **clean_options(sc, d.get("values") or {})})
+            if err:
+                return jsonify({"success": False, "error": err}), 400
+            # store only what differs from the built-in default
+            allv[fid] = {k: v for k, v in clean_options(sc, d.get("values") or {}).items()
+                         if base.get(k) != v}
+        host.set_config("fetch_defaults", allv)
+        return jsonify({"success": True, "fetcher": _fetcher_public(f)})
+
+    def api_fetch_which():
+        """! @brief POST {target}: the fetcher that would take it (no download)."""
+        t = ((request.get_json(force=True, silent=True) or {}).get("target") or "").strip()
+        f = registry.for_target(t) if t else None
+        if f is not None and _attr(f, "url", True) is False:
+            f = None
+        return jsonify({"success": True, "id": _attr(f, "id") if f else None,
+                        "label": (_attr(f, "label") or _attr(f, "id")) if f else None})
 
     def api_fetch_queue():
         rows = host.db().execute(
@@ -737,6 +962,8 @@ def register(host):
         targets = d.get("targets") or ([d["target"]] if d.get("target") else [])
         folder = (d.get("folder") or "").strip()
         every_h = max(1.0, float(d.get("every_h") or 24))
+        fid_fixed = (d.get("fetcher") or "").strip() or None
+        options = d.get("options") if isinstance(d.get("options"), dict) else {}
         # queued_now=true: the caller just queued these, so the first re-check
         # is one interval out instead of right away.
         last = now if d.get("queued_now") else 0
@@ -745,10 +972,12 @@ def register(host):
             t = (t or "").strip()
             if not t or db.execute("SELECT 1 FROM fetch_watch WHERE target=?", (t,)).fetchone():
                 continue
-            f = registry.for_target(t)
-            db.execute("INSERT INTO fetch_watch(fetcher, target, folder, every_h, last_run, created) "
-                       "VALUES(?,?,?,?,?,?)",
-                       ((_attr(f, "id") if f else "") or "", t, folder, every_h, last, now))
+            f = registry.get(fid_fixed) if fid_fixed else registry.for_target(t)
+            opts = clean_options(_schema(f), options) if f is not None else {}
+            db.execute("INSERT INTO fetch_watch(fetcher, target, folder, every_h, last_run, options, created) "
+                       "VALUES(?,?,?,?,?,?,?)",
+                       ((_attr(f, "id") if f else "") or "", t, folder, every_h, last,
+                        json.dumps(opts) if opts else "", now))
             added += 1
         db.commit()
         return jsonify({"success": True, "added": added})
@@ -774,6 +1003,11 @@ def register(host):
     host.add_route("/api/fetch/add", api_fetch_add, methods=["POST"], endpoint="fetch_add",
                    feature="fetch", level="write")
     host.add_route("/api/fetch/queue", api_fetch_queue, endpoint="fetch_queue", feature="fetch")
+    host.add_route("/api/fetch/which", api_fetch_which, methods=["POST"], endpoint="fetch_which",
+                   feature="fetch")
+    host.add_route("/api/fetch/fetchers", api_fetchers, endpoint="fetch_fetchers", feature="fetch")
+    host.add_route("/api/fetch/defaults", api_defaults, methods=["POST"], endpoint="fetch_defaults",
+                   feature="fetch", level="write")
     host.add_route("/api/fetch/cancel", api_fetch_cancel, methods=["POST"], endpoint="fetch_cancel",
                    feature="fetch", level="write")
     host.add_route("/api/fetch/clear", api_fetch_clear, methods=["POST"], endpoint="fetch_clear",

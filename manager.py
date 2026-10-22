@@ -5390,6 +5390,24 @@ def _run_upload():
             return jsonify({"success": True, "queued": False, "filename": rel_path,
                             "sidecar": True, "sha256": _sha256(out)}), 200
 
+        # how the sender wants it stored (a fetcher's downloads): '_sidecar' keeps a
+        # non-media file (a video's subtitles) as sent beside its media anywhere;
+        # '_store_as_is' keeps a video / audio file exactly as downloaded
+        req_meta = _form_metadata(fname)
+        if req_meta.get("_sidecar") and in_ext in mt.SUBTITLE_EXTS:
+            out = os.path.join(tdir, fname)
+            if os.path.exists(out):
+                rel_path = _rel(out)
+                return jsonify({"success": True, "queued": False, "duplicate": True,
+                                "filename": rel_path, "existing_file": rel_path,
+                                "existing_sha256": _sha256(out)}), 200
+            shutil.move(orig, out)
+            rel_path = _rel(out)
+            module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
+            return jsonify({"success": True, "queued": False, "filename": rel_path,
+                            "sidecar": True, "sha256": _sha256(out)}), 200
+        keep_as_is = bool(req_meta.get("_store_as_is"))
+
         # Always check the extension against the bytes: a JPEG named .png has a
         # valid-looking extension and would make cjxl fail.
         fixed_name, sniffed, sniff_status = mt.reconcile_ext(orig, fname)
@@ -5423,8 +5441,9 @@ def _run_upload():
                 os.rename(orig, new_orig)
                 orig = new_orig
 
-        # name and format per Settings > Media
-        store_name = media_encoding.stored_name(fname, orig)
+        # name and format per Settings > Media (or as downloaded, when the sender asked)
+        keep_as_is = keep_as_is and (mt.is_video(fname) or mt.is_audio(fname))
+        store_name = fname if keep_as_is else media_encoding.stored_name(fname, orig)
         store_ext  = os.path.splitext(store_name)[1].lower()
         store_path = os.path.join(tdir, store_name)
         rel_path   = _rel(store_path)
@@ -5497,9 +5516,9 @@ def _run_upload():
                 # Video, audio and books: stored as uploaded or converted to the Settings > Media
                 # target; the music and books modules index them. A video already in its
                 # container is still re-encoded / remuxed when the settings ask for it.
-                if in_ext == store_ext and not (mt.is_video(fname) and (
+                if in_ext == store_ext and (keep_as_is or not (mt.is_video(fname) and (
                         media_encoding.av_needs_work(orig, store_ext)
-                        or media_encoding.needs_browser_convert(orig))):
+                        or media_encoding.needs_browser_convert(orig)))):
                     shutil.copy(orig, out)
                 else:
                     err = (media_encoding.convert_book(orig, out) if mt.is_uploadable_book(fname)

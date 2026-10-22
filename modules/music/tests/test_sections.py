@@ -1,7 +1,7 @@
 """! @file
 @brief The music section: audio counts as music only inside <media>/music or
-users/<name>/music, a video never does (the core keeps it as a video, nothing is
-refused); album art, artist pictures and descriptions come from the folders of
+users/<name>/music, and so does a music video there (still a video for the core:
+poster, playback; a track for the Music tab); album art, artist pictures and descriptions come from the folders of
 the Plex layout (Artist/Album/track) and ride along in the album / artist replies."""
 import io
 import os
@@ -57,11 +57,16 @@ def test_audio_is_music_only_inside_a_section(app, host, tree):
     # ...but it is still a library file: the core gives it a row like any other
     app._index_file(outside, force=True)
     assert app._get_file_row(outside) is not None
-    # a video inside the section is never a track
+    # a video inside the section is a track (a music video) and still the core's to index
     clip = "music/Band/Album/live.mp4"
     ap = _write(app, clip, b"\x00" * 64)
     assert host.emit("file.index", rel_path=clip, abs_path=ap, force=True) == []
-    assert _row(app, clip) is None
+    assert _row(app, clip) is not None
+    # outside a section it is just a video
+    loose = "loose/live.mp4"
+    ap = _write(app, loose, b"\x00" * 64)
+    host.emit("file.index", rel_path=loose, abs_path=ap, force=True)
+    assert _row(app, loose) is None
 
 
 def test_moving_a_track_in_and_out(app, host, tree):
@@ -138,11 +143,25 @@ def test_album_art_and_descriptions_by_folder(app, client, host, tree):
     assert r.status_code == 200 and r.data.startswith(b"\x89PNG")
 
 
-def test_a_video_uploaded_into_the_section_is_a_video_not_a_track(app, client, tree):
-    """! @brief A music video in an album folder is accepted (nothing is refused inside
-    a section), indexed by the core as a video and never claimed as a track."""
-    rel = "music/Band/Album/clip.mkv"
-    r = client.post("/api/upload", data={"file": (io.BytesIO(b"\x00" * 64), "clip.mkv"), "mode": "sync",
+def test_a_music_video_uploaded_into_the_section_is_a_track(app, client, tree):
+    """! @brief A music video in an album folder is accepted, kept as a video by the core
+    and listed by the Music tab under the song and artist its tags carry (yt-dlp
+    writes them), with its own frame as the cover."""
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    src = os.path.join(app.MEDIA_DIR, "..", "mv_src.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1",
+                    "-f", "lavfi", "-i", "sine=d=1", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-metadata", "title=The Song", "-metadata", "artist=The Band", src],
+                   check=True)
+    try:
+        with open(src, "rb") as f:
+            data = f.read()
+    finally:
+        os.remove(src)
+    rel = "music/Band/Album/clip.mp4"
+    r = client.post("/api/upload", data={"file": (io.BytesIO(data), "clip.mp4"), "mode": "sync",
                                          "folder": "music/Band/Album"}, content_type="multipart/form-data")
     assert r.status_code == 200, r.get_data(as_text=True)
     j = r.get_json()
@@ -150,7 +169,19 @@ def test_a_video_uploaded_into_the_section_is_a_video_not_a_track(app, client, t
     assert os.path.isfile(os.path.join(app.MEDIA_DIR, rel))
     row = app.module_host.db().execute("SELECT media_kind FROM files WHERE rel_path=?", (rel,)).fetchone()
     assert row and row[0] == "video"
-    assert _row(app, rel) is None, "a video inside the section is never a track"
+    song = None
+    for _ in range(30):
+        song = next((x for x in client.get("/api/music/songs").get_json().get("songs", [])
+                     if x["rel_path"] == rel), None)
+        if song:
+            break
+        time.sleep(0.2)
+    assert song, "a music video in the section is listed as a track"
+    assert song["title"] == "The Song" and song["artist"] == "The Band" and song["duration"] > 0
+    c = client.get("/api/music/cover/" + rel)
+    assert c.status_code == 302 and c.headers["Location"].endswith("/api/thumb/" + rel)
+    assert client.get("/api/music/stream/" + rel).status_code == 200
+    client.post("/api/delete", json={"filename": rel})
     # the chunked path opens a session for it as well
     r = client.post("/api/upload/session", json={"filename": "clip2.mkv", "size": 10, "folder": "music/Band"})
     assert r.status_code == 200 and r.get_json()["success"]

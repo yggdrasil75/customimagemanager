@@ -184,7 +184,7 @@ def register(host):
             ctx.message(f"removed {n} photo(s) from iCloud that are safely here "
                         f"(in iCloud's Recently Deleted for 30 days)")
 
-    fetch.register({"id": "icloud", "label": "iCloud Photos", "available": lambda: _pyicloud()[0] is not None,
+    fetch.register({"id": "icloud", "url": False, "label": "iCloud Photos", "available": lambda: _pyicloud()[0] is not None,
                     "handles": lambda t: str(t).startswith("icloud:"), "target_key": lambda t: t,
                     "fetch": _fetch_icloud, "map_meta": map_meta})
 
@@ -205,7 +205,7 @@ def register(host):
         ctx.scope = f"{src['id']}:export"
         yield from run_export_folder(ctx, export_imp, src, tmpdir, on_file, icloud.scan)
 
-    fetch.register({"id": "apple_export", "label": "Apple data export", "available": lambda: True,
+    fetch.register({"id": "apple_export", "url": False, "label": "Apple data export", "available": lambda: True,
                     "handles": lambda t: str(t).startswith("apple_export:"), "target_key": lambda t: t,
                     "fetch": _fetch_export, "map_meta": map_meta})
     host.provide_service("apple_photos_import", {"connect": _connect, "pending": _pending})
