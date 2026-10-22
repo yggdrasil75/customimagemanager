@@ -14,6 +14,7 @@ Provides `embed.audio` with two music-specific models from the `muq` package:
 Tracks are embedded as the mean over `muq_window` s crops from the middle
 `muq_max_seconds` of the file at 24 kHz. Weights land under models/muq/embedaudio/.
 """
+import contextlib
 import threading
 
 import numpy as np
@@ -48,7 +49,74 @@ SR = 24000
 _COST_MB = {"muq_mulan": 1400, "muq": 1300}
 _CACHE = model_registry.model_dir("muq", "embed.audio")
 _lock = threading.Lock()
+_compat_lock = threading.Lock()
 _registered: set = set()
+
+
+@contextlib.contextmanager
+def _easydict_attn_compat():
+    """! @brief MuQ builds its Conformer encoder from an EasyDict, not a transformers
+    config, and newer transformers read config._attn_implementation (an EasyDict
+    raises AttributeError: "'EasyDict' object has no attribute '_attn_implementation'").
+    EasyDicts made while this is active get "eager" (EasyDict copies class attributes
+    into each instance), so the model's config keeps it after the block; other
+    EasyDicts in the process are left alone."""
+    try:
+        from easydict import EasyDict
+    except ImportError:
+        yield
+        return
+    with _compat_lock:
+        added = "_attn_implementation" not in EasyDict.__dict__
+        if added:
+            EasyDict._attn_implementation = "eager"
+        try:
+            yield
+        finally:
+            if added:
+                del EasyDict._attn_implementation
+
+
+def _hidden_states_compat(model):
+    """! @brief transformers 5's Wav2Vec2ConformerEncoder no longer returns hidden_states
+    (KeyError: 'hidden_states' inside MuQ, which reads them; MuQ-MuLan picks one
+    layer). Where the encoder's forward has no output_hidden_states of its own, wrap
+    it: the input of every layer plus the final layer-norm output are collected with
+    hooks, as transformers 4 returned them. A no-op on transformers 4."""
+    import inspect
+    try:
+        from transformers.models.wav2vec2_conformer.modeling_wav2vec2_conformer import \
+            Wav2Vec2ConformerEncoder
+    except ImportError:
+        return model
+    for enc in model.modules():
+        if not isinstance(enc, Wav2Vec2ConformerEncoder) or getattr(enc, "_cim_hs", False):
+            continue
+        orig = enc.forward
+        if "output_hidden_states" in inspect.signature(orig).parameters:
+            continue                                  # transformers 4: it has its own
+
+        def forward(hidden_states, attention_mask=None, output_hidden_states=False,
+                    _orig=orig, _enc=enc, **kw):
+            kw.pop("return_dict", None)
+            caps, hooks = [], []
+            if output_hidden_states:
+                for layer in _enc.layers:
+                    hooks.append(layer.register_forward_pre_hook(
+                        lambda m, args, kwargs: caps.append(args[0] if args else kwargs["hidden_states"]),
+                        with_kwargs=True))
+                hooks.append(_enc.layer_norm.register_forward_hook(lambda m, i, o: caps.append(o)))
+            try:
+                out = _orig(hidden_states, attention_mask=attention_mask, **kw)
+            finally:
+                for h in hooks:
+                    h.remove()
+            if output_hidden_states:
+                out["hidden_states"] = tuple(caps)
+            return out
+        enc.forward = forward
+        enc._cim_hs = True
+    return model
 
 
 def _normalise(v):
@@ -78,7 +146,9 @@ def load_crops(abs_path, max_seconds, window):
 class _Mulan:
     def __init__(self):
         self.dev = "cuda" if og.has_gpu() else "cpu"
-        self.model = MuQMuLan.from_pretrained(MULAN_ID, cache_dir=_CACHE).to(self.dev).eval()
+        with _easydict_attn_compat():
+            self.model = MuQMuLan.from_pretrained(MULAN_ID, cache_dir=_CACHE).to(self.dev).eval()
+        _hidden_states_compat(self.model)
 
     def embed_audio(self, abs_path, max_seconds, window):
         crops = load_crops(abs_path, max_seconds, window)
@@ -103,7 +173,9 @@ class _Mulan:
 class _Muq:
     def __init__(self):
         self.dev = "cuda" if og.has_gpu() else "cpu"
-        self.model = MuQ.from_pretrained(MUQ_ID, cache_dir=_CACHE).to(self.dev).eval()
+        with _easydict_attn_compat():
+            self.model = MuQ.from_pretrained(MUQ_ID, cache_dir=_CACHE).to(self.dev).eval()
+        _hidden_states_compat(self.model)
 
     def embed_audio(self, abs_path, max_seconds, window):
         crops = load_crops(abs_path, max_seconds, window)
