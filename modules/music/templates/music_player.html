@@ -53,6 +53,8 @@
     <div id="mp_queue" class="hidden w-64 flex-shrink-0 border-l border-gray-700 bg-gray-900 flex flex-col">
       <div class="px-3 py-1.5 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-b border-gray-800 flex items-center">
         <span>Up next</span><span id="mp_queue_count" class="ml-auto normal-case font-normal"></span>
+        <button onclick="musicSaveQueueAsPlaylist()" title="Save the queue as a playlist"
+          class="ml-2 normal-case font-normal text-gray-400 hover:text-white">Save</button>
       </div>
       <div id="mp_queue_list" class="flex-1 overflow-auto text-xs"></div>
     </div>

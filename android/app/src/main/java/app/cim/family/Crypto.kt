@@ -1,6 +1,5 @@
 package app.cim.family
 
-import android.util.Base64
 import org.bouncycastle.crypto.agreement.X25519Agreement
 import org.bouncycastle.crypto.digests.SHA256Digest
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
@@ -31,10 +30,15 @@ object Crypto {
     const val MAX_SKEW = 15 * 60
     private val INFO = "family_share/v1/".toByteArray()
     private val rng = SecureRandom()
-    private const val B64 = Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
+    private val B64E: java.util.Base64.Encoder = java.util.Base64.getUrlEncoder().withoutPadding()
+    private val B64D: java.util.Base64.Decoder = java.util.Base64.getUrlDecoder()
+    private val WS = Regex("\\s+")
 
-    fun b64e(b: ByteArray): String = Base64.encodeToString(b, B64)
-    fun b64d(s: String): ByteArray = try { Base64.decode(s, B64) } catch (e: Exception) { throw CryptoException("bad base64") }
+    /** @brief URL-safe base64 without "=" padding (Python: urlsafe_b64encode().rstrip("=")). */
+    fun b64e(b: ByteArray): String = B64E.encodeToString(b)
+    /** @brief Accepts the URL-safe alphabet with or without padding; whitespace (a pasted,
+     *  wrapped pairing code) is ignored, as android.util.Base64 did. */
+    fun b64d(s: String): ByteArray = try { B64D.decode(s.replace(WS, "")) } catch (e: Exception) { throw CryptoException("bad base64") }
 
     fun generatePrivateKey(): ByteArray = X25519PrivateKeyParameters(rng).encoded
     fun publicKey(priv: ByteArray): ByteArray = X25519PrivateKeyParameters(priv, 0).generatePublicKey().encoded
@@ -157,6 +161,32 @@ object Crypto {
                 i++
             }
             if (input.read() != -1) throw CryptoException("data after the final chunk")
+        }
+
+        /**
+         * @brief Opens a ranged slice of a framed stream (inbound/frames): frames
+         * first .. first+expected-1 of a file that has totalFrames frames. Exactly
+         * `expected` frames must arrive, the last flag must be set on frame
+         * totalFrames-1 and on no other, and nothing may follow; a truncated,
+         * extended, reordered or tampered slice throws CryptoException.
+         */
+        fun openFrames(input: InputStream, out: OutputStream, first: Long, expected: Int, totalFrames: Long) {
+            if (totalFrames < 1 || first < 0 || expected < 1 || first + expected > totalFrames)
+                throw CryptoException("frame range $first+$expected is outside a file of $totalFrames frames")
+            val hdr = ByteArray(4)
+            for (k in 0 until expected) {
+                val i = first + k
+                if (readFull(input, hdr) < 4) throw CryptoException("frame range truncated")
+                val n = ByteBuffer.wrap(hdr).int
+                if (n < 16 || n > CHUNK + 16) throw CryptoException("file frame has an impossible size")
+                val ct = ByteArray(n)
+                if (readFull(input, ct) < n) throw CryptoException("frame range truncated")
+                val last = i == totalFrames - 1
+                val pt = try { gcm(Cipher.DECRYPT_MODE, kFile, fileNonce(i), fileAad(i, last), ct) }
+                    catch (e: Exception) { throw CryptoException("file chunk $i failed to authenticate") }
+                out.write(pt)
+            }
+            if (input.read() != -1) throw CryptoException("data after the requested frames")
         }
 
         fun openBytes(data: ByteArray): ByteArray {

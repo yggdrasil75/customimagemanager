@@ -37,6 +37,11 @@ Plaintext pushes are refused; a peer without a pinned key never gets sent
 anything. The inbound endpoints are open to the login gate but check the
 peer key on every request; TLS on top is still a good idea (it hides who
 talks to whom) but nothing depends on it.
+
+A paired PHONE also browses its owner's library through the same sealed
+channel (PHONE_API.md): timeline / thumb / media for the gallery, and v2's
+caps, ranged frames and an allowlisted proxy to the web API (music, tv,
+movies, books), all run as the phone's account.
 """
 
 import json
@@ -48,8 +53,10 @@ import time
 import uuid
 
 import hmac
+from urllib.parse import quote, unquote
 
 from flask import g, has_request_context, jsonify, request, send_file
+from werkzeug.exceptions import HTTPException
 
 from . import share_core as sc
 from . import peer_client as pc
@@ -76,6 +83,58 @@ INBOUND_PREFIX = "/api/family_share/inbound/"
 MAX_ATTEMPTS = 6
 PLAN_CHUNK = 500            # per-path plans bigger than this become a full pass
 _ADMIN_ONLY = {"viewer": "block", "uploader": "block", "custom": "block"}
+
+# -- phone API v2 (PHONE_API.md) ------------------------------------------------
+PHONE_API = 2
+FRAMES_MAX, FRAMES_DEFAULT = 64, 4
+PROXY_MAX_BYTES = 20 << 20      # a proxied non-JSON body bigger than this must come through frames
+## @brief What the phone sees as tabs: caps key -> (module id or None for core, feature).
+CAPS_MODULES = (("gallery", None, "tab.gallery"), ("music", "music", "tab.music"),
+                ("radio", "music", "tab.music"), ("playlists", "music", "tab.music"),
+                ("tv", "tv", "tab.tv"), ("movies", "movies", "tab.movies"), ("books", "books", "tab.books"))
+## @brief Features of the modules whose files `inbound/frames` serves (any one suffices).
+FRAMES_FEATURES = ("tab.gallery", "tab.music", "tab.tv", "tab.movies", "tab.books")
+## @brief The web API a phone reaches through `inbound/api/<path>` (relative to /api/).
+# A trailing "/<path>" matches any non-empty remainder. Nothing else is reachable;
+# the route's own feature/level gate still applies, as the phone's account.
+PROXY_GET = (
+    "music/status", "music/artists", "music/albums", "music/songs", "music/genres",
+    "music/track", "music/cover/<path>", "music/radio/status", "music/playlists", "music/playlist",
+    "tv/status", "tv/shows", "tv/seasons", "tv/episodes", "tv/episode", "tv/subtitle/<path>",
+    "movies", "movies/item", "movies/genres", "movies/status", "movies/subtitle/<path>",
+    "books/status", "books/list", "books/authors", "books/series", "books/detail", "books/cover/<path>",
+)
+PROXY_POST = (
+    "music/radio/next", "music/radio/played", "music/shuffle", "music/similar",
+    "music/playlists/save", "music/playlists/delete",
+)
+
+
+def proxy_allowed(sub, method):
+    """! @brief Is /api/<sub> on the phone allowlist for this method?"""
+    sub = str(sub or "").strip("/")
+    if not sub or ".." in sub.split("/"):
+        return False
+    for pat in (PROXY_POST if method == "POST" else PROXY_GET if method == "GET" else ()):
+        if pat.endswith("/<path>"):
+            head = pat[:-len("<path>")]
+            if sub.startswith(head) and len(sub) > len(head):
+                return True
+        elif sub == pat:
+            return True
+    return False
+
+
+def _module_loaded(module_id):
+    """! @brief Is this plugin registered on this server (core when module_id is None)?"""
+    if module_id is None:
+        return True
+    try:
+        from modules import registry
+    except Exception:
+        return False
+    lm = registry._plugins.get(module_id)
+    return bool(lm is not None and lm.registered)
 
 
 def _backoff(attempts):
@@ -1425,6 +1484,166 @@ def register(host):
                 have.add(r["origin_sha"])
         return _sealed_response(peer, json.dumps({"ok": True, "have": sorted(have)}).encode(), "application/json")
     host.add_route(INBOUND_PREFIX + "have", inbound_have, methods=["POST"])
+
+    # -- phone API v2 (PHONE_API.md): caps, ranged frames, sealed API proxy ---
+    def _feature_on(key):
+        """! @brief The account holds read on `key` and this machine doesn't deny it."""
+        try:
+            import capabilities
+            if capabilities.capability_denials().get(key) is False:
+                return False
+        except Exception:
+            pass
+        return _may(key)
+
+    def inbound_caps():
+        """! @brief Sealed {api, chunk, modules, account}: which tabs the phone shows (a
+        module is on when it is loaded here AND the account may read its feature)."""
+        peer = _auth_peer()
+        if not peer:
+            return _denied()
+        if _phones_only(peer):
+            return _phones_only(peer)
+        mods = {k: bool(_module_loaded(mid) and _feature_on(feat)) for k, mid, feat in CAPS_MODULES}
+        u = g.get("user") or {}
+        name = u.get("username", "") if u.get("id") else ""
+        body = {"ok": True, "api": PHONE_API, "chunk": crypto.CHUNK, "modules": mods,
+                "account": {"username": name, "display_name": (u.get("display_name") or name) if name else ""}}
+        return _sealed_response(peer, json.dumps(body).encode(), "application/json")
+    host.add_route(INBOUND_PREFIX + "caps", inbound_caps, methods=["GET"])
+
+    def inbound_frames():
+        """! @brief Frames first .. first+count-1 of a library file, sealed with the same
+        nonce / AAD per frame as a whole stream (crypto.Sealer.iter_frame_range), so a
+        phone can seek in a track or a movie. Every module keeps its files under the
+        media folder, so one resolver serves gallery, music, tv, movies and books."""
+        peer = _auth_peer()
+        if not peer:
+            return _denied()
+        if _phones_only(peer):
+            return _phones_only(peer)
+        if not any(_may(f) for f in FRAMES_FEATURES):
+            return _forbidden("download media")
+        rel = request.args.get("p") or ""
+        fp = host.safe_path(host.media_dir, rel) if rel else None
+        if not fp or not os.path.isfile(fp) or not host.check_path(rel):
+            return jsonify({"ok": False, "error": "no such file"}), 404
+        try:
+            first = int(request.args.get("first") or 0)
+            count = int(request.args.get("count") or FRAMES_DEFAULT)
+        except ValueError:
+            return jsonify({"ok": False, "error": "first / count must be integers"}), 400
+        if first < 0:
+            return jsonify({"ok": False, "error": "first must be >= 0"}), 400
+        count = max(1, min(FRAMES_MAX, count))
+        size = os.path.getsize(fp)
+        frames = crypto.frame_count(size)
+        if first >= frames:
+            return jsonify({"ok": False, "error": "first frame is past the end of the file",
+                            "size": size, "frames": frames}), 416
+        sealer = _sealer_for(peer)
+        if sealer is None:
+            return jsonify({"ok": False, "error": "no public key pinned for this peer"}), 400
+        resp = host.app.response_class(sealer.iter_frame_range(fp, size, first, count),
+                                       mimetype="application/octet-stream")
+        resp.headers["X-Family-Env"] = json.dumps(sealer.header)
+        resp.headers["X-Family-Mime"] = host.media.mime_for(rel) or "application/octet-stream"
+        resp.headers["X-Family-Size"] = str(size)
+        resp.headers["X-Family-Frames"] = str(frames)
+        resp.headers["X-Family-First"] = str(first)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    host.add_route(INBOUND_PREFIX + "frames", inbound_frames, methods=["GET"])
+
+    def _proxy_json(status, obj):
+        return status, json.dumps(obj).encode(), "application/json"
+
+    def _proxy_body(resp):
+        """! @brief A view's Response -> (status, bytes, mime). A redirect to a thumbnail (a
+        music video's cover) is followed; any other redirect is a 404. Bodies over
+        PROXY_MAX_BYTES are refused (whole files go through frames)."""
+        status = resp.status_code
+        if 300 <= status < 400:
+            path = (resp.headers.get("Location") or "").split("?", 1)[0]
+            if path.startswith("/api/thumb/"):
+                rel = unquote(path[len("/api/thumb/"):])
+                fp = host.safe_path(host.media_dir, rel)
+                got = core.thumb_bytes(rel, fp) if fp and os.path.exists(fp) else None
+                if got is not None:
+                    return 200, got[0], got[1]
+            return _proxy_json(404, {"success": False, "error": "not found"})
+        too_big = _proxy_json(413, {"success": False, "error": "too large for the API proxy; "
+                                    "fetch the file through inbound/frames"})
+        if resp.content_length is not None and resp.content_length > PROXY_MAX_BYTES:
+            return too_big
+        out, n = [], 0
+        for part in resp.response:
+            part = part.encode("utf-8") if isinstance(part, str) else bytes(part)
+            n += len(part)
+            if n > PROXY_MAX_BYTES:
+                return too_big
+            out.append(part)
+        mime = "application/json" if resp.is_json else (resp.mimetype or "application/octet-stream")
+        return status, b"".join(out), mime
+
+    def _proxy_dispatch(sub, method, body):
+        """! @brief Run the real view for /api/<sub> in a request context of its own (path,
+        query string, JSON body) that shares this request's app context, so g.user
+        (the phone's account) and g.api_key (its scope) are what the view and its
+        require_feature gate see. -> (status, bytes, mime)."""
+        qs = request.query_string.decode("latin-1")
+        kw = {"method": method, "query_string": qs, "base_url": request.host_url}
+        if method == "POST":
+            kw["json"] = body
+        with host.app.test_request_context("/api/" + quote(sub.strip("/"), safe="/"), **kw):
+            rule = request.url_rule
+            if request.routing_exception is not None or rule is None or rule.endpoint not in host.app.view_functions:
+                return _proxy_json(404, {"success": False, "error": "not found"})
+            args = dict(request.view_args or {})
+            # The per-file gate some modules run in before_request (books) doesn't run
+            # here, so apply it to every path the call names.
+            rels = [v for v in args.values() if isinstance(v, str)]
+            rels += [request.args.get("rel_path") or "", str((body or {}).get("rel_path") or "")]
+            if any(r and not host.check_path(r) for r in rels):
+                return _proxy_json(404, {"success": False, "error": "not found"})
+            try:
+                resp = host.app.make_response(host.app.view_functions[rule.endpoint](**args))
+            except HTTPException as e:              # abort(), a bad JSON body, ...
+                return _proxy_json(e.code or 500, {"success": False, "error": e.description or e.name})
+            try:
+                return _proxy_body(resp)
+            finally:
+                resp.close()
+
+    def inbound_api(sub):
+        """! @brief The sealed proxy to the web API: /api/<sub> on the allowlist
+        (PROXY_GET / PROXY_POST), run as the phone's account; the view's answer is
+        sealed with its status and mime. A POST's JSON body is the sealed inner `body`."""
+        peer = _auth_peer()
+        if not peer:
+            return _denied()
+        if _phones_only(peer):
+            return _phones_only(peer)
+        if not proxy_allowed(sub, request.method):
+            return jsonify({"ok": False, "error": "not available to phones"}), 404
+        if not peer.get("pub_key"):
+            return jsonify({"ok": False, "error": "no public key pinned for this peer"}), 400
+        body = None
+        if request.method == "POST":
+            try:
+                inner = _sealed_request(peer)
+            except crypto.CryptoError as e:
+                return _rejected(peer, e)
+            body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
+        try:
+            status, data, mime = _proxy_dispatch(sub, request.method, body)
+        except Exception as e:
+            log.error(f"family_share: phone API {request.method} {sub}: {type(e).__name__}: {e}", exc_info=True)
+            status, data, mime = _proxy_json(500, {"success": False, "error": "internal error"})
+        resp = _sealed_response(peer, data, mime)
+        resp.status_code = status
+        return resp
+    host.add_route(INBOUND_PREFIX + "api/<path:sub>", inbound_api, methods=["GET", "POST"])
 
     # -- admin API (browser session, admin feature) -------------------------
     def _owner_rows(ids):

@@ -33,7 +33,7 @@ import re
 import numpy as np
 from urllib.parse import quote
 
-from flask import request, jsonify, send_file, has_request_context, redirect
+from flask import g, request, jsonify, send_file, has_request_context, redirect
 
 from modules.model_broker import NoProviderError
 from . import music_lib as ml
@@ -1078,8 +1078,123 @@ def register(host):
             return jsonify({"success": False, "error": err})
         return jsonify({"success": True, "songs": out})
 
+    # -- playlists: per account, ordered, duplicates allowed ------------------
+    host.add_table("""
+        CREATE TABLE IF NOT EXISTS music_playlists (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner      TEXT NOT NULL DEFAULT '',
+            name       TEXT NOT NULL,
+            created    REAL,
+            updated_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_music_playlists_owner ON music_playlists(owner);
+        CREATE TABLE IF NOT EXISTS music_playlist_items (
+            playlist_id INTEGER NOT NULL,
+            pos         INTEGER NOT NULL,
+            rel_path    TEXT NOT NULL,
+            PRIMARY KEY (playlist_id, pos)
+        );
+        CREATE INDEX IF NOT EXISTS idx_music_playlist_items_path ON music_playlist_items(rel_path);
+    """, kind="state")  # user-made lists, nowhere else
+    _PL_MAX_ITEMS = 20000
+
+    def _owner():
+        """! @brief Whose playlists: the signed-in username, '' with sign-in off."""
+        u = (getattr(g, "user", None) or {}) if has_request_context() else {}
+        return "" if u.get("source") == "disabled" else (u.get("username") or "")
+
+    def _pl_row(pid):
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return None
+        return db().execute("SELECT * FROM music_playlists WHERE id=? AND owner=?", (pid, _owner())).fetchone()
+
+    def _pl_paths(pid):
+        return [r["rel_path"] for r in db().execute(
+            "SELECT rel_path FROM music_playlist_items WHERE playlist_id=? ORDER BY pos", (pid,))]
+
+    def playlists():
+        rows = db().execute("SELECT * FROM music_playlists WHERE owner=? ORDER BY name COLLATE NOCASE, id",
+                            (_owner(),)).fetchall()
+        out = []
+        for r in rows:
+            # count / seconds over what /api/music/playlist would list for this account
+            songs_ = songs_for_ordered(_pl_paths(r["id"]))
+            out.append({"id": r["id"], "name": r["name"], "count": len(songs_),
+                        "seconds": round(sum(s_["duration"] or 0 for s_ in songs_), 1),
+                        "updated_at": r["updated_at"]})
+        return jsonify({"success": True, "playlists": out})
+
+    def playlist():
+        r = _pl_row(request.args.get("id"))
+        if r is None:
+            return jsonify({"success": False, "error": "no such playlist"}), 404
+        return jsonify({"success": True, "playlist": {"id": r["id"], "name": r["name"], "updated_at": r["updated_at"]},
+                        "songs": songs_for_ordered(_pl_paths(r["id"]))})
+
+    def playlist_save():
+        d = request.get_json(silent=True) or {}
+        name = str(d.get("name") or "").strip()[:200]
+        items = d.get("items")
+        if not name:
+            return jsonify({"success": False, "error": "name required"}), 400
+        if items is not None and not isinstance(items, list):
+            return jsonify({"success": False, "error": "items must be a list of rel_paths"}), 400
+        if items is not None and len(items) > _PL_MAX_ITEMS:
+            return jsonify({"success": False, "error": f"at most {_PL_MAX_ITEMS} items"}), 400
+        now = time.time()
+        conn = db()
+        if d.get("id") not in (None, ""):
+            r = _pl_row(d.get("id"))
+            if r is None:
+                return jsonify({"success": False, "error": "no such playlist"}), 404
+            pid = r["id"]
+            conn.execute("UPDATE music_playlists SET name=?, updated_at=? WHERE id=?", (name, now, pid))
+        else:
+            pid = conn.execute("INSERT INTO music_playlists(owner, name, created, updated_at) VALUES(?,?,?,?)",
+                               (_owner(), name, now, now)).lastrowid
+        if items is not None:
+            # a path this account can't see is dropped, not stored
+            paths = [p for p in (str(x or "").strip() for x in items) if p and host.check_path(p)]
+            conn.execute("DELETE FROM music_playlist_items WHERE playlist_id=?", (pid,))
+            conn.executemany("INSERT INTO music_playlist_items(playlist_id, pos, rel_path) VALUES(?,?,?)",
+                             [(pid, i, p) for i, p in enumerate(paths)])
+        conn.commit()
+        return jsonify({"success": True, "id": pid})
+
+    def playlist_delete():
+        r = _pl_row((request.get_json(silent=True) or {}).get("id"))
+        if r is None:
+            return jsonify({"success": False, "error": "no such playlist"}), 404
+        db().execute("DELETE FROM music_playlist_items WHERE playlist_id=?", (r["id"],))
+        db().execute("DELETE FROM music_playlists WHERE id=?", (r["id"],))
+        db().commit()
+        return jsonify({"success": True})
+
+    def _pl_renamed(old_rel, new_rel):
+        try:
+            db().execute("UPDATE music_playlist_items SET rel_path=? WHERE rel_path=?", (new_rel, old_rel))
+            db().commit()
+        except Exception as e:
+            log.error(f"music playlists: rename {old_rel}: {e}")
+    host.on("file.renamed", _pl_renamed)
+
+    def _pl_deleted(rel_path):
+        try:
+            db().execute("DELETE FROM music_playlist_items WHERE rel_path=?", (rel_path,))
+            db().commit()
+        except Exception as e:
+            log.error(f"music playlists: delete {rel_path}: {e}")
+    host.on("file.deleted", _pl_deleted)
+
     R, W = "read", "write"
     for rule, fn, methods, level in (
+        # playlists are the account's own lists, like radio plays: read on tab.music
+        # (write on it means editing the library's tags)
+        ("/api/music/playlists", playlists, ["GET"], R), ("/api/music/playlist", playlist, ["GET"], R),
+        ("/api/music/playlists/save", playlist_save, ["POST"], R),
+        ("/api/music/playlists/delete", playlist_delete, ["POST"], R),
         ("/api/music/status", status, ["GET"], R), ("/api/music/reindex", reindex, ["POST"], W),
         ("/api/music/embed", embed, ["POST"], W), ("/api/music/cluster", cluster, ["POST"], W),
         ("/api/music/clusterlist", clusterlist, ["GET"], R), ("/api/music/artists", artists, ["GET"], R),

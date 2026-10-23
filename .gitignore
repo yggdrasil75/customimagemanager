@@ -23,7 +23,7 @@ tests/js/_module_assets.json
 android/keystore/
 imports/
 static/tailwind.css
-tools/
+/tools/
 # native_build.py output (compiled helper modules); the .py files are the source
 *.so
 *.pyd

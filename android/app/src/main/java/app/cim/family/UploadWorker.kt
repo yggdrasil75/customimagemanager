@@ -86,7 +86,7 @@ object Scanner {
 class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
         val ctx = applicationContext
-        val prefs = Prefs(ctx)
+        val prefs = Prefs.get(ctx)
         val db = Db(ctx)
         try {
             if (!prefs.paired || prefs.paused) return Result.success()

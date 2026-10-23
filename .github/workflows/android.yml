@@ -1,0 +1,151 @@
+# The CIM Family Android app (android/): compile + JVM unit tests on every change,
+# an APK as a run artifact, and on v* tags the APK attached to the release.
+#
+#   * `gradle testDebugUnitTest assembleDebug` always: the compile test plus the
+#     pure-JVM tests in android/app/src/test (Crypto.kt against vectors sealed by
+#     modules/family_share/crypto.py - regenerate with android/tools/gen_vectors.py).
+#   * lintDebug runs but never fails the job.
+#
+# Signing - READ THIS: a phone only installs an update signed with the SAME key as
+# the installed app. Your server's android/build.sh generated that key on its first
+# build (android/keystore/release.jks, gitignored). For CI-built APKs to update
+# phones that installed the server-built one, give CI that same keystore as repo
+# secrets (Settings -> Secrets and variables -> Actions -> New repository secret):
+#
+#   ANDROID_KEYSTORE_B64       base64 -w0 android/keystore/release.jks   (macOS: base64 -i ... | tr -d '\n')
+#   ANDROID_KEYSTORE_PASSWORD  storePassword= from android/keystore/keystore.properties
+#   ANDROID_KEY_ALIAS          keyAlias=      from the same file (build.sh uses "cim")
+#   ANDROID_KEY_PASSWORD       keyPassword=   from the same file (build.sh: same as storePassword)
+#
+# e.g. on the server install:  base64 -w0 android/keystore/release.jks | gh secret set ANDROID_KEYSTORE_B64
+#                               cat android/keystore/keystore.properties
+# (Passwords are written into keystore.properties verbatim; build.sh's are base64
+# letters/digits. A password containing a backslash would need escaping there.)
+#
+# Without the secrets (forks, pull requests from forks, a fresh repo) the release
+# build is skipped and the DEBUG APK is published instead: fine for trying the app
+# on a phone without it, but it will NOT install over a release-signed install.
+#
+# versionCode: the build time in UTC as YYYYMMDDHH - the same scheme as build.sh
+# (`date +%Y%m%d%H`), so CI and server builds interleave by time, every new build
+# is above everything built before it, and it stays far below Android's limit
+# (2100000000) until year 2100. Build time rather than commit time: a re-run or an
+# old tag must not produce a lower code than an APK already on a phone.
+# versionName: <VERSION file>-<short sha>.
+name: android
+on:
+  push:
+    branches: [main, dev]
+    tags: ["v*"]
+    paths:
+      - "android/**"
+      - "modules/family_share/crypto.py"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - "modules/family_share/crypto.py"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_B64 != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_PASSWORD != '' }}
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      # no wrapper in the repo: setup-gradle provides Gradle 8.9 (what build.sh uses) and caches ~/.gradle
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: "8.9"
+      - name: Android SDK (platform 34, build-tools 34.0.0)
+        run: |
+          : "${ANDROID_HOME:=${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || { echo "::error::no sdkmanager at $SDKM"; exit 1; }
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" --install "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null
+      - name: version
+        id: v
+        run: |
+          code="$(date -u +%Y%m%d%H)"
+          name="$(tr -d '[:space:]' < ../VERSION)-$(git rev-parse --short HEAD)"
+          echo "CIM_APP_VERSION_CODE=$code" >> "$GITHUB_ENV"
+          echo "CIM_APP_VERSION_NAME=$name" >> "$GITHUB_ENV"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "versionName $name, versionCode $code"
+      - name: compile + unit tests (debug)
+        run: gradle --no-daemon --stacktrace testDebugUnitTest assembleDebug
+      - name: unit test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-unit-test-reports
+          path: |
+            android/app/build/reports/tests/
+            android/app/build/test-results/
+          if-no-files-found: ignore
+      - name: lint (non-blocking)
+        continue-on-error: true
+        run: gradle --no-daemon lintDebug
+      - name: lint report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-lint-report
+          path: android/app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore
+      - name: release keystore (from secrets)
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p keystore
+          printf '%s' "$KS_B64" | base64 -d > keystore/release.jks
+          # same format build.sh writes and app/build.gradle.kts reads
+          printf 'storeFile=release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$KS_PASS" "$KEY_ALIAS" "$KEY_PASS" > keystore/keystore.properties
+          chmod 600 keystore/release.jks keystore/keystore.properties
+          keytool -list -keystore keystore/release.jks -storepass "$KS_PASS" -alias "$KEY_ALIAS" > /dev/null \
+            || { echo "::error::ANDROID_KEYSTORE_* secrets: keystore does not open with that password/alias"; exit 1; }
+      - name: release APK (signed with your key)
+        if: env.HAS_KEYSTORE == 'true'
+        run: |
+          gradle --no-daemon assembleRelease
+          apk=app/build/outputs/apk/release/app-release.apk
+          [ -f "$apk" ] || { echo "::error::$apk missing (unsigned? check keystore.properties)"; ls -R app/build/outputs/apk; exit 1; }
+          cp "$apk" "../cim-family-${{ steps.v.outputs.name }}.apk"
+          rm -rf keystore
+      - name: debug APK (no signing secrets)
+        if: env.HAS_KEYSTORE != 'true'
+        run: |
+          echo "::warning title=Debug-signed APK::No ANDROID_KEYSTORE_B64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD secrets, so this run publishes the DEBUG APK. Phones only update over an APK signed with the same key: this one will not install over the app built by your server's android/build.sh. Add those four repo secrets from your server's android/keystore/ (release.jks base64-encoded + the values in keystore.properties; see the comment at the top of .github/workflows/android.yml) to get release APKs that update existing installs."
+          cp app/build/outputs/apk/debug/app-debug.apk "../cim-family-${{ steps.v.outputs.name }}.apk"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cim-family-apk
+          path: cim-family-${{ steps.v.outputs.name }}.apk
+          if-no-files-found: error
+      - name: release asset
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: cim-family-${{ steps.v.outputs.name }}.apk

@@ -33,6 +33,7 @@ let _musicSearchTimer = null;
 let _musicEditSong = null;    // the song the Track tab shows
 let _musicPrevFile = null;    // the image the player replaced in the centre
 let _musicStatus = null;
+let _musicPlaylist = null;    // the open playlist (Playlists view): {id, name, songs}
 
 const MUSIC_PER_PAGE = 200;
 
@@ -48,6 +49,7 @@ const MUSIC_SORTS = {
   genres:   [['genre', 'Name'], ['tracks', 'Track count'], ['albums', 'Album count'],
              ['added', 'Recently added']],
   clusters: [['size', 'Size'], ['label', 'Name']],
+  playlists: [['name', 'Name']],
 };
 const _musicSortState = {};   // view -> {key, desc}
 (function () {
@@ -193,7 +195,7 @@ async function musicCluster() {
  * ========================================================================== */
 
 function _setTab(view) {
-  ['albums', 'artists', 'songs', 'genres', 'clusters'].forEach(v => {
+  ['albums', 'artists', 'songs', 'genres', 'clusters', 'playlists'].forEach(v => {
     const b = _mq('mtab_' + v);
     if (b) b.className = 'px-3 py-1 ' + (v === view ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600');
   });
@@ -219,6 +221,7 @@ function _syncSortUi() {
 /** @brief Switch the list's view. Drill-down filters stay (they narrow every view)
  *  until cleared from the filter chips; a special list (similar / radio) ends. */
 function musicView(view) {
+  if (view !== 'playlists' || musicCurrentView !== 'playlists') _musicPlaylist = null;
   musicCurrentView = view;
   musicPageNum = 0;
   musicListLabel = ''; musicSimilarSeed = '';
@@ -274,6 +277,7 @@ function musicReload(quiet) {
   if (v === 'artists') return loadArtists(quiet);
   if (v === 'genres') return loadGenres(quiet);
   if (v === 'clusters') return loadClusters(quiet);
+  if (v === 'playlists') return loadPlaylists(quiet);
   return loadSongs(quiet);
 }
 function refreshCurrentView() { musicReload(true); }
@@ -486,6 +490,151 @@ async function loadClusters(quiet) {
       </div>`).join('');
 }
 
+// -- playlists: the account's own ordered lists (duplicates allowed) -------------------
+async function loadPlaylists(quiet) {
+  const el = _mq('music_list'); _loading(el, quiet);
+  _pager(false);
+  if (_musicPlaylist) return _openPlaylist(_musicPlaylist.id, quiet);
+  const d = await fetch('/api/music/playlists').then(r => r.json()).catch(() => null);
+  if (!d || !d.success) { el.innerHTML = '<div class="text-red-400 p-1">Failed.</div>'; return; }
+  const q = (_mq('music_search')?.value || '').trim().toLowerCase();
+  const lists = d.playlists.filter(p => !q || p.name.toLowerCase().includes(q));
+  const st = _musicSortState.playlists;
+  if (st && st.desc) lists.reverse();
+  el.innerHTML = `<div class="flex items-center gap-2 mb-2">
+      <span class="text-[10px] text-gray-500">${lists.length} playlist(s)</span>
+      <button onclick="musicNewPlaylist()" class="ml-auto text-[10px] bg-blue-600 hover:bg-blue-500 font-bold px-2 py-1 rounded">+ New playlist</button>
+    </div>` + (lists.length ? lists.map(p => `
+      <div onclick="_openPlaylist(${p.id})"
+           class="group px-2 py-1.5 rounded hover:bg-gray-800 cursor-pointer flex items-center gap-3 border-b border-gray-800">
+        <div class="w-10 h-10 flex-shrink-0 rounded flex items-center justify-center text-white/70"
+             style="background:${musicTint('p' + p.name)}">☰</div>
+        <div class="min-w-0 flex-1">
+          <div class="text-sm truncate">${escHtml(p.name)}</div>
+          <div class="text-[10px] text-gray-500">${p.count} tracks | ${fmtLong(p.seconds)}</div>
+        </div>
+        <button onclick="event.stopPropagation();musicPlayPlaylist(${p.id})" title="Play"
+          class="w-7 h-7 rounded-full bg-blue-600 hover:bg-blue-500 text-xs opacity-0 group-hover:opacity-100">▶</button>
+      </div>`).join('')
+      : `<div class="text-gray-500 text-sm p-1 leading-relaxed">No playlists yet.<br><span class="text-gray-600">
+         Press <b>+</b> on a track (or <b>Save</b> on the player's up-next list) to start one.</span></div>`);
+}
+
+async function _fetchPlaylist(id) {
+  const d = await fetch('/api/music/playlist?id=' + encodeURIComponent(id)).then(r => r.json()).catch(() => null);
+  return d && d.success ? { id: d.playlist.id, name: d.playlist.name, songs: d.songs } : null;
+}
+
+async function _openPlaylist(id, quiet) {
+  const el = _mq('music_list');
+  if (!quiet) _loading(el);
+  const pl = await _fetchPlaylist(id);
+  if (!pl) { _musicPlaylist = null; showToastM('Playlist not found.'); return loadPlaylists(); }
+  _musicPlaylist = pl;
+  musicListSongs = pl.songs;
+  const playing = musicQueue[musicQueueIdx];
+  const btn = 'text-xs text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 px-1';
+  el.innerHTML = `<div class="flex items-center gap-2 mb-2 flex-wrap">
+      <button onclick="_musicPlaylist=null;loadPlaylists()" class="text-[11px] text-blue-400 hover:underline">‹ Playlists</button>
+      <span class="text-sm font-bold truncate">${escHtml(pl.name)}</span>
+      <span class="text-[10px] text-gray-500">${pl.songs.length} tracks | ${fmtLong(pl.songs.reduce((a, s) => a + (s.duration || 0), 0))}</span>
+      <span class="ml-auto"></span>
+      <button onclick="musicPlayPlaylist(${pl.id})" class="text-[10px] bg-blue-600 hover:bg-blue-500 font-bold px-2 py-1 rounded">▶ Play</button>
+      <button onclick="musicPlayPlaylist(${pl.id}, true)" class="text-[10px] bg-gray-700 hover:bg-gray-600 font-bold px-2 py-1 rounded">⇄ Shuffle</button>
+      <button onclick="musicRenamePlaylist()" class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Rename</button>
+      <button onclick="musicDeletePlaylist()" class="text-[10px] bg-red-800 hover:bg-red-700 px-2 py-1 rounded">Delete</button>
+    </div>` + (pl.songs.length ? pl.songs.map((s, i) => {
+      const cur = !!playing && playing.rel_path === s.rel_path;
+      return `<div onclick="musicPlay(_musicPlaylist.songs.slice(), ${i}, ${jsArg(pl.name)})"
+          class="group px-2 py-1 rounded hover:bg-gray-800 cursor-pointer flex items-center gap-2 border-b border-gray-800 text-sm ${cur ? 'bg-blue-900/40' : ''}">
+        <span class="w-6 text-right text-gray-500 tabular-nums text-xs">${i + 1}</span>
+        <div class="w-7 h-7 flex-shrink-0">${musicCoverBox(s.has_cover === false ? '' : s.rel_path, s.album + songArtist(s), '♪')}</div>
+        <div class="min-w-0 flex-1">
+          <div class="truncate ${cur ? 'text-blue-300' : ''}">${escHtml(s.title)}</div>
+          <div class="text-[10px] text-gray-500 truncate">${escHtml([songArtist(s), s.album].filter(Boolean).join(' - '))}</div>
+        </div>
+        <span class="text-[10px] text-gray-500 tabular-nums">${fmtDur(s.duration)}</span>
+        <button onclick="event.stopPropagation();musicMovePlaylistItem(${i}, -1)" title="Move up" class="${btn}">↑</button>
+        <button onclick="event.stopPropagation();musicMovePlaylistItem(${i}, 1)" title="Move down" class="${btn}">↓</button>
+        <button onclick="event.stopPropagation();musicMovePlaylistItem(${i}, 0)" title="Remove from the playlist"
+          class="text-xs text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 px-1">✕</button>
+      </div>`;
+    }).join('') : '<div class="text-gray-500 text-sm p-1">Empty. Press <b>+</b> on a track to add it.</div>');
+}
+
+async function _savePlaylist(body) {
+  const d = await _musicPost('/api/music/playlists/save', body);
+  if (!d.success) showToastM(d.error || 'Could not save the playlist.');
+  return d.success ? d.id : null;
+}
+
+async function musicNewPlaylist(items) {
+  const name = (prompt('New playlist name:') || '').trim();
+  if (!name) return null;
+  const id = await _savePlaylist({ name, items: items || [] });
+  if (id != null && musicCurrentView === 'playlists' && !_musicPlaylist) loadPlaylists(true);
+  return id;
+}
+
+/** @brief Append tracks to a playlist picked by name (a new name makes a new list). */
+async function musicAddToPlaylist(rels) {
+  const d = await fetch('/api/music/playlists').then(r => r.json()).catch(() => null);
+  const lists = (d && d.success) ? d.playlists : [];
+  const hint = lists.length ? '\nExisting: ' + lists.map(p => p.name).join(', ') : '';
+  const name = (prompt('Add to playlist (an existing name, or a new one):' + hint, lists[0] ? lists[0].name : '') || '').trim();
+  if (!name) return;
+  const hit = lists.find(p => p.name.toLowerCase() === name.toLowerCase());
+  let items = rels.slice();
+  if (hit) {
+    const pl = await _fetchPlaylist(hit.id);
+    if (!pl) { showToastM('Playlist not found.'); return; }
+    items = pl.songs.map(s => s.rel_path).concat(rels);
+  }
+  const id = await _savePlaylist(hit ? { id: hit.id, name: hit.name, items } : { name, items });
+  if (id == null) return;
+  showToastM(`Added ${rels.length} track(s) to "${hit ? hit.name : name}".`);
+  if (musicCurrentView === 'playlists') musicReload(true);
+}
+
+function musicSaveQueueAsPlaylist() {
+  if (!musicQueue.length) { showToastM('The queue is empty.'); return; }
+  musicNewPlaylist(musicQueue.map(s => s.rel_path)).then(id => { if (id != null) showToastM('Queue saved as a playlist.'); });
+}
+
+async function musicPlayPlaylist(id, shuffle) {
+  const pl = await _fetchPlaylist(id);
+  if (!pl || !pl.songs.length) { showToastM('Nothing to play.'); return; }
+  musicPlay(shuffle ? _shuffled(pl.songs) : pl.songs, 0, pl.name + (shuffle ? ' (shuffled)' : ''));
+}
+
+/** @brief Reorder (delta -1 / +1) or remove (delta 0) one item of the open playlist. */
+async function musicMovePlaylistItem(i, delta) {
+  const pl = _musicPlaylist; if (!pl) return;
+  const items = pl.songs.map(s => s.rel_path);
+  if (delta === 0) items.splice(i, 1);
+  else {
+    const j = i + delta;
+    if (j < 0 || j >= items.length) return;
+    [items[i], items[j]] = [items[j], items[i]];
+  }
+  if (await _savePlaylist({ id: pl.id, name: pl.name, items }) != null) _openPlaylist(pl.id, true);
+}
+
+async function musicRenamePlaylist() {
+  const pl = _musicPlaylist; if (!pl) return;
+  const name = (prompt('Rename playlist:', pl.name) || '').trim();
+  if (!name || name === pl.name) return;
+  if (await _savePlaylist({ id: pl.id, name }) != null) _openPlaylist(pl.id, true);
+}
+
+async function musicDeletePlaylist() {
+  const pl = _musicPlaylist; if (!pl) return;
+  if (!confirm(`Delete the playlist "${pl.name}"? The tracks stay in the library.`)) return;
+  const d = await _musicPost('/api/music/playlists/delete', { id: pl.id });
+  if (!d.success) { showToastM(d.error || 'Delete failed.'); return; }
+  _musicPlaylist = null; loadPlaylists();
+}
+
 // -- songs: sortable table ---------------------------------------------------------
 async function loadSongs(quiet) {
   const el = _mq('music_list'); _loading(el, quiet);
@@ -547,6 +696,8 @@ function _renderSongList(el, songs, total, secs, semLabel) {
       <td class="px-1 py-1 text-right whitespace-nowrap">
         <button onclick="event.stopPropagation();musicSimilarTo(${jsArg(s.rel_path)})" title="Tracks that sound like this"
           class="text-xs text-gray-500 hover:text-indigo-300 opacity-0 group-hover:opacity-100 px-1">≈</button><button
+          onclick="event.stopPropagation();musicAddToPlaylist([${jsArg(s.rel_path)}])" title="Add to a playlist"
+          class="text-xs text-gray-500 hover:text-green-300 opacity-0 group-hover:opacity-100 px-1">+</button><button
           onclick="event.stopPropagation();openMusicEditor(${i})" title="Edit tags"
           class="text-xs text-gray-500 hover:text-blue-300 opacity-0 group-hover:opacity-100 px-1">✎</button></td>
     </tr>`;
@@ -560,7 +711,7 @@ function _renderSongList(el, songs, total, secs, semLabel) {
     </div>
     <table class="w-full text-sm table-fixed">
       <colgroup><col style="width:2.5rem"><col><col style="width:30%"><col style="width:3rem"><col style="width:3.5rem">
-        ${showScore ? '<col style="width:3rem">' : ''}<col style="width:3.25rem"></colgroup>
+        ${showScore ? '<col style="width:3rem">' : ''}<col style="width:4.5rem"></colgroup>
       <thead class="text-gray-500 text-[10px] uppercase tracking-wider"><tr>
         ${_sortHead(inAlbum ? 'track' : 'default', '#', 'text-right')}
         ${_sortHead('title', 'Title', 'text-left')}
@@ -781,6 +932,8 @@ function _renderQueue() {
         <div class="truncate ${cur ? 'text-blue-300' : 'text-gray-200'}">${escHtml(s.title)}</div>
         <div class="truncate text-[10px] text-gray-500">${escHtml(songArtist(s))}</div>
       </div>
+      <button onclick="event.stopPropagation();musicAddToPlaylist([${jsArg(s.rel_path)}])" title="Add to a playlist"
+        class="text-gray-500 hover:text-green-300 px-1">+</button>
       <span class="text-[10px] text-gray-500 tabular-nums">${fmtDur(s.duration)}</span>
     </div>`;
   }).join('') + (to < musicQueue.length

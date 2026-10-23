@@ -90,7 +90,31 @@ class Prefs(ctx: Context) {
         "Paired as $accountName" + (if (accountScope == "all") " (sees everything that account can see)" else " (sees that account's personal folder only)")
 
     fun unpair() { p.edit().remove("srv_name").remove("srv_url").remove("srv_pub").remove("srv_key").remove("srv_id")
-        .remove("srv_account").remove("srv_scope").apply() }
+        .remove("srv_account").remove("srv_scope").remove("caps").apply() }
+
+    // -- v2: server capabilities, media cache and downloads ---------------------
+    /** Last inbound/caps answer as JSON ("" = never fetched; a v1 server stores Caps.V1). */
+    var capsJson: String get() = p.getString("caps", "") ?: ""; set(v) = p.edit().putString("caps", v).apply()
+    /** Seconds of forward playback kept in the cache ahead of the play position. */
+    var audioAheadMin: Int get() = p.getInt("ahead_audio_min", 30); set(v) = p.edit().putInt("ahead_audio_min", v).apply()
+    var videoAheadMin: Int get() = p.getInt("ahead_video_min", 10); set(v) = p.edit().putInt("ahead_video_min", v).apply()
+    /** Streaming cache size cap (the LRU cache; offline downloads are not counted). */
+    var cacheMb: Int get() = p.getInt("cache_mb", 1024); set(v) = p.edit().putInt("cache_mb", v).apply()
+    /** Play from the server over mobile data (off: only cached / downloaded media plays there). */
+    var cellularStreaming: Boolean get() = p.getBoolean("cell_stream", true); set(v) = p.edit().putBoolean("cell_stream", v).apply()
+    /** Read ahead (prefetch the queue) over mobile data. */
+    var cellularPrefetch: Boolean get() = p.getBoolean("cell_prefetch", false); set(v) = p.edit().putBoolean("cell_prefetch", v).apply()
+    /** Offline downloads only on unmetered networks. */
+    var downloadsWifiOnly: Boolean get() = p.getBoolean("dl_wifi_only", true); set(v) = p.edit().putBoolean("dl_wifi_only", v).apply()
+
+    companion object {
+        @Volatile private var shared: Prefs? = null
+
+        /** @brief One instance per process: opening EncryptedSharedPreferences is slow. */
+        fun get(ctx: Context): Prefs = shared ?: synchronized(this) {
+            shared ?: Prefs(ctx.applicationContext).also { shared = it }
+        }
+    }
 }
 
 /** @brief Local bookkeeping: which MediaStore items are uploaded, and per-bucket policy. */
@@ -172,22 +196,21 @@ open class ApiException(msg: String) : Exception(msg)
  *  permitted): retrying will not help until someone changes it on the server. */
 class AccountException(msg: String) : ApiException(msg)
 
-private val ACCOUNT_CODES = setOf("account_disabled", "account_deleted", "no_owner", "forbidden")
+internal val ACCOUNT_CODES = setOf("account_disabled", "account_deleted", "no_owner", "forbidden")
 
 /** @brief Talks to the paired server. Every push is sealed to the server's pinned
  *  key; every read comes back sealed to ours. */
 class Api(private val prefs: Prefs, private val baseOverride: String? = null) {
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS).readTimeout(10, TimeUnit.MINUTES).writeTimeout(10, TimeUnit.MINUTES).build()
+    internal val http: OkHttpClient get() = HTTP
     // the paired URL when it answers, else the local end of the remote link (Remote.kt)
     private val base get() = (baseOverride ?: Remote.base(prefs)) + "/api/family_share/inbound"
 
-    private fun req(path: String) = Request.Builder().url(base + path)
+    internal fun req(path: String): Request.Builder = Request.Builder().url(base + path)
         .header("X-Family-Peer", prefs.deviceName).header("X-Family-Key", prefs.serverKey)
 
-    private fun sealer() = Crypto.Sealer(prefs.privateKey, prefs.serverPub ?: throw ApiException("not paired"))
+    internal fun sealer() = Crypto.Sealer(prefs.privateKey, prefs.serverPub ?: throw ApiException("not paired"))
 
-    private fun inner(extra: JSONObject): JSONObject = extra
+    internal fun inner(extra: JSONObject): JSONObject = extra
         .put("ts", System.currentTimeMillis() / 1000.0).put("to", prefs.serverId).put("from", prefs.deviceId)
 
     private fun check(r: okhttp3.Response): okhttp3.Response {
@@ -206,7 +229,7 @@ class Api(private val prefs: Prefs, private val baseOverride: String? = null) {
         return r
     }
 
-    private fun openSealed(r: okhttp3.Response): Pair<ByteArray, String> {
+    internal fun openSealed(r: okhttp3.Response): Pair<ByteArray, String> {
         val env = r.header("X-Family-Env") ?: throw ApiException("unsealed response from server")
         val opener = Crypto.Opener(prefs.privateKey, prefs.serverPub!!, JSONObject(env))
         val data = r.body?.bytes() ?: ByteArray(0)
@@ -286,5 +309,11 @@ class Api(private val prefs: Prefs, private val baseOverride: String? = null) {
         val opener = Crypto.Opener(prefs.privateKey, prefs.serverPub!!, JSONObject(env))
         dst.outputStream().use { out -> opener.openStream(r.body!!.byteStream(), out) }
         r.header("X-Family-Mime") ?: "application/octet-stream"
+    }
+
+    companion object {
+        /** One connection pool for every Api / ApiV2 instance. */
+        private val HTTP: OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS).readTimeout(10, TimeUnit.MINUTES).writeTimeout(10, TimeUnit.MINUTES).build()
     }
 }

@@ -52,6 +52,18 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+
+    // JVM unit tests (src/test): android.jar's org.json is a stub there, so the
+    // real one is a test dependency; other android.* calls return defaults.
+    testOptions { unitTests.isReturnDefaultValues = true }
+
+    // Media3's @UnstableApi is a lint check (UnsafeOptInUsageError), not a compiler
+    // one; the app opts in with @OptIn, and lint never blocks the release build.
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
+        disable += "UnsafeOptInUsageError"
+    }
 }
 
 dependencies {
@@ -70,4 +82,16 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     implementation("com.google.zxing:core:3.5.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // Playback: one Media3 version for every artifact (1.4.x targets compileSdk 34).
+    val media3 = "1.4.1"
+    implementation("androidx.media3:media3-exoplayer:$media3")
+    implementation("androidx.media3:media3-session:$media3")
+    implementation("androidx.media3:media3-ui:$media3")
+    implementation("androidx.media3:media3-datasource:$media3")
+    implementation("androidx.media3:media3-database:$media3")
+    implementation("androidx.media3:media3-common:$media3")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

@@ -160,6 +160,22 @@ class Sealer:
                 if last:
                     return
 
+    def iter_frame_range(self, path, size, first, count):
+        """! @brief Generator of frames first .. first+count-1 of a file (clamped to its
+        end), sealed exactly as iter_frames seals them: frame i holds plaintext
+        bytes i*CHUNK .. (i+1)*CHUNK-1 with nonce i, and `last` is set only on the
+        file's true final frame. An empty file is one empty frame."""
+        frames = frame_count(size)
+        first = max(0, int(first))
+        stop = min(frames, first + max(0, int(count)))
+        aes = AESGCM(self._k_file)
+        with open(path, "rb") as fin:
+            fin.seek(first * CHUNK)
+            for i in range(first, stop):
+                data = fin.read(CHUNK)
+                ct = aes.encrypt(struct.pack(">Q", i) + b"\0\0\0\0", data, _file_aad(i, i == frames - 1))
+                yield struct.pack(">I", len(ct)) + ct
+
     def seal_bytes(self, data):
         """! @brief Framed ciphertext of an in-memory blob (a thumbnail, a listing)."""
         out = io.BytesIO()
@@ -169,6 +185,11 @@ class Sealer:
 
 def _file_aad(i, last):
     return b"file:%d:%d" % (i, 1 if last else 0)
+
+
+def frame_count(size):
+    """! @brief Frames in the sealed stream of `size` plaintext bytes: max(1, ceil(size / CHUNK))."""
+    return max(1, -(-int(size) // CHUNK))
 
 
 # -- receiver ----------------------------------------------------------------
@@ -242,6 +263,43 @@ class Opener:
                 i += 1
             if stream.read(1):
                 raise CryptoError("data after the final chunk")
+
+    def open_frames(self, stream, fout, first, expected, total_frames):
+        """! @brief Decrypt a ranged response (inbound/frames): `expected` frames starting
+        at index `first` of a file of `total_frames` frames. Exactly
+        min(expected, total_frames - first) frames must arrive, the `last` flag must
+        be set on frame total_frames-1 and on no other, and nothing may follow.
+        That binds the file's length, so a dropped, reordered, truncated or
+        spliced frame fails. @return plaintext bytes written."""
+        first, total_frames = int(first), int(total_frames)
+        if first < 0 or total_frames < 1 or first >= total_frames:
+            raise CryptoError("frame range outside the file")
+        want = min(int(expected), total_frames - first)
+        if want < 1:
+            raise CryptoError("no frames requested")
+        aes = AESGCM(self._k_file)
+        written = 0
+        for i in range(first, first + want):
+            hdr = _read_exact(stream, 4)
+            if hdr is None:
+                raise CryptoError("frame range truncated")
+            (n,) = struct.unpack(">I", hdr)
+            if n < 16 or n > CHUNK + 16:
+                raise CryptoError("file frame has an impossible size")
+            ct = _read_exact(stream, n)
+            if ct is None:
+                raise CryptoError("frame range truncated")
+            try:
+                pt = aes.decrypt(struct.pack(">Q", i) + b"\0\0\0\0", ct, _file_aad(i, i == total_frames - 1))
+            except Exception:
+                raise CryptoError(f"file chunk {i} failed to authenticate")
+            if i != total_frames - 1 and len(pt) != CHUNK:
+                raise CryptoError(f"file chunk {i} is short but not the last")
+            fout.write(pt)
+            written += len(pt)
+        if stream.read(1):
+            raise CryptoError("data after the requested frames")
+        return written
 
 
 def _read_exact(stream, n):
