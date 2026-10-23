@@ -1067,8 +1067,9 @@ def dedup_groups_page():
             continue
         detail = []
         for path in live:
-            if path not in info:                       # audio track
-                sr, mr = sig_rows[path], music.get(path)
+            sr0 = sig_rows.get(path)
+            if path not in info or (sr0 is not None and sr0["kind"] == "audio"):   # audio track
+                sr, mr = sr0, music.get(path)
                 dur = float((mr["duration"] if mr else None) or sr["duration"] or 0)
                 br = int((mr["bitrate"] if mr else 0) or 0)
                 ap = get_safe_path(MEDIA_DIR, path)

@@ -40,6 +40,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["torch", "librosa", "muq"],
+    "pip_optional": ["easydict"],  # muq pulls it in; only patched when present
     "assets":      [],
 }
 
