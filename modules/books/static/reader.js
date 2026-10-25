@@ -465,13 +465,15 @@ function applyReaderStyle() {
 
   if (box) {
     const cols = parseInt(_rd('rs_columns')?.value || '1', 10);
-    const measure = parseInt(_rd('rs_measure')?.value || '68', 10);
+    // Width = a share of the centre pane, so the text follows the pane as it is
+    // resized instead of sitting in a fixed-width strip in the middle.
+    const measure = Math.max(30, Math.min(100, parseInt(_rd('rs_width')?.value || '100', 10)));
     box.style.fontSize = (_rd('rs_font')?.value || 18) + 'px';
     box.style.lineHeight = ((_rd('rs_leading')?.value || 165) / 100).toFixed(2);
     box.style.fontFamily = _rd('rs_family')?.value || 'Georgia, serif';
     box.style.background = theme.bg;
     box.style.color = theme.fg;
-    box.style.maxWidth = measure + 'ch';
+    box.style.maxWidth = measure + '%';
     if (cols > 1) {
       box.style.columnCount = cols;
       box.style.columnGap = '3rem';
@@ -498,7 +500,7 @@ function applyReaderStyle() {
 let _readerPrefs = {};
 
 function saveReaderPrefs() {
-  ['rs_font', 'rs_leading', 'rs_family', 'rs_columns', 'rs_measure',
+  ['rs_font', 'rs_leading', 'rs_family', 'rs_columns', 'rs_width',
    'rs_theme', 'rs_fit', 'rs_spread'].forEach(id => {
     const el = _rd(id);
     if (el) _readerPrefs[id] = el.value;

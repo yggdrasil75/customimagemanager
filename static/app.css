@@ -224,15 +224,22 @@ canvas {
 }
 
 #image_pane,
-#book_reader {
+#book_reader,
+#comic_pane,
+#music_player,
+#pano_viewer,
+#person_pane {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0
 }
 
-/* The reader occupies the same slot as the image viewer, so it must inherit the
-   same flex behaviour in BOTH editor_region orientations - otherwise switching
-   to book mode in the horizontal (stacked) layout collapses it to zero height.
+/* Every centre pane (the image viewer, and the module panes that swap in for it:
+   book reader, comic reader, music player, panorama, person mesh) occupies the
+   same slot, so it must have the same flex behaviour in BOTH editor_region
+   orientations. Without min-height:0 a pane in the horizontal (stacked) layout
+   grows to its content - a tall comic page - and pushes the controls pane off
+   the screen; without the rule at all switching to book mode collapses it.
    Tailwind's flex-1 is `flex:1 1 0%`, which is close but not identical to the
    `auto` basis #image_pane relies on, so it's set explicitly here rather than
    left to a utility class. */

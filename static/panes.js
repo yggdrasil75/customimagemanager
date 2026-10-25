@@ -307,7 +307,12 @@ function applyControlsMode(tabId) {
     metaTabs.forEach(b => b && b.classList.add('hidden'));
     if (typeof setControlsTab === 'function') setControlsTab(tabId);
   } else {
+    // A book / comic / ... open in the centre keeps its controls tabs: hiding
+    // every mode tab above took them too, so put back what the media mode shows.
+    const inMedia = typeof mediaMode !== 'undefined' && mediaMode !== 'image';
+    if (inMedia) applyMediaModeTabs();
     if (_controlsModePrev == null) return;
+    if (inMedia) { _controlsModePrev = null; return; }
     metaTabs.forEach(b => {
       if (!b) return;
       // Respect feature gating: only unhide a metadata tab the user may see.
