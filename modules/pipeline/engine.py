@@ -342,10 +342,13 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
             with _progress_lock:
                 progress(msg)
 
-    def call(prompt, img, want, choices=None, endpoint=None):
+    def call(prompt, img, want, choices=None, endpoint=None, verify=None):
+        # verify: a node's / step's override of the confirming model ("off",
+        # "flagged", "always"); passed only when set, so plain llm callables work
+        kw = {"verify_mode": verify} if verify in ("off", "flagged", "always") else {}
         try:
-            if endpoint is not None:
-                return llm(prompt, img, want, choices, endpoint)
+            if endpoint is not None or kw:
+                return llm(prompt, img, want, choices, endpoint, **kw)
             return llm(prompt, img, want, choices)
         except TypeError:
             # llm callable doesn't accept an endpoint arg - call without it
@@ -455,7 +458,7 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
             # name and the crop is described AS that character.
             if st.get("type") == "name" or want == "name":
                 ans = call(_fmt(st["prompt"], ctx, subj), crop, "text",
-                           None, endpoint)
+                           None, endpoint, st.get("verify"))
                 ans = (ans or "").strip().strip('."\'')
                 # Guard against the model refusing / echoing "unknown".
                 low = ans.lower()
@@ -467,7 +470,7 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                         ctx["tags"].append(ans)   # the name is a tag too
                 continue
             out = call(_fmt(st["prompt"], ctx, subj), crop, want,
-                       st.get("choices"), endpoint)
+                       st.get("choices"), endpoint, st.get("verify"))
             if want == "boxes":
                 for b in (out or [])[:max_boxes]:
                     if not b.get("class_name"):
@@ -506,13 +509,13 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
 
         if ntype == "classify":
             choice = call(_fmt(node["prompt"], ctx), image_bgr, "choice",
-                          node.get("choices"), _next_endpoint())
+                          node.get("choices"), _next_endpoint(), node.get("verify"))
             ctx["image_type"] = choice
             cur = (node.get("routes") or {}).get(choice) or node.get("next")
 
         elif ntype == "llm":
             want = node.get("want", "text")
-            out = call(_fmt(node["prompt"], ctx), image_bgr, want, None, _next_endpoint())
+            out = call(_fmt(node["prompt"], ctx), image_bgr, want, None, _next_endpoint(), node.get("verify"))
             store_global(node.get("store"), want, out)
             if want == "bool" and node.get("branch"):
                 cur = node["branch"].get("true" if out else "false") or node.get("next")
@@ -521,7 +524,7 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
 
         elif ntype == "boxes":
             boxes = call(_fmt(node["prompt"], ctx), image_bgr, "boxes",
-                         None, _next_endpoint()) or []
+                         None, _next_endpoint(), node.get("verify")) or []
             subjects = []
             for b in boxes[:max_boxes]:
                 cb = _clamp(b)          # clamp off-screen boxes to the image

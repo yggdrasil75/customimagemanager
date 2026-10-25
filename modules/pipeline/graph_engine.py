@@ -46,6 +46,8 @@ GRAPH_SCHEMA = "graph/1"
 # -- port types (the editor colours wires and refuses mismatches) -------------
 # image, boxes, subjects, text, tags, bool, json, metadata, any
 P = lambda name, type_, multi=False, opt=False: {"name": name, "type": type_, "multi": multi, "optional": opt}
+# per-node override of the confirming model (vlm oai_verify_mode); "default" follows the setting
+VERIFY_PARAM = ["default", "off", "flagged", "always"]
 
 CATALOG = {
     "start": {"label": "Start (image + metadata)", "kind": "io",
@@ -63,13 +65,14 @@ CATALOG = {
               "inputs": [P("image", "image", opt=True), P("context", "any", multi=True, opt=True), P("run", "bool", opt=True)],
               "outputs": [P("result", "any"), P("yes", "bool"), P("no", "bool")],
               "params": {"prompt": "textarea", "want": ["text", "bool", "tags", "choice", "boxes", "json", "name"],
-                         "choices": "list"},
+                         "choices": "list", "verify": VERIFY_PARAM},
               "help": "Sends the prompt (+ any context wires, appended as 'Context:') and the image. "
-                      "'result' is typed by want; yes/no are set for want=bool."},
+                      "'result' is typed by want; yes/no are set for want=bool. verify: whether the "
+                      "confirming model checks this answer (default = the setting)."},
     "boxes": {"label": "Detect boxes (LLM)", "kind": "ai",
               "inputs": [P("image", "image"), P("run", "bool", opt=True)],
               "outputs": [P("subjects", "subjects"), P("boxes", "boxes")],
-              "params": {"prompt": "textarea"}},
+              "params": {"prompt": "textarea", "verify": VERIFY_PARAM}},
     "detect_persons": {"label": "Detect persons (detector + pose)", "kind": "vision",
               "inputs": [P("image", "image"), P("run", "bool", opt=True)],
               "outputs": [P("subjects", "subjects"), P("pose", "json"), P("count", "text")],
@@ -128,7 +131,7 @@ CATALOG = {
     "classify": {"label": "Classify (one of choices)", "kind": "ai",
               "inputs": [P("image", "image"), P("run", "bool", opt=True)],
               "outputs": [P("choice", "text"), P("is", "bool")],
-              "params": {"prompt": "textarea", "choices": "list", "match": "text"},
+              "params": {"prompt": "textarea", "choices": "list", "match": "text", "verify": VERIFY_PARAM},
               "help": "'is' is true when the answer equals param match (one output per route: add a Gate)."},
 }
 # port types a module stage node gets (image in -> its result out)
@@ -222,11 +225,16 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
             ep = endpoints[rr["i"] % len(endpoints)]; rr["i"] += 1
         return ep
 
-    def call(prompt, img, want, choices=None):
+    def call(prompt, img, want, choices=None, verify=None):
+        kw = {"verify_mode": verify} if verify in VERIFY_PARAM[1:] else {}
         try:
-            return llm(prompt, img, want, choices, endpoint())
+            return llm(prompt, img, want, choices, endpoint(), **kw)
         except TypeError:
-            return llm(prompt, img, want, choices)
+            try:
+                return llm(prompt, img, want, choices)
+            except Exception as e:
+                report(f"llm failed: {e}")
+                return None
         except Exception as e:
             report(f"llm failed: {e}")
             return None
@@ -363,7 +371,8 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
                 prompt += "\n\nContext:\n" + "\n".join(ctx)
             want = n.get("want") or "text"
             img = ins.get("image")
-            out = call(prompt, img, "choice" if want == "choice" else want, n.get("choices") if want == "choice" else None)
+            out = call(prompt, img, "choice" if want == "choice" else want, n.get("choices") if want == "choice" else None,
+                       verify=n.get("verify"))
             if want == "name" and isinstance(out, str) and out.strip().lower() in ("unknown", "none", "n/a", "unnamed", ""):
                 out = None
             if want == "boxes":
@@ -372,10 +381,11 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
                 return {"result": bool(out), "yes": bool(out), "no": not bool(out)}
             return {"result": out}
         if t == "classify":
-            choice = call(n.get("prompt") or "", ins.get("image"), "choice", n.get("choices") or [])
+            choice = call(n.get("prompt") or "", ins.get("image"), "choice", n.get("choices") or [],
+                          verify=n.get("verify"))
             return {"choice": choice, "is": (str(choice or "").lower() == str(n.get("match") or "").lower())}
         if t == "boxes":
-            bx = call(n.get("prompt") or "", ins.get("image"), "boxes") or []
+            bx = call(n.get("prompt") or "", ins.get("image"), "boxes", verify=n.get("verify")) or []
             bx = [cb for cb in (_clamp(b) and dict(_clamp(b), class_name=b.get("class_name", "subject")) for b in bx) if cb]
             return {"subjects": subjects_from_boxes(bx), "boxes": bx}
         if t == "detect_persons":
@@ -563,7 +573,7 @@ def tree_to_graph(tree):
         t = n.get("type")
         g = {"id": n["id"], "type": t, "label": n.get("label"), "ui": {"x": x, "y": 40}, "in": {"image": ["start", "image"]}}
         x += 260
-        for k in ("prompt", "want", "store", "choices", "unmatched_box", "contain_thresh", "llm_fallback"):
+        for k in ("prompt", "want", "store", "choices", "unmatched_box", "contain_thresh", "llm_fallback", "verify"):
             if k in n: g[k] = n[k]
         if t in ("for_each", "for_each_box", "for_each_panel"):
             g["type"] = "for_each"
@@ -614,6 +624,7 @@ def _steps_to_graph(steps):
              "want": st.get("want", "text"), "ui": {"x": x, "y": y},
              "in": {"image": ["item", "crop"], "context": [["item", "known"]]}}
         if st.get("choices"): g["choices"] = st["choices"]
+        if st.get("verify"): g["verify"] = st["verify"]
         w = st.get("when")
         if w and w.get("field") in prev_bool:
             g["in"]["run"] = [prev_bool[w["field"]], "no" if w.get("equals") is False else "yes"]

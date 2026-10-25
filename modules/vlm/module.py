@@ -81,8 +81,36 @@ def register(host):
                         validate=lambda v: max(1, min(32, int(v or 1))))
     host.add_settings_field(key="oai_concurrency", label="Parallel background requests",
                             kind="number", pane="module",
-                            help="Max in-flight background requests to the endpoint across "
-                                 "all capabilities. 1 unless the server batches.")
+                            help="Max requests in flight to the endpoint at once, from every "
+                                 "capability, bulk run and pipeline fan-out together. Set it to the "
+                                 "server's parallel slots (llama-server -np N) so they are batched.")
+    # Confirming model: the main model answers, this one checks (OK or a fix).
+    host.add_config_key("oai_verify_mode", default="off",
+                        validate=lambda v: v if v in client.VERIFY_MODES else "off")
+    host.add_config_key("oai_verify_endpoint", default="", validate=lambda v: str(v or ""))
+    host.add_config_key("oai_verify_key", default="", validate=lambda v: str(v or ""))
+    host.add_config_key("oai_verify_model", default="", validate=lambda v: str(v or ""))
+    host.add_config_key("oai_verify_concurrency", default=1,
+                        validate=lambda v: max(1, min(32, int(v or 1))))
+    host.add_config_key("oai_verify_min_prob", default=0.0,
+                        validate=lambda v: max(0.0, min(1.0, float(v or 0))))
+    host.add_settings_field(key="oai_verify_mode", label="Confirm answers with a second model",
+                            kind="select", pane="module",
+                            options=[{"value": "off", "label": "Off"},
+                                     {"value": "flagged", "label": "Only flagged answers (malformed, cut off, unsure)"},
+                                     {"value": "always", "label": "Every answer"}],
+                            help="The chat model answers first; the confirming model sees the same image, "
+                                 "the question and that answer, and replies OK or a correction.")
+    host.add_settings_field(key="oai_verify_endpoint", label="Confirming endpoint", kind="text",
+                            pane="module", help="Blank = the endpoint above (another model on the same server).")
+    host.add_settings_field(key="oai_verify_key", label="Confirming API key", kind="text", pane="module",
+                            help="Blank = the key above, only when the endpoint is blank too.")
+    host.add_settings_field(key="oai_verify_model", label="Confirming model", kind="text", pane="module")
+    host.add_settings_field(key="oai_verify_concurrency", label="Confirming parallel requests",
+                            kind="number", pane="module")
+    host.add_settings_field(key="oai_verify_min_prob", label="Flag yes/no and choice answers under this probability",
+                            kind="number", pane="module",
+                            help="0 = off. Needs a server that returns logprobs.")
     # Classification = the image's overarching category, one of these. Stored
     # as analysis.image_type (what the pipeline's classify node writes and the
     # AI panel shows as "Type") - never as a tag.
@@ -121,7 +149,9 @@ def register(host):
                                  "list_models": client.list_models,
                                  "embed_image": client.embed_image, "embed_text": client.embed_text,
                                  "embed_tag": client.embed_tag,
-                                 "embed_configured": client.embed_configured})
+                                 "embed_configured": client.embed_configured,
+                                 "verify_configured": client.verify_configured,
+                                 "stats": lambda: dict(client.STATS)})
 
     ## @brief embed: the endpoint's /v1/embeddings (a multimodal embedding model puts
     # images and text in one space, which is what semantic text search needs).

@@ -157,6 +157,62 @@ def test_llm_judge_and_name():
     assert "places: Lisbon" in calls[0][0] and "people: Ana" in calls[0][0]
 
 
+def test_judge_runs_groups_in_parallel_keeping_order():
+    """! @brief workers > 1 judges several groups at once; results land on the right group."""
+    its = []
+    for k in range(6):
+        its += [item("g%d/%d.jpg" % (k, i), T(1 + 3 * k, 9 + i), LISBON, city="City%d" % k) for i in range(8)]
+    lock, now, peak = __import__("threading").Lock(), [0], [0]
+
+    def llm(prompt, img, want, verify=None):
+        with lock:
+            now[0] += 1
+            peak[0] = max(peak[0], now[0])
+        time.sleep(0.05)
+        with lock:
+            now[0] -= 1
+        city = prompt.split("places: ")[1].split(",")[0]
+        return {"keep": city != "City2", "name": "Trip " + city, "verify": verify}
+    graph = {"schema": "library/1", "nodes": [
+        {"id": "start", "type": "start"},
+        {"id": "trips", "type": "group_trips", "gap_hours": 36, "min_files": 5, "in": {"files": ["start", "files"]}},
+        {"id": "judge", "type": "ai_judge", "rule": "trips", "samples": 0, "verify": "always",
+         "in": {"groups": ["trips", "groups"]}},
+        {"id": "albums", "type": "make_albums", "in": {"groups": ["judge", "kept"]}},
+        {"id": "end", "type": "end", "in": {"plan": [["albums", "plan"]]}}]}
+    seen = []
+    out = engine.run_graph(graph, engine.Context(FakeLib(its), llm=llm, workers=4, report=seen.append))
+    names = [e["album"] for e in out["plan"]]
+    assert names == ["Trip City%d" % k for k in (0, 1, 3, 4, 5)]
+    assert all(e["files"][0].startswith("g%s/" % e["album"][-1]) for e in out["plan"])
+    assert peak[0] > 1 and peak[0] <= 4
+    assert [m for m in seen if m.startswith("AI judge ") and "/" in m][-1] == "AI judge 6/6"
+
+
+def test_judge_cancel_stops_the_rest():
+    its = []
+    for k in range(8):
+        its += [item("g%d/%d.jpg" % (k, i), T(1 + 3 * k, 9 + i), LISBON, city="C%d" % k) for i in range(6)]
+    calls = []
+
+    def llm(prompt, img, want):
+        calls.append(1)
+        time.sleep(0.02)
+        return {"keep": True}
+
+    def report(msg):
+        if msg == "AI judge 2/8":
+            raise engine.Cancelled("cancelled")
+    graph = {"schema": "library/1", "nodes": [
+        {"id": "start", "type": "start"},
+        {"id": "trips", "type": "group_trips", "gap_hours": 36, "min_files": 5, "in": {"files": ["start", "files"]}},
+        {"id": "judge", "type": "ai_judge", "rule": "x", "samples": 0, "in": {"groups": ["trips", "groups"]}},
+        {"id": "end", "type": "end", "in": {"plan": [["judge", "kept"]]}}]}
+    with pytest.raises(engine.Cancelled):
+        engine.run_graph(graph, engine.Context(FakeLib(its), llm=llm, workers=2, report=report))
+    assert len(calls) < 8
+
+
 def test_rule_compiler_validates_and_pins():
     assert engine.clean_rule({"method": "nope"})["method"] == "trips"
     spec = engine.clean_rule({"method": "events", "settings": {"gap_minutes": "90", "bogus": 1}, "check": "party?"})

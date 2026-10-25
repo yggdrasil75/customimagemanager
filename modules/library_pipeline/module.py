@@ -157,17 +157,25 @@ class Runner:
             return None
         fails = {"n": 0}
 
-        def call(prompt, img, want):
+        def call(prompt, img, want, verify=None):
             if fails["n"] >= MAX_LLM_FAILS:
                 raise RuntimeError("LLM unreachable, skipped")
             try:
-                out = svc["call"](prompt, img, want)
+                out = (svc["call"](prompt, img, want, verify_mode=verify) if verify
+                       else svc["call"](prompt, img, want))
             except Exception:
                 fails["n"] += 1
                 raise
             fails["n"] = 0
             return out
         return call
+
+    def _llm_workers(self):
+        """! @brief Groups judged / named at once: the requests the endpoint takes together."""
+        try:
+            return max(1, int(self.host.config.get("oai_concurrency") or 1))
+        except (TypeError, ValueError):
+            return 1
 
     def _progress(self, msg):
         if self.state["cancel"]:
@@ -213,7 +221,8 @@ class Runner:
             g = copy.deepcopy(graph or saved)
             ctx = engine.Context(Library(self.host, only=only), llm=self._llm(),
                                  collage=lambda rels: collage(self.host, rels),
-                                 report=self._progress, auto_albums=self.auto_albums(db))
+                                 report=self._progress, auto_albums=self.auto_albums(db),
+                                 workers=self._llm_workers())
             out = engine.run_graph(g, ctx)
             plan, log = out["plan"], out["log"]
             if graph is None:
@@ -371,31 +380,52 @@ class Runner:
             return {"ok": False, "error": "the per-photo pipeline module is off"}
         core, db = self.host.core, self.host.db()
         lib = Library(self.host)
-        done, skipped, errors = 0, 0, 0
-        for i, rel in enumerate(e["files"]):
+        n = {"done": 0, "skipped": 0, "errors": 0, "started": 0}
+        lock = threading.Lock()
+        todo = []
+        for rel in e["files"]:
             row = db.execute("SELECT description, media_kind FROM files WHERE rel_path=?", (rel,)).fetchone()
             if not row or (row["media_kind"] or "image") != "image" or (e.get("only_undescribed") and (row["description"] or "").strip()):
-                skipped += 1
+                n["skipped"] += 1
                 continue
+            todo.append((rel, lib.item(rel) or {}))
+
+        # Photos run side by side (one per request the LLM endpoints take), so a
+        # server with parallel slots batches them instead of idling.
+        def one(job):
+            rel, it = job
+            if self.state["cancel"]:
+                return
             abs_p = self.host.safe_path(self.host.media_dir, rel)
             try:
                 img = core.read_image(abs_p)
                 if img is None:
-                    errors += 1
-                    continue
-                it = lib.item(rel) or {}
-                self._progress("photo pipeline %d/%d (%s)" % (i + 1, len(e["files"]), e["name"]))
+                    with lock: n["errors"] += 1
+                    return
+                with lock:
+                    n["started"] += 1
+                    k = n["started"]
+                self._progress("photo pipeline %d/%d (%s)" % (k, len(todo), e["name"]))
                 analysis = svc["run"](core.to_bgr(img), abs_p, None, None,
                                       known_extra={"context": e.get("context", ""), "people": it.get("people")},
                                       pipeline_id=e.get("pipeline") or None)
                 svc["apply"](abs_p, analysis)
-                done += 1
+                with lock: n["done"] += 1
             except engine.Cancelled:
                 raise
             except Exception as ex:
-                errors += 1
+                with lock: n["errors"] += 1
                 self.host.logger.warning("library pipeline photo %s: %s" % (rel, ex))
-        return {"ok": errors == 0, "done": done, "skipped": skipped, "errors": errors}
+
+        fan = svc.get("fan_out")
+        if fan:
+            fan(one, todo)
+        else:
+            for job in todo:
+                one(job)
+        if self.state["cancel"]:
+            raise engine.Cancelled("cancelled")
+        return {"ok": n["errors"] == 0, "done": n["done"], "skipped": n["skipped"], "errors": n["errors"]}
 
 
 APPLY = {"album": Runner.apply_album, "tag": Runner.apply_tag, "move": Runner.apply_move,

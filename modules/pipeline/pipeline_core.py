@@ -6,7 +6,9 @@ in register(). engine.py is the tree runner (was pipeline.py).
 import json
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import request, jsonify
 
@@ -321,7 +323,11 @@ def _seg_fn():
 def _pipeline_endpoints():
     """! @brief Endpoint URLs for parallel pipeline runs. Reads state['oai_endpoints']
     (a list, or newline/comma-separated string). Falls back to the single
-    configured endpoint. Returning <=1 entry keeps the engine single-threaded."""
+    configured endpoint. Each endpoint is listed once per parallel request it
+    takes (oai_concurrency), so one server with N slots gets N calls at once
+    (the subjects of a photo described together) instead of one at a time; the
+    vlm client still caps what is in flight per server. Returning <=1 entry
+    keeps the engine single-threaded."""
     raw = state.get("oai_endpoints") or []
     if isinstance(raw, str):
         raw = re.split(r"[,\n]", raw)
@@ -329,7 +335,39 @@ def _pipeline_endpoints():
     if not eps:
         single = (state.get("oai_endpoint") or "").strip()
         eps = [single] if single else []
-    return eps
+    return eps * _llm_slots()
+
+
+def _llm_slots():
+    """! @brief Parallel requests one endpoint takes (oai_concurrency, at least 1)."""
+    try:
+        return max(1, int(state.get("oai_concurrency") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _llm_workers():
+    """! @brief How many photos a bulk run works on at once: one per request the
+    endpoints take together, so every slot of every server stays busy."""
+    return max(1, len(_pipeline_endpoints()))
+
+
+def fan_out(fn, items, workers=None):
+    """! @brief fn(item) for every item, `workers` at a time (default _llm_workers()),
+    results in input order. One worker = a plain loop. Worker threads close their
+    DB connections when done."""
+    items = list(items)
+    workers = max(1, min(int(workers or _llm_workers()), len(items) or 1))
+    if workers == 1:
+        return [fn(it) for it in items]
+    ex = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="llm-bulk")
+    try:
+        return list(ex.map(fn, items))
+    finally:
+        release = getattr(getattr(HOST, "core", None), "db_release_pool", None)
+        if release:
+            release(ex, workers)
+        ex.shutdown(wait=True, cancel_futures=True)
 
 def _known_context(fp, meta=None):
     """! @brief Assemble what the app already knows about a file so the pipeline can name
@@ -522,23 +560,34 @@ def bulk_pipeline():
     pid = str(request.json.get("pipeline") or "") or None
     total = len(filenames)
     done, errors, by_pipeline = 0, [], {}
-    for i, fn in enumerate(filenames):
+    lock = threading.Lock()
+
+    # Photos run side by side (one per request the endpoints take), so a server
+    # with parallel slots batches them instead of idling between requests.
+    def one(job):
+        nonlocal done
+        i, fn = job
         fp = get_safe_path(MEDIA_DIR, fn)
         if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
+            with lock: errors.append(fn)
+            return
         try:
             img = read_jxl(fp)
             if img is None:
-                errors.append(fn); continue
+                with lock: errors.append(fn)
+                return
             def _prog(msg, i=i): HOST.set_status(f"Smart Tag {i+1}/{total}: {msg}")
             analysis = _run_pipeline_on(_to_bgr(img), fp, None, _prog, pipeline_id=pid)
             _apply_pipeline_result(fp, analysis)
-            done += 1
             name = (analysis.get("pipeline") or {}).get("name", "")
-            by_pipeline[name] = by_pipeline.get(name, 0) + 1
+            with lock:
+                done += 1
+                by_pipeline[name] = by_pipeline.get(name, 0) + 1
         except Exception as e:
-            errors.append(fn)
+            with lock: errors.append(fn)
             access_logger.error(f"bulk_pipeline {fn}: {e}")
+
+    fan_out(one, enumerate(filenames))
     HOST.set_status("Ready.")
     return jsonify({"success": True, "done": done, "errors": errors, "by_pipeline": by_pipeline})
 

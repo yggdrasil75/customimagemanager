@@ -8,6 +8,8 @@ unconfirmed), regions (boxes, unconfirmed), flag (review queue), body
 module registered with host.register_action_target (segmentation).
 """
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import request, jsonify
 
@@ -178,17 +180,37 @@ def bulk_llm():
         return jsonify({"success": False, "error": "Unknown AI action."})
     done, applied, errors = 0, 0, []
     total = len(filenames)
-    for fn in filenames:
+    lock = threading.Lock()
+
+    def one(fn):
+        nonlocal done, applied
         fp = HOST.safe_path(HOST.media_dir, fn)
         if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
+            with lock: errors.append(fn)
+            return
         try:
-            if apply(fp, action):
-                applied += 1
-            done += 1
-            HOST.set_status(f"AI ({action.get('name', 'action')}): {done}/{total}")
+            hit = apply(fp, action)
+            with lock:
+                applied += 1 if hit else 0
+                done += 1
+                HOST.set_status(f"AI ({action.get('name', 'action')}): {done}/{total}")
         except Exception as e:
-            errors.append(fn)
+            with lock: errors.append(fn)
             HOST.logger.error(f"bulk_llm {fn}: {e}")
+
+    # as many files at once as the endpoint takes requests (oai_concurrency)
+    workers = max(1, min(len(filenames) or 1, client._int(HOST.config.get("oai_concurrency"), 1)))
+    if workers == 1:
+        for fn in filenames:
+            one(fn)
+    else:
+        ex = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ai-bulk")
+        try:
+            list(ex.map(one, filenames))
+        finally:
+            release = getattr(getattr(HOST, "core", None), "db_release_pool", None)
+            if release:
+                release(ex, workers)
+            ex.shutdown(wait=True)
     HOST.set_status("Ready.")
     return jsonify({"success": True, "done": done, "applied": applied, "errors": errors})

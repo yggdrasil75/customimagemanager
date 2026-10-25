@@ -104,6 +104,7 @@ def register(host):
         "known_context": pc._known_context, "compose_description": pc._compose_description,
         "default_tree": DEFAULT_PIPELINE, "run_panels": pc._run_panels,
         "list": lambda: pls.listing(host.config), "select": pc._select_pipeline,
+        "fan_out": pc.fan_out, "workers": pc._llm_workers,
     })
 
 

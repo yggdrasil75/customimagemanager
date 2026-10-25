@@ -28,15 +28,69 @@ RESOURCE = "oai-endpoint"
 _BUSY = (429, 502, 503, 504)
 
 
-def _post(url, *, json, headers, timeout):
+class _Gate:
+    """! @brief In-flight cap for one server (+ model). Every request to it, from any
+    thread (background sweep, a bulk run's pool, a pipeline fanning out over
+    subjects), waits here, so the server gets at most `limit` requests at once
+    and they all stay in flight together: that is what lets a server with
+    parallel slots batch them. An interactive call gets one extra slot and goes
+    before waiting background calls, so a click never queues behind a sweep."""
+
+    def __init__(self):
+        self.cv = threading.Condition()
+        self.inflight = 0
+        self.fg_waiting = 0
+
+    @contextlib.contextmanager
+    def hold(self, limit, foreground):
+        limit = max(1, int(limit or 1))
+        with self.cv:
+            if foreground:
+                self.fg_waiting += 1
+                try:
+                    while self.inflight >= limit + 1:
+                        self.cv.wait()
+                finally:
+                    self.fg_waiting -= 1
+            else:
+                while self.inflight >= limit or self.fg_waiting:
+                    self.cv.wait()
+            self.inflight += 1
+        try:
+            yield
+        finally:
+            with self.cv:
+                self.inflight -= 1
+                self.cv.notify_all()
+
+
+_GATES = {}
+_GATES_LOCK = threading.Lock()
+
+
+def _gate(key):
+    with _GATES_LOCK:
+        g = _GATES.get(key)
+        if g is None:
+            g = _GATES[key] = _Gate()
+        return g
+
+
+def _post(url, *, json, headers, timeout, gate=None, limit=None):
     """! @brief POST to the endpoint. An interactive call (not on a worker thread)
     marks the resource busy so the sweep hands out no new background slot
     while it waits; a busy/overloaded reply is retried with backoff instead
-    of failing the job."""
+    of failing the job. `gate` (default: the URL's server) caps the requests in
+    flight on it at `limit` (default: oai_concurrency)."""
     tm = getattr(HOST, "thread_manager", None)
-    fg = (tm.foreground_use(RESOURCE) if tm is not None and not tm.in_worker()
-          else contextlib.nullcontext())
-    with fg:
+    foreground = tm is not None and not tm.in_worker()
+    fg = tm.foreground_use(RESOURCE) if foreground else contextlib.nullcontext()
+    if limit is None:
+        try:
+            limit = int(_cfg().get("oai_concurrency") or 1)
+        except (TypeError, ValueError, AttributeError):
+            limit = 1
+    with fg, _gate(gate or v1_base(url)).hold(limit, foreground):
         for attempt in range(4):
             r = requests.post(url, json=json, headers=headers, timeout=timeout)
             if r.status_code in _BUSY and attempt < 3:
@@ -129,24 +183,60 @@ def list_models(endpoint=None, key=None, ttl=20, wait=False):
     return hit[1] if hit else []
 
 
-def request(messages, tools=None, tool_choice=None, timeout=600, endpoint=None):
+def _int(v, default=1):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _tier(tier="main"):
+    """! @brief (endpoint, model, key, concurrency) of a tier. "main" is the model that
+    answers first; "verify" the one that confirms (oai_verify_*). The verify tier
+    reuses the main endpoint when its own is blank (another model on the same
+    server), and the main key only then: a key is never sent to another host."""
+    c = _cfg()
+    if tier == "verify":
+        own = (c.get("oai_verify_endpoint") or "").strip()
+        endpoint = own or c.get("oai_endpoint", "")
+        key = (c.get("oai_verify_key") or "").strip() or ("" if own else (c.get("oai_key") or "").strip())
+        return (endpoint, (c.get("oai_verify_model") or "").strip(), key,
+                max(1, _int(c.get("oai_verify_concurrency"), 1)))
+    return (c.get("oai_endpoint", ""), (c.get("oai_model") or "").strip(), (c.get("oai_key") or "").strip(),
+            max(1, _int(c.get("oai_concurrency"), 1)))
+
+
+def verify_configured():
+    """! @brief True when a confirming model is set (oai_verify_model)."""
+    endpoint, model, _k, _c = _tier("verify")
+    return bool(chat_url(endpoint) and model)
+
+
+def request(messages, tools=None, tool_choice=None, timeout=600, endpoint=None, *,
+            tier="main", max_tokens=1000, extra=None, full=False):
     """! @brief Low-level OpenAI-compatible chat call. Returns the message dict or raises.
     `endpoint` overrides the configured one (used to spread load across several
-    model instances during a parallel pipeline run)."""
-    endpoint = chat_url(endpoint or _cfg().get("oai_endpoint", ""))
-    model    = _cfg().get("oai_model", "").strip()
-    key      = _cfg().get("oai_key", "").strip()
+    model instances during a parallel pipeline run). `tier` picks the answering
+    ("main") or the confirming ("verify") model. `extra` is merged into the
+    payload; `full=True` returns the whole choice (message, finish_reason,
+    logprobs) instead of the message."""
+    t_endpoint, model, key, limit = _tier(tier)
+    endpoint = chat_url(endpoint or t_endpoint)
     if not endpoint or not model:
-        raise RuntimeError("LLM not configured")
+        raise RuntimeError("LLM not configured" if tier == "main" else "verify model not configured")
     hdrs = {"Content-Type": "application/json"}
     if key:
         hdrs["Authorization"] = f"Bearer {key}"
-    payload = {"model": model, "max_tokens": 1000, "messages": messages}
+    payload = {"model": model, "max_tokens": max_tokens, "messages": messages}
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice
-    r = _post(endpoint, headers=hdrs, json=payload, timeout=timeout)
-    return r.json()["choices"][0]["message"]
+    if extra:
+        payload.update(extra)
+    r = _post(endpoint, headers=hdrs, json=payload, timeout=timeout,
+              gate=v1_base(endpoint) + "|" + model, limit=limit)
+    choice = r.json()["choices"][0]
+    return choice if full else choice["message"]
 
 BOX_TOOL = [{"type": "function", "function": {
     "name": "create_bounding_boxes",
@@ -173,56 +263,222 @@ def encode_image(image_bgr, quality=85):
     b64 = base64.b64encode(buf.tobytes()).decode()
     return f"data:image/jpeg;base64,{b64}"
 
-def call(prompt, image_bgr, want="text", choices=None, endpoint=None):
-    """! @brief Typed single-turn call used by the pipeline engine. `want` controls parsing.
-    `endpoint` (optional) pins this call to a specific model instance."""
-    content = [{"type": "text", "text": prompt}]
-    if image_bgr is not None:
-        url = encode_image(image_bgr)
-        if url:
-            content.append({"type": "image_url",
-                            "image_url": {"url": url}})
-    messages = [{"role": "system", "content": _cfg().get("oai_system_prompt", "")},
-                {"role": "user", "content": content}]
+def _messages(prompt, url):
+    """! @brief System prompt, then the IMAGE, then the question. Everything a server
+    can cache comes first: calls about the same image (the per-subject steps,
+    the overall steps, the confirming call) differ only after the image, so a
+    server with prompt caching (llama.cpp, koboldcpp, vLLM, the paid APIs)
+    reuses the encoded image instead of processing it again per question."""
+    content = []
+    if url:
+        content.append({"type": "image_url", "image_url": {"url": url}})
+    content.append({"type": "text", "text": prompt})
+    return [{"role": "system", "content": _cfg().get("oai_system_prompt", "")},
+            {"role": "user", "content": content}]
 
+
+_BOX_CHOICE = {"type": "function", "function": {"name": "create_bounding_boxes"}}
+VERIFY_MODES = ("off", "flagged", "always")
+_SHORT = ("bool", "choice")         # answers a token's probability says something about
+
+
+def _boxes_of(msg):
+    """! @brief (raw boxes, parse_failed) from a tool call or a JSON reply."""
+    boxes, failed = [], False
+    if msg.get("tool_calls"):
+        try:
+            boxes = json.loads(msg["tool_calls"][0]["function"]["arguments"]).get("boxes", [])
+        except Exception:
+            failed = True
+    if not boxes and msg.get("content"):
+        c = msg["content"]
+        if "{" in c:
+            try:
+                boxes = json.loads(c[c.find('{'):c.rfind('}') + 1]).get("boxes", [])
+                failed = False
+            except Exception:
+                failed = True
+    return (boxes if isinstance(boxes, list) else []), failed
+
+
+def parse(want, msg, choices=None):
+    """! @brief A reply -> (value, flags). The value is what call() always returned
+    for `want`; flags name what looks wrong with it (empty, truncated, ambiguous,
+    malformed), which is what the confirming model is asked about in "flagged"
+    mode. No flags = the answer is well-formed (not necessarily right)."""
+    flags = []
     if want == "boxes":
-        msg = request(messages, BOX_TOOL,
-                           {"type": "function", "function": {"name": "create_bounding_boxes"}},
-                           endpoint=endpoint)
-        boxes = []
-        if msg.get("tool_calls"):
-            try:
-                boxes = json.loads(msg["tool_calls"][0]["function"]["arguments"]).get("boxes", [])
-            except Exception:
-                pass
-        if not boxes and msg.get("content"):
-            try:
-                c = msg["content"]; boxes = json.loads(c[c.find('{'):c.rfind('}')+1]).get("boxes", [])
-            except Exception:
-                pass
-        return [cb for cb in (clamp_box(b) for b in boxes) if cb]
-
-    msg  = request(messages, endpoint=endpoint)
+        raw, failed = _boxes_of(msg)
+        boxes = [cb for cb in (clamp_box(b) for b in raw if isinstance(b, dict)) if cb]
+        if failed:
+            flags.append("malformed")
+        elif len(boxes) != len(raw):
+            flags.append("bad boxes")
+        return boxes, flags
     text = (msg.get("content") or "").strip()
+    if not text:
+        flags.append("empty")
     if want == "tags":
-        return [t.strip() for t in re.split(r'[,\n]', text) if t.strip()]
+        tags = [t.strip() for t in re.split(r'[,\n]', text) if t.strip()]
+        if text and not tags:
+            flags.append("empty")
+        if any(len(t.split()) > 6 for t in tags):
+            flags.append("sentence in tags")
+        return tags, flags
     if want == "bool":
         low = text.lower().lstrip("*_ \"'`")
-        return low.startswith(("y", "true")) or low[:8].find("yes") != -1
+        val = low.startswith(("y", "true")) or low[:8].find("yes") != -1
+        if text and not low.startswith(("yes", "no", "true", "false")):
+            flags.append("unclear yes/no")
+        return val, flags
     if want == "choice":
         low = text.lower()
         if choices:
-            for c in choices:
-                if c.lower() in low:
-                    return c
-            return choices[0]
-        return text
+            hit = [c for c in choices if c.lower() in low]
+            if text and len(hit) != 1:
+                flags.append("no choice" if not hit else "several choices")
+            return (hit[0] if hit else choices[0]), flags
+        return text, flags
     if want == "json":
         try:
-            return json.loads(text[text.find('{'):text.rfind('}')+1])
+            val = json.loads(text[text.find('{'):text.rfind('}') + 1])
         except Exception:
-            return {}
-    return text
+            val = None
+        if not isinstance(val, dict):
+            if text:
+                flags.append("malformed")
+            return {}, flags
+        if not val and "empty" not in flags:
+            flags.append("empty")
+        return val, flags
+    if want == "name" and (len(text.split()) > 8 or "\n" in text):
+        flags.append("not a name")
+    return text, flags
+
+
+def _first_token_prob(choice):
+    """! @brief Probability of the reply's first token, when the server sent logprobs."""
+    try:
+        lp = (choice.get("logprobs") or {}).get("content") or []
+        return float(np.exp(lp[0]["logprob"])) if lp else None
+    except Exception:
+        return None
+
+
+def _draft_text(want, value):
+    if want == "boxes":
+        return json.dumps({"boxes": value})
+    if want == "json":
+        return json.dumps(value, ensure_ascii=False)
+    if want == "tags":
+        return ", ".join(value or [])
+    if want == "bool":
+        return "yes" if value else "no"
+    return str(value or "")
+
+
+_VERIFY_FORMAT = {
+    "boxes": 'JSON: {"boxes": [{"class_name": "...", "cx": 0..1, "cy": 0..1, "w": 0..1, "h": 0..1}]}',
+    "json": "JSON, the same keys the task asks for",
+    "tags": "a comma-separated tag list",
+    "bool": "yes or no",
+    "choice": "one of the allowed choices",
+    "name": "only the name",
+}
+
+VERIFY_PROMPT = ("{prompt}\n\n---\nA smaller model answered this:\n{draft}\n{flags}"
+                 "Check that answer against the image and the task. If it is correct and complete, "
+                 "reply with exactly OK. Otherwise reply with only the corrected answer, as {fmt}.")
+
+
+def _is_ok(text):
+    t = (text or "").strip().strip(".!*_\"'` ").upper()
+    return t == "OK" or t == "OKAY"
+
+
+def verify(prompt, url, want, choices, draft, flags=None, timeout=600):
+    """! @brief Ask the confirming model about a draft answer. It replies OK (a few
+    tokens: the draft stands) or the corrected answer, parsed like the draft.
+    Any failure keeps the draft, so a down verify server never fails a run."""
+    fmt = _VERIFY_FORMAT.get(want, "plain text")
+    if want == "choice" and choices:
+        fmt = "one of: " + ", ".join(choices)
+    vp = VERIFY_PROMPT.format(prompt=prompt, draft=_draft_text(want, draft),
+                              flags=("It looked wrong because: %s.\n" % ", ".join(flags)) if flags else "",
+                              fmt=fmt)
+    try:
+        msg = request(_messages(vp, url), timeout=timeout, tier="verify")
+    except Exception as e:
+        _log("verify call failed, draft kept: %s" % e)
+        return draft, False
+    if _is_ok(msg.get("content")):
+        return draft, False
+    fixed, fixed_flags = parse(want, msg, choices)
+    if fixed_flags:
+        return draft, False          # the correction is no better formed than the draft
+    return fixed, True
+
+
+def _log(msg):
+    lg = getattr(HOST, "logger", None)
+    if lg is not None:
+        try:
+            lg.warning(msg)
+        except Exception:
+            pass
+
+
+STATS = {"calls": 0, "flagged": 0, "verified": 0, "corrected": 0}
+_STATS_LOCK = threading.Lock()
+
+
+def _count(**kw):
+    with _STATS_LOCK:
+        for k, v in kw.items():
+            STATS[k] = STATS.get(k, 0) + v
+
+
+def call(prompt, image_bgr, want="text", choices=None, endpoint=None, verify_mode=None):
+    """! @brief Typed single-turn call used by the pipeline engine. `want` controls parsing.
+    `endpoint` (optional) pins this call to a specific model instance.
+
+    Two tiers: the main model answers; with a confirming model configured
+    (oai_verify_model) and oai_verify_mode (or `verify_mode` for this call)
+    "always", or "flagged" and the answer is flagged (see parse(); with
+    oai_verify_min_prob > 0 also a yes/no or choice answered with a first-token
+    probability under it), the confirming model checks the answer and replies
+    OK or a correction. The image is encoded once and sent first both times."""
+    url = encode_image(image_bgr) if image_bgr is not None else None
+    messages = _messages(prompt, url)
+    cfg = _cfg()
+    mode = verify_mode if verify_mode in VERIFY_MODES else cfg.get("oai_verify_mode", "off")
+    if mode not in VERIFY_MODES:
+        mode = "off"
+    if mode != "off" and not verify_configured():
+        mode = "off"
+    try:
+        min_prob = float(cfg.get("oai_verify_min_prob") or 0)
+    except (TypeError, ValueError):
+        min_prob = 0.0
+    extra = {"logprobs": True} if (mode == "flagged" and min_prob > 0 and want in _SHORT) else None
+
+    if want == "boxes":
+        choice = request(messages, BOX_TOOL, _BOX_CHOICE, endpoint=endpoint, full=True)
+    else:
+        choice = request(messages, endpoint=endpoint, extra=extra, full=True)
+    msg = choice.get("message") or {}
+    value, flags = parse(want, msg, choices)
+    if choice.get("finish_reason") == "length":
+        flags.append("cut off")
+    if extra:
+        p = _first_token_prob(choice)
+        if p is not None and p < min_prob:
+            flags.append("unsure (p=%.2f)" % p)
+    _count(calls=1, flagged=1 if flags else 0)
+    if mode == "always" or (mode == "flagged" and flags):
+        value, changed = verify(prompt, url, want, choices, value, flags)
+        _count(verified=1, corrected=1 if changed else 0)
+    return value
 
 
 # -- embeddings (OpenAI-compatible /v1/embeddings) ----------------------------

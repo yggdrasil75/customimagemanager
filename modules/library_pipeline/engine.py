@@ -25,12 +25,15 @@ group's facts, so a preview reads like the result.
 import datetime
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from . import clustering as cl
 
 SCHEMA = "library/1"
 P = lambda name, type_, multi=False, opt=False: {"name": name, "type": type_, "multi": multi, "optional": opt}
 MAX_SAMPLES = 9
+# per-node override of the confirming model (vlm oai_verify_mode); "default" follows the setting
+VERIFY_PARAM = ["default", "off", "flagged", "always"]
 
 CATALOG = {
     "start": {"label": "Library", "kind": "io", "inputs": [],
@@ -101,13 +104,14 @@ CATALOG = {
     "ai_judge": {"label": "AI: keep groups matching a rule", "kind": "ai",
                  "inputs": [P("groups", "groups"), P("run", "bool", opt=True)],
                  "outputs": [P("kept", "groups"), P("rejected", "groups")],
-                 "params": {"rule": "textarea", "samples": "number"},
+                 "params": {"rule": "textarea", "samples": "number", "verify": VERIFY_PARAM},
                  "help": "The LLM sees each group's facts (dates, places, people, tags) and a contact sheet of "
                          "`samples` photos and answers whether it fits the rule; it also names the group. "
                          "Without an LLM every group is kept."},
     "ai_name": {"label": "AI: name and describe", "kind": "ai",
                 "inputs": [P("groups", "groups"), P("run", "bool", opt=True)], "outputs": [P("groups", "groups")],
-                "params": {"prompt": "textarea", "samples": "number", "template": "text", "overwrite": "bool"},
+                "params": {"prompt": "textarea", "samples": "number", "template": "text", "overwrite": "bool",
+                           "verify": VERIFY_PARAM},
                 "help": "A short album title and a one-sentence description from the group's facts and photos. "
                         "Without an LLM the template names it."},
     "name_template": {"label": "Name from template", "kind": "refine",
@@ -340,10 +344,16 @@ class Context:
     llm       fn(prompt, image_bgr or None, want) or None when no LLM is configured
     collage   fn(rel_paths) -> BGR contact sheet or None
     report    fn(message) for the run log / progress
+    workers   groups the AI nodes judge / name at once (the requests the LLM
+              endpoint takes in parallel); 1 = one after another
     """
 
-    def __init__(self, lib, llm=None, collage=None, report=None, auto_albums=None):
+    def __init__(self, lib, llm=None, collage=None, report=None, auto_albums=None, workers=1):
         self.lib = lib
+        try:
+            self.workers = max(1, int(workers or 1))
+        except (TypeError, ValueError):
+            self.workers = 1
         self.llm = llm
         self.collage = collage or (lambda rels: None)
         self.report = report or (lambda msg: None)
@@ -576,8 +586,36 @@ def n_union_groups(n, ins, ctx, report):
     return {"groups": out}
 
 
-def _ask(ctx, prompt, group, samples):
+def _pmap(ctx, fn, items, before=None):
+    """! @brief [fn(item)] in order, ctx.workers at a time. before(i) runs on the
+    calling thread ahead of item i's result (progress; it may raise Cancelled,
+    which stops the rest)."""
+    items = list(items)
+    n = min(getattr(ctx, "workers", 1) or 1, len(items))
+    if n <= 1:
+        out = []
+        for i, it in enumerate(items):
+            if before:
+                before(i)
+            out.append(fn(it))
+        return out
+    ex = ThreadPoolExecutor(max_workers=n, thread_name_prefix="library-ai")
+    try:
+        futs = [ex.submit(fn, it) for it in items]
+        out = []
+        for i, f in enumerate(futs):
+            if before:
+                before(i)
+            out.append(f.result())
+        return out
+    finally:
+        ex.shutdown(wait=True, cancel_futures=True)
+
+
+def _ask(ctx, prompt, group, samples, verify=None):
     img = ctx.collage(cl.sample(group["files"], max(0, min(MAX_SAMPLES, int(samples))))) if samples else None
+    if verify in VERIFY_PARAM[1:]:
+        return ctx.llm(prompt, img, "json", verify=verify)
     return ctx.llm(prompt, img, "json")
 
 
@@ -588,20 +626,23 @@ def n_ai_judge(n, ins, ctx, report):
         return {"kept": groups, "rejected": []}
     by = _by_rel(ctx, groups)
     kept, rejected = [], []
-    for i, g in enumerate(groups):
+
+    def judge(g):
         st = cl.stats(g, by)
         prompt = ("You organise a photo library into albums. Rule: %s\n\nCandidate group: %s\n\nThe image is a "
                   "contact sheet of photos from the group. Answer with JSON only: {\"keep\": true or false, "
                   "\"name\": \"short album title, at most 6 words\", \"description\": \"one sentence\", "
                   "\"reason\": \"why\"}" % (n.get("rule") or "", summary_text(g, st)))
-        ctx.report("AI judge %d/%d" % (i + 1, len(groups)))
         try:
-            ans = _ask(ctx, prompt, g, _num(n, "samples", 6)) or {}
+            return _ask(ctx, prompt, g, _num(n, "samples", 6), n.get("verify")) or {}
         except Cancelled:
             raise
         except Exception as e:
             report("AI judge failed (%s): group kept" % e)
-            ans = {"keep": True}
+            return {"keep": True}
+
+    answers = _pmap(ctx, judge, groups, lambda i: ctx.report("AI judge %d/%d" % (i + 1, len(groups))))
+    for g, ans in zip(groups, answers):
         g = dict(g)
         if ans.get("name") and not g.get("name"):
             g["name"] = str(ans["name"]).strip()[:80]
@@ -618,25 +659,31 @@ def n_ai_name(n, ins, ctx, report):
     by = _by_rel(ctx, groups)
     overwrite = _flag(n, "overwrite")
     out = []
+    todo = [i for i, g in enumerate(groups) if ctx.llm and (overwrite or not g.get("name"))]
+
+    def name(i):
+        g = groups[i]
+        prompt = ((n.get("prompt") or "Name this photo album.") + "\n\nGroup: %s\n\nThe image is a contact "
+                  "sheet of its photos. Answer with JSON only: {\"name\": \"short album title, at most 6 words, "
+                  "no dates unless they matter\", \"description\": \"one sentence about what happened\"}"
+                  % summary_text(g, cl.stats(g, by)))
+        try:
+            return _ask(ctx, prompt, g, _num(n, "samples", 6), n.get("verify")) or {}
+        except Cancelled:
+            raise
+        except Exception as e:
+            report("AI name failed: %s" % e)
+            return {}
+
+    answers = dict(zip(todo, _pmap(ctx, name, todo,
+                                   lambda k: ctx.report("AI name %d/%d" % (todo[k] + 1, len(groups))))))
     for i, g in enumerate(groups):
         g = dict(g)
         st = cl.stats(g, by)
         if g.get("name") and not overwrite:
             out.append(g)
             continue
-        ans = {}
-        if ctx.llm:
-            prompt = ((n.get("prompt") or "Name this photo album.") + "\n\nGroup: %s\n\nThe image is a contact "
-                      "sheet of its photos. Answer with JSON only: {\"name\": \"short album title, at most 6 words, "
-                      "no dates unless they matter\", \"description\": \"one sentence about what happened\"}"
-                      % summary_text(g, st))
-            ctx.report("AI name %d/%d" % (i + 1, len(groups)))
-            try:
-                ans = _ask(ctx, prompt, g, _num(n, "samples", 6)) or {}
-            except Cancelled:
-                raise
-            except Exception as e:
-                report("AI name failed: %s" % e)
+        ans = answers.get(i, {})
         g["name"] = (str(ans.get("name") or "").strip()[:80]
                      or render(n.get("template") or "", g, st) or fallback_name(g, st))
         if ans.get("description") and (overwrite or not g.get("description")):
