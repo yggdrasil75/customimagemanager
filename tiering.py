@@ -620,18 +620,27 @@ def _idle():
     ga = _state["get_last_activity"]
     return (time.time() - ga()) >= cfg.get("idle_sec", 120) if ga else True
 
-def rebalance(block=False, aggressive=False):
+def rebalance(block=False, aggressive=False, manual=False):
     """! @brief Start a rebalance.
     @param block       wait for it to finish.
     @param aggressive  no hysteresis, idle wait or throttle (used at boot).
+    @param manual      "Rebalance now": no idle wait (throttle still applies). A run already
+                       waiting for idle is told to stop waiting.
     """
-    def work():
-        run = _state["run"]
+    run = _state["run"]
+    if manual:
         with _state["lock"]:
             if run["active"]:
+                run["force"] = True
+                return
+    def work():
+        with _state["lock"]:
+            if run["active"]:
+                if manual:
+                    run["force"] = True
                 return
             run.update(active=True, phase="planning", planned=0, done=0,
-                       moved_bytes=0, errors=0, cancel=False)
+                       moved_bytes=0, errors=0, cancel=False, force=manual)
         try:
             cfg = load_cfg()
             if cfg["tiers"]:
@@ -658,8 +667,13 @@ def rebalance(block=False, aggressive=False):
             for mv in moves:
                 if run["cancel"]:
                     run["phase"] = "cancelled"; break
-                while not aggressive and not _idle() and not run["cancel"]:
-                    time.sleep(5)
+                if not aggressive and not run.get("force") and not _idle():
+                    run["phase"] = "waiting for idle"
+                    while not run.get("force") and not _idle() and not run["cancel"]:
+                        time.sleep(5)
+                    if run["cancel"]:
+                        run["phase"] = "cancelled"; break
+                    run["phase"] = "moving"
                 run["current"] = mv["rel"]
                 try:
                     moved = _execute_move(mv, cfg, mbps=0 if aggressive else None)

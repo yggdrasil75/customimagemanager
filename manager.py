@@ -4105,7 +4105,8 @@ def _folder_tree(counts: dict) -> dict:
 # -- routes --
 # Polled endpoints don't count as activity, or an open tab would keep the
 # idle-only background work from ever running.
-_POLL_PATHS = {"/api/state", "/api/faces/progress", "/api/workers"}
+_POLL_PATHS = {"/api/state", "/api/faces/progress", "/api/workers",
+               "/api/tiers/status", "/api/notifications/unread_count", "/api/training_log"}
 
 @app.before_request
 def _touch_activity():
@@ -7289,7 +7290,7 @@ def api_tiers_status():
 @app.route("/api/tiers/rebalance", methods=["POST"])
 @_auth.require_feature("settings.storage", level="write", action="tiers_rebalance")
 def api_tiers_rebalance():
-    tiering.rebalance(block=False)
+    tiering.rebalance(block=False, manual=True)
     return jsonify({"success": True})
 
 @app.route("/api/tiers/cancel", methods=["POST"])
