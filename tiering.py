@@ -412,7 +412,13 @@ def _dest_object_path(tier_path, rel):
     """! @brief The object path for a library file, named by its DocumentID."""
     ext = os.path.splitext(rel)[1].lower()
     ensure = _state.get("ensure_document_id")
-    name = _key(ensure(os.path.join(_state["media_dir"], rel))) if ensure else ""
+    name = ""
+    if ensure:
+        try:
+            name = _key(ensure(os.path.join(_state["media_dir"], rel)))
+        except Exception as e:
+            # no DocumentID (sidecar not writable): the move still goes ahead under a uuid
+            log.warning(f"no DocumentID for {rel}, using a uuid object name: {e}")
     name = name or uuid.uuid4().hex
     d = os.path.join(_object_root(tier_path), name[:2])
     os.makedirs(d, exist_ok=True)
@@ -571,9 +577,10 @@ def _execute_move(mv, cfg, mbps=None):
     if not os.path.exists(link_path):
         return False
     src_real = os.path.realpath(link_path)
-    dst = _dest_object_path(cfg["tiers"][mv["to"]]["path"], mv["rel"])
-    tmp = dst + ".part"
+    dst = tmp = None
     try:
+        dst = _dest_object_path(cfg["tiers"][mv["to"]]["path"], mv["rel"])
+        tmp = dst + ".part"
         _throttled_copy(src_real, tmp, cfg["throttle_mbps"] if mbps is None else mbps)
         if os.stat(tmp).st_size != os.stat(src_real).st_size:
             raise IOError("size mismatch after copy")
@@ -586,9 +593,12 @@ def _execute_move(mv, cfg, mbps=None):
             try: os.remove(src_real)
             except OSError: pass
         return True
-    except OSError as e:
+    except Exception as e:
+        # one bad file must not end the whole rebalance
         log.error(f"move {mv['rel']} -> tier {mv['to']}: {e}")
         for p in (tmp, dst):
+            if not p or p == src_real:
+                continue
             try: os.remove(p)
             except OSError: pass
         return False

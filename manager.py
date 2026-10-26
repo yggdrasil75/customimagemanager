@@ -1820,7 +1820,7 @@ def _ensure_document_id(filepath, doc_id=None):
     doc_id = doc_id or uuid.uuid4().hex
     res = update_file(filepath, xmp={"Xmp.xmpMM.DocumentID": doc_id}).get("xmp") or {"success": False, "skipped": "write failed"}
     if not res["success"]:
-        raise ValueError(f"DocumentID for {filepath}: {res['skipped']}")
+        raise ValueError(f"DocumentID for {filepath}: {res.get('skipped') or res.get('error') or 'write failed'}")
     return doc_id
 
 def _read_analysis_from_xmp(xmp_path):
