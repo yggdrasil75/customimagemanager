@@ -151,12 +151,67 @@ def safe_remove(path):
         return
     os.remove(path)
 
-def _collect_files(db, media_dir, cfg):
-    """! @brief One record per indexed media file: size, bitrate, quality."""
+_SKIP_DIRS = {OBJECT_DIR, "runs"}  # plus dot dirs and media/branding, as the indexer
+_FRESH_SEC = 600  # an unindexed file this new may still be being written
+
+
+def _unindexed_files(media_dir, cfg, known):
+    """! @brief Library files on disk with no `files` row: music, books, comics, PDFs,
+    .opf / .cue / covers and anything not indexed yet. Sidecars (.xmp), app data and
+    files written in the last _FRESH_SEC are left where they are.
+    @return [(rel, kind)]."""
+    try:
+        import media_types as mt
+        kind_of = mt.kind
+    except Exception:
+        kind_of = lambda p: "image"
+    tier_roots = {os.path.abspath(_object_root(t["path"])) for t in cfg["tiers"]}
+    now = time.time()
     out = []
-    rows = db.execute(
+    for dirpath, dirs, names in os.walk(media_dir):
+        if os.path.abspath(dirpath) in tier_roots:
+            dirs[:] = []
+            continue
+        at_root = os.path.abspath(dirpath) == os.path.abspath(media_dir)
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in _SKIP_DIRS
+                   and not (at_root and d == "branding")]
+        reldir = os.path.relpath(dirpath, media_dir).replace(os.sep, "/")
+        for n in names:
+            low = n.lower()
+            if (n.startswith(".") or low.endswith((".xmp", ".part", ".tmp"))
+                    or ".tierswap-" in n):
+                continue
+            rel = n if reldir == "." else reldir + "/" + n
+            if rel in known or _media_part(rel) != "library":
+                continue
+            p = os.path.join(dirpath, n)
+            try:
+                if os.path.islink(p):
+                    if not os.path.exists(p):
+                        continue
+                elif not os.path.isfile(p) or now - os.stat(p).st_mtime < _FRESH_SEC:
+                    continue
+            except OSError:
+                continue
+            try:
+                k = kind_of(n)
+            except Exception:
+                k = "image"
+            out.append((rel, k))
+    return out
+
+
+def _collect_files(db, media_dir, cfg):
+    """! @brief One record per library file (every kind: images, video, music, books,
+    comics, and files on disk the index has no row for): size, bitrate, quality."""
+    out = []
+    rows = [dict(r) for r in db.execute(
         "SELECT rel_path, media_kind, duration, iqa_score, width, height FROM files"
-    ).fetchall()
+    ).fetchall()]
+    known = {r["rel_path"] for r in rows}
+    rows += [{"rel_path": rel, "media_kind": k, "duration": None, "iqa_score": None,
+              "width": None, "height": None, "unindexed": True}
+             for rel, k in _unindexed_files(media_dir, cfg, known)]
     for r in rows:
         rel = r["rel_path"]
         ap  = os.path.join(media_dir, rel)
@@ -177,6 +232,7 @@ def _collect_files(db, media_dir, cfg):
             "iqa": r["iqa_score"] if r["iqa_score"] is not None else 2.5,
             "bpp": (size / px) if px else 1e9,
             "cur": current_tier_of(ap, cfg),
+            "indexed": not r.get("unindexed"),
         })
     return out
 
@@ -260,7 +316,8 @@ def plan(db=None, aggressive=False):
             off_budget = actual_used > budget[cur] * (1 + hyst)
             if not too_slow and not off_budget and abs(cur - tgt) <= 1:
                 continue
-        moves.append({"rel": f["rel"], "from": cur, "to": tgt, "size": f["size"]})
+        moves.append({"rel": f["rel"], "from": cur, "to": tgt, "size": f["size"],
+                      "indexed": f["indexed"]})
 
     stats = []
     for i, t in enumerate(tiers):
@@ -408,10 +465,13 @@ def _key(doc_id):
     """! @brief A DocumentID in comparable form: alphanumerics, lower case ("xmp.did:AB-12" == "ab12")."""
     return "".join(ch for ch in str(doc_id or "") if ch.isalnum()).lower()
 
-def _dest_object_path(tier_path, rel):
-    """! @brief The object path for a library file, named by its DocumentID."""
+def _dest_object_path(tier_path, rel, create_id=True):
+    """! @brief The object path for a library file, named by its DocumentID.
+    @param create_id  write a DocumentID when the file has none; False (files the index
+                      has no row for: .cue, .opf, covers) only reads one, so no sidecar
+                      is created beside them."""
     ext = os.path.splitext(rel)[1].lower()
-    ensure = _state.get("ensure_document_id")
+    ensure = _state.get("ensure_document_id") if create_id else _state.get("read_document_id")
     name = ""
     if ensure:
         try:
@@ -579,7 +639,8 @@ def _execute_move(mv, cfg, mbps=None):
     src_real = os.path.realpath(link_path)
     dst = tmp = None
     try:
-        dst = _dest_object_path(cfg["tiers"][mv["to"]]["path"], mv["rel"])
+        dst = _dest_object_path(cfg["tiers"][mv["to"]]["path"], mv["rel"],
+                                create_id=mv.get("indexed", True))
         tmp = dst + ".part"
         _throttled_copy(src_real, tmp, cfg["throttle_mbps"] if mbps is None else mbps)
         if os.stat(tmp).st_size != os.stat(src_real).st_size:
