@@ -688,8 +688,7 @@ function _renderSongList(el, songs, total, secs, semLabel) {
         <div class="flex items-center gap-2 min-w-0">
           ${inAlbum ? '' : `<div class="w-7 h-7 flex-shrink-0">${musicCoverBox(s.has_cover === false ? '' : s.rel_path, s.album + songArtist(s), '♪')}</div>`}
           <div class="min-w-0">
-            <div class="truncate ${cur ? 'text-blue-300' : ''}">${escHtml(s.title)}${s.video ?
-              ' <span class="text-[9px] text-pink-400" title="music video">🎬</span>' : ''}${s.has_emb ? '' :
+            <div class="truncate ${cur ? 'text-blue-300' : ''}">${escHtml(s.title)}${s.video}${s.has_emb ? '' :
               ' <span class="text-[9px] text-amber-500" title="no embedding yet">●</span>'}</div>
             ${inAlbum ? '' : `<div class="text-[10px] text-gray-500 truncate">${escHtml(songArtist(s))}</div>`}
           </div>
@@ -976,7 +975,7 @@ function _renderQueue() {
       class="flex items-center gap-2 px-2 py-1 cursor-pointer hover:bg-gray-800 ${cur ? 'bg-blue-900/40' : ''} ${past ? 'opacity-50' : ''}">
       <div class="w-8 h-8 flex-shrink-0">${musicCoverBox(s.has_cover === false ? '' : s.rel_path, s.album + songArtist(s), '♪')}</div>
       <div class="min-w-0 flex-1">
-        <div class="truncate ${cur ? 'text-blue-300' : 'text-gray-200'}">${escHtml(s.title)}${s.video ? ' <span class="text-[9px] text-pink-400">🎬</span>' : ''}</div>
+        <div class="truncate ${cur ? 'text-blue-300' : 'text-gray-200'}">${escHtml(s.title)}${s.video}</div>
         <div class="truncate text-[10px] text-gray-500">${escHtml(songArtist(s))}</div>
       </div>
       <button onclick="event.stopPropagation();musicAddToPlaylist([${jsArg(s.rel_path)}])" title="Add to a playlist"
@@ -1401,7 +1400,7 @@ function fillMusicEditor(s) {
     ? '<span class="text-green-400">embedded</span>' : '<span class="text-amber-500">no embedding</span>';
   t('mt_path', s.rel_path);
   const mv = _mq('mt_video');
-  if (mv) { mv.classList.toggle('hidden', !s.video || s.video === s.rel_path); mv.textContent = s.video ? '🎬 ' + s.video : ''; }
+  if (mv) { mv.classList.toggle('hidden', !s.video || s.video === s.rel_path); mv.textContent = s.video ? s.video : ''; }
   t('mt_saved', '');
   const dl = _mq('music_download');
   if (dl) { dl.href = musicStreamUrl(s.rel_path); dl.setAttribute('download', s.rel_path.split('/').pop()); }
