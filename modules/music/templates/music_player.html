@@ -1,7 +1,7 @@
 {# Music player: a centre-pane media mode (like the book reader and the comic
    reader). Shown via setMediaMode('music'); the track's tags live in the
-   controls pane's Track tab (music_editor.html). The <audio> element lives
-   here and keeps playing while the centre shows something else. #}
+   controls pane's Track tab (music_editor.html). The player element (a <video>,
+   so a music video can show) lives here and keeps playing while the centre shows something else. #}
 <div id="music_player" class="hidden flex-1 flex flex-col bg-gray-900 min-w-0">
 
   <!-- header -->
@@ -15,8 +15,7 @@
     <span id="mp_queue_label" class="text-[10px] text-gray-400 whitespace-nowrap"></span>
     <div class="flex gap-1 items-center">
       <span data-ext-area="music_player_tools" class="contents"></span>
-      <button onclick="musicToggleVideos()" id="mp_videos_btn"
-        title="Music videos: on (a track with a video plays it in place of the visualizer)"
+      <button onclick="musicToggleVideos()" id="mp_videos_btn" title="Music videos: on"
         class="text-[10px] bg-pink-700 hover:bg-pink-600 px-2 py-1 rounded">🎬 Videos</button>
       <select id="mp_vis_mode" onchange="musicSetVisMode(this.value)" title="Visualizer"
         class="bg-gray-700 rounded border border-gray-600 text-[10px] px-1 py-1">
@@ -31,12 +30,13 @@
   </div>
 
   <div class="flex-1 flex overflow-hidden min-h-0">
-    <!-- stage: cover + visualizer, or the track's music video -->
+    <!-- stage: cover + visualizer, or the track's music video (the player element itself) -->
     <div id="mp_stage" class="flex-1 relative overflow-hidden bg-black min-w-0">
       <div id="mp_backdrop" class="absolute inset-0 bg-center bg-cover opacity-25 blur-2xl scale-110"></div>
       <canvas id="mp_vis" class="absolute inset-0 w-full h-full"></canvas>
+      <!-- the player: a <video>, so a music video shows here; for audio the layer stays hidden -->
       <div id="mp_video_wrap" class="hidden absolute inset-0 bg-black flex items-center justify-center">
-        <video id="mp_video" preload="metadata" playsinline title="Double-click: full screen"
+        <video id="audio_el" preload="metadata" playsinline title="Double-click: full screen"
           class="w-full h-full object-contain"></video>
       </div>
       <div id="mp_cover_layer" class="absolute inset-0 flex items-center justify-center p-6 pb-24 pointer-events-none">
@@ -54,8 +54,6 @@
       </div>
       <div id="mp_radio_badge"
         class="hidden absolute top-2 left-2 text-[10px] bg-red-600/90 px-2 py-0.5 rounded font-bold">● RADIO</div>
-      <div id="mp_video_badge"
-        class="hidden absolute top-2 right-2 text-[10px] bg-pink-700/90 px-2 py-0.5 rounded font-bold pointer-events-none">🎬 MUSIC VIDEO</div>
     </div>
 
     <!-- up next -->
@@ -124,5 +122,4 @@
     </div>
   </div>
 
-  <audio id="audio_el" preload="metadata" class="hidden"></audio>
 </div>

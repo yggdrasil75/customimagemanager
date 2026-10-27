@@ -23,9 +23,8 @@ place. This module owns:
   - song identity (music_lib.song_key): the versions of one song across albums
     (studio / live / remaster / best-of / accidental copies) count as one song,
     so radio, shuffle-by and auto-similar never play them back to back;
-  - music videos: a video in a music section that is the same song as a track
-    (same folder and name, or the same artist + title) plays in the player in
-    place of the visualizer (/api/music/video/<path>).
+  - music videos: a video beside a track with the same name plays in place of
+    the visualizer when the track does; a video track shows itself.
 """
 import io
 import json
@@ -334,12 +333,8 @@ def register(host):
             log.error(f"music index {rel_path}: {e}")
         return True                      # handled: core skips the image path
     host.on("file.index", _file_index)
-    def _upload_stored(rel_path, filename):
-        if _is_video(rel_path) and _in_section(rel_path):
-            _videos_dirty()
-        if _is_music(rel_path):
-            threading.Thread(target=index_all, daemon=True).start()
-    host.on("upload.stored", _upload_stored)
+    host.on("upload.stored", lambda rel_path, filename:
+            threading.Thread(target=index_all, daemon=True).start() if _is_music(rel_path) else None)
 
     def _file_renamed(old_rel, new_rel):
         """! @brief A track keeps its row inside the sections; moved out it stops being
@@ -386,15 +381,16 @@ def register(host):
                 "cluster": r["cluster"], "tags": json.loads(r["tags"] or "[]"),
                 "has_emb": r["emb"] is not None,
                 "has_cover": _has_cover(r), "size": r["size"], "created": r["created"],
-                "song_key": _row_key(r), "video": _video_for(r["rel_path"], _row_key(r))}
+                "song_key": _row_key(r), "video": _video_for(r["rel_path"])}
 
     def _row_key(r):
         """! @brief The track's song key (music_lib.song_key), "" when its title folds to
         nothing (then it is a song of its own)."""
         try:
-            if _is_video(r["rel_path"]):
-                keys = _video_song_keys(r["rel_path"], r["title"], r["artist"], r["albumartist"])
-                return keys[0] if keys else ""
+            if _is_video(r["rel_path"]):     # a track's own video: the same song as the track
+                k = _video_pairs()["key_of_video"].get(r["rel_path"])
+                if k is not None:
+                    return k
             return ml.song_key(r["title"], r["artist"], r["albumartist"])
         except (IndexError, KeyError):
             return ""
@@ -625,44 +621,22 @@ def register(host):
                 "description_rel": info["description_rel"], "description": info["description"]}
 
     # -- music videos ------------------------------------------------------------
-    # A music video is a track of its own (a video row in the music table), and
-    # also the video of every version of its song: a track plays it in place of
-    # the visualizer when it sits beside it with the same name (03 - Song.flac +
-    # 03 - Song.mp4) or names the same song - its own title / artist tags,
-    # "Artist - Title (Official Video) [id].mp4", or "Title.mp4" under the
-    # artist's folder (Artist/Videos/...). The index is built from the video
-    # rows, again whenever a video is indexed, moved or deleted, and at most
-    # every _VIDEO_TTL seconds.
+    # A video beside a track with the same name (Artist/Album/Song.flac +
+    # Artist/Album/Song.mp4) is that track's music video: the track plays it in
+    # place of the visualizer, and the video's own row counts as the same song.
+    # Any other video in the section (Artist/Singles/Song.mp4) is a track of its
+    # own and nothing else. The pairs come from the music table's rows, again
+    # whenever a video is indexed, moved or deleted, and at most every _VIDEO_TTL s.
     _VIDEO_TTL = 600.0
-    _VIDEOS = {"built": 0.0, "dirty": True, "sibling": {}, "by_key": {}}
+    _VIDEOS = {"built": 0.0, "dirty": True, "video_of": {}, "key_of_video": {}}
     _video_lock = threading.Lock()
 
     def _videos_dirty():
         _VIDEOS["dirty"] = True
 
-    def _video_song_keys(rel, title, artist="", albumartist=""):
-        """! @brief The song keys a video stands for, best first: its tags, then
-        "Artist - Title" in the name, then the artist folder + the title."""
-        _, artist_dir = _section_dirs(rel)
-        folder_artist = os.path.basename(artist_dir) if artist_dir else ""
-        stem = os.path.splitext(os.path.basename(rel))[0]
-        title = (title or "").strip() or stem
-        keys = []
-        if artist or albumartist:
-            keys.append(ml.song_key(title, artist, albumartist))
-        for t in dict.fromkeys((title, stem)):
-            parts = re.split(r"\s+[-\u2013\u2014]\s+", t, maxsplit=1)
-            if len(parts) == 2:
-                left, right = parts
-                if not left.strip().isdigit():
-                    keys.append(ml.song_key(right, left))
-                keys.append(ml.song_key(right, folder_artist))
-            keys.append(ml.song_key(t, folder_artist))
-        return [k for k in dict.fromkeys(keys) if k]
-
-    def _video_index():
-        """! @brief {"sibling": {(dir, stem): rel}, "by_key": {song_key: [rel]}} over the
-        video rows, rebuilt when stale."""
+    def _video_pairs():
+        """! @brief {"video_of": {audio rel: video rel}, "key_of_video": {video rel: the
+        audio track's song key}}, rebuilt when stale."""
         now = time.time()
         if not _VIDEOS["dirty"] and now - _VIDEOS["built"] < _VIDEO_TTL:
             return _VIDEOS
@@ -671,70 +645,34 @@ def register(host):
                 return _VIDEOS
             _VIDEOS["dirty"] = False
             exts = sorted(getattr(host.media, "VIDEO_EXTS", ()) or ())
-            sibling, by_key = {}, {}
+            video_of, key_of_video = {}, {}
             if exts:
                 like = " OR ".join("lower(rel_path) LIKE ?" for _ in exts)
-                for r in db().execute(f"SELECT rel_path, title, artist, albumartist FROM music WHERE {like}",
-                                      [f"%{e}" for e in exts]):
-                    rel = r["rel_path"]
-                    d, name = os.path.split(rel)
-                    sibling[(d, os.path.splitext(name)[0].lower())] = rel
-                    for k in _video_song_keys(rel, r["title"], r["artist"], r["albumartist"]):
-                        by_key.setdefault(k, []).append(rel)
-            _VIDEOS.update(sibling=sibling, by_key=by_key, built=time.time())
+                videos = [r["rel_path"] for r in db().execute(
+                    f"SELECT rel_path FROM music WHERE {like}", [f"%{e}" for e in exts])]
+                for v in videos:
+                    stem = os.path.splitext(v)[0]
+                    pat = stem.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ".%"
+                    for r in db().execute("SELECT rel_path, title, artist, albumartist FROM music "
+                                          "WHERE rel_path LIKE ? ESCAPE '\\'", (pat,)):
+                        a = r["rel_path"]
+                        if _is_audio(a) and os.path.splitext(a)[0] == stem:
+                            video_of[a] = v
+                            key_of_video[v] = ml.song_key(r["title"], r["artist"], r["albumartist"])
+                            break
+            _VIDEOS.update(video_of=video_of, key_of_video=key_of_video, built=time.time())
         return _VIDEOS
 
-    def _can_see(rel):
-        try:
-            return bool(host.check_path(rel))
-        except Exception:
-            return False
-
-    def _video_for(rel_path, key=""):
-        """! @brief The music video of a track (rel path) the requester may see, or None:
-        a video track is its own; else the one beside it with the same name first,
-        then one that is the same song, nearest the track (same artist folder, same
-        section) first."""
+    def _video_for(rel_path):
+        """! @brief The video a track plays (rel path), or None: a video track is its own;
+        an audio track has the one beside it with the same name, if any."""
         if _is_video(rel_path):
             return rel_path
         try:
-            idx = _video_index()
+            return _video_pairs()["video_of"].get(rel_path)
         except Exception as e:
-            log.error(f"music video index: {e}")
+            log.error(f"music videos: {e}")
             return None
-        d, name = os.path.split(rel_path)
-        cands = []
-        v = idx["sibling"].get((d, os.path.splitext(name)[0].lower()))
-        if v:
-            cands.append(v)
-        if key and key in idx["by_key"]:
-            _, artist_dir = _section_dirs(rel_path)
-            base = rel_path[:len(rel_path) - len(host.core.library_section(rel_path)[2] or "")]
-            cands += sorted(idx["by_key"][key], key=lambda c: (
-                not (artist_dir and c.startswith(artist_dir + "/")), not c.startswith(base), c))
-        for c in cands:
-            if _can_see(c):
-                return c
-        return None
-
-    def video(filename):
-        """! @brief Stream a music video: like /api/file for a video (the browser copy when
-        the original won't play; 202 + progress while that copy is being made), but
-        under the Music tab's permission and only for videos in a music section."""
-        if not _is_video(filename) or not _in_section(filename) or not host.check_path(filename):
-            return jsonify({"success": False, "error": "not found"}), 404
-        fp = host.safe_path(host.media_dir, filename)
-        if not fp or not os.path.exists(fp):
-            return jsonify({"success": False, "error": "not found"}), 404
-        enc = host.get_service("encoding")
-        serve = getattr(enc, "video_serve_path", None) if enc is not None else None
-        if serve is not None and request.args.get("original") not in ("1", "true"):
-            path, extra = serve(filename, fp)
-            if path is None:
-                return jsonify({"success": False, "preparing": True, **(extra or {})}), 202
-            if path != fp:
-                return send_file(os.path.abspath(path), mimetype=extra, conditional=True)
-        return send_file(os.path.abspath(fp), mimetype=host.media.mime_for(filename), conditional=True)
 
     def artists():
         a = request.args
@@ -1398,7 +1336,6 @@ def register(host):
         ("/api/music/shuffle", shuffle, ["POST"], R), ("/api/music/similar", similar, ["POST"], R),
         ("/api/music/radio/next", radio_next, ["POST"], R), ("/api/music/radio/played", radio_played, ["POST"], R),
         ("/api/music/radio/status", radio_status, ["GET"], R),
-        ("/api/music/video/<path:filename>", video, ["GET"], R),
     ):
         host.add_route(rule, fn, methods=methods, feature="tab.music", level=level)
 
@@ -1407,7 +1344,7 @@ def register(host):
                                        rp, set={k: d[k] for k in _TAG_KEYS + ("tags",) if k in d}
                                    ).get("success", False),
                                    "similar_tracks": similar_tracks, "semantic_songs": semantic_songs,
-                                   "radio_round": radio_round, "video_for": _video_for})
+                                   "radio_round": radio_round})
 
     ## @brief The editor's Similar button routes audio here (embedding module hosts
     # it). The embedding module may load after us, so register lazily.

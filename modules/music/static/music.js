@@ -29,8 +29,8 @@ let musicAutoSimilar = false; // when a track ends, pick the next by embedding s
 let musicSimilarSeed = '';    // rel_path the current list is "similar to"
 let musicRepeat = 'off';      // off | all | one
 let musicShuffle = false;
-let musicVideos = true;       // play a track's music video (when it has one) in place of the visualizer
-let _mpVideoOn = false;       // the video element is the one playing the current track
+let musicVideos = true;       // a track with a music video shows it in place of the visualizer
+let _mpVideoOn = false;       // the player element is showing a video right now
 let _musicSearchTimer = null;
 let _musicEditSong = null;    // the song the Track tab shows
 let _musicPrevFile = null;    // the image the player replaced in the centre
@@ -102,8 +102,7 @@ function showToastM(msg) {
 }
 function musicCoverUrl(rel) { return rel ? '/api/music/cover/' + encodeURI(rel) : ''; }
 function musicStreamUrl(rel) { return '/api/music/stream/' + encodeURI(rel); }
-function musicVideoUrl(rel) { return '/api/music/video/' + encodeURI(rel); }
-/** @brief The song a track is a version of (server song_key; '' = its own song). */
+/** @brief The song a track is a version of (server song_key; else the track itself). */
 function songKey(s) { return (s && (s.song_key || ('path:' + s.rel_path))) || ''; }
 function songArtist(s) { return (s && (s.artist || s.albumartist)) || ''; }
 
@@ -690,7 +689,7 @@ function _renderSongList(el, songs, total, secs, semLabel) {
           ${inAlbum ? '' : `<div class="w-7 h-7 flex-shrink-0">${musicCoverBox(s.has_cover === false ? '' : s.rel_path, s.album + songArtist(s), '♪')}</div>`}
           <div class="min-w-0">
             <div class="truncate ${cur ? 'text-blue-300' : ''}">${escHtml(s.title)}${s.video ?
-              ' <span class="text-[9px] text-pink-400" title="has a music video">🎬</span>' : ''}${s.has_emb ? '' :
+              ' <span class="text-[9px] text-pink-400" title="music video">🎬</span>' : ''}${s.has_emb ? '' :
               ' <span class="text-[9px] text-amber-500" title="no embedding yet">●</span>'}</div>
             ${inAlbum ? '' : `<div class="text-[10px] text-gray-500 truncate">${escHtml(songArtist(s))}</div>`}
           </div>
@@ -757,15 +756,14 @@ function _shuffled(list) {
 }
 /** @brief Keep versions of one song (the same song on several albums) from playing
  *  within a few tracks of each other: a clashing track swaps with the nearest
- *  later one that doesn't clash. Tracks that can't be placed stay where they are. */
-function _spreadVersions(a, windowN) {
-  const w = windowN || Math.min(5, Math.max(1, Math.floor(a.length / 4)));
+ *  later one that doesn't clash. */
+function _spreadVersions(a) {
+  const w = Math.min(5, Math.max(1, Math.floor(a.length / 4)));
   const clashes = (i, k) => { for (let m = Math.max(0, i - w); m < i; m++) if (songKey(a[m]) === k) return true; return false; };
   for (let i = 1; i < a.length; i++) {
     if (!clashes(i, songKey(a[i]))) continue;
-    for (let j = i + 1; j < a.length; j++) {
+    for (let j = i + 1; j < a.length; j++)
       if (!clashes(i, songKey(a[j]))) { [a[i], a[j]] = [a[j], a[i]]; break; }
-    }
   }
   return a;
 }
@@ -782,80 +780,7 @@ function _markPlayingRow() {
  * PLAYER (centre pane)
  * ========================================================================== */
 
-function _audioEl() { return _mq('audio_el'); }
-function _videoEl() { return _mq('mp_video'); }
-/** @brief The element playing the current track: the music video when one is on,
- *  else the audio file. Transport, scrub bar, keys and media keys all act on it. */
-function _audio() { return (_mpVideoOn && _videoEl()) || _audioEl(); }
-
-/** @brief Stop and unload an element that isn't playing the current track. */
-function _unload(el) {
-  if (!el || !el.getAttribute('src')) return;
-  el.pause(); el.removeAttribute('src');
-  try { el.load(); } catch (e) {}
-}
-
-/** @brief Show the video layer (or the cover + visualizer). */
-function _showVideoLayer(on) {
-  _mq('mp_video_wrap')?.classList.toggle('hidden', !on);
-  for (const id of ['mp_vis', 'mp_backdrop', 'mp_cover_layer', 'mp_title_layer'])
-    _mq(id)?.classList.toggle('hidden', on);
-  const vb = _mq('mp_video_badge'); if (vb) vb.classList.toggle('hidden', !on);
-}
-
-/** @brief Load track `s` into the right element: its music video when it has one and
- *  videos are on, else the audio file. `at` seeks (seconds) once it can. */
-function _loadTrack(s, at) {
-  const au = _audioEl(), vi = _videoEl();
-  const useVideo = !!(musicVideos && s.video && vi);
-  _mpVideoOn = useVideo;
-  const el = useVideo ? vi : au;
-  _unload(useVideo ? au : vi);
-  _showVideoLayer(useVideo);
-  el.src = useVideo ? musicVideoUrl(s.video) : musicStreamUrl(s.rel_path);
-  el.dataset.rel = s.rel_path;
-  if (at) el.addEventListener('loadedmetadata', () => {
-    try { el.currentTime = Math.min(at, Math.max(0, (el.duration || at) - 1)); } catch (e) {}
-  }, { once: true });
-  _syncVolumeUi(true);
-  el.play().catch(() => {});
-}
-
-/** @brief A music video that can't play (missing, a browser copy still being made,
- *  a codec the browser lacks): the track's audio file plays instead. */
-function _videoFailed() {
-  const s = musicQueue[musicQueueIdx];
-  if (!_mpVideoOn || !s) return;
-  showToastM('Music video unavailable right now - playing the audio.');
-  const keep = musicVideos; musicVideos = false;
-  _loadTrack(s);
-  musicVideos = keep;
-}
-
-function musicToggleVideos() {
-  musicVideos = !musicVideos;
-  try { localStorage.setItem('cim.music.videos', musicVideos ? '1' : '0'); } catch (e) {}
-  _videosButton();
-  // switch the current track over now, about where it was
-  const s = musicQueue[musicQueueIdx];
-  if (s && s.video) {
-    const cur = _audio(), t = cur ? cur.currentTime : 0, paused = cur ? cur.paused : true;
-    _loadTrack(s, t);
-    if (paused) _audio().pause();
-  }
-  if (!musicVideos || !s?.video) _visStart();
-}
-function _videosButton() {
-  const b = _mq('mp_videos_btn'); if (!b) return;
-  b.classList.toggle('bg-pink-700', musicVideos); b.classList.toggle('bg-gray-700', !musicVideos);
-  b.title = musicVideos ? 'Music videos: on (a track with a video plays it in place of the visualizer)'
-                        : 'Music videos: off (always the audio file and the visualizer)';
-}
-function musicVideoFullscreen() {
-  const st = _mq('mp_video_wrap'); if (!st) return;
-  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-  else if (st.requestFullscreen) st.requestFullscreen().catch(() => {});
-}
+function _audio() { return _mq('audio_el'); }
 
 /** @brief Start playing `list` at index i and bring the player into the centre. */
 function musicPlay(list, i, source) {
@@ -873,16 +798,47 @@ function musicPlay(list, i, source) {
 
 function playFromQueue(i) {
   const s = musicQueue[i];
-  if (!s || !_audioEl()) return;
+  const a = _audio();
+  if (!s || !a) return;
   musicQueueIdx = i;
   _visInit();
-  _loadTrack(s);
+  _setSource(s);
   _showNowPlaying(s);
   if (musicRadio) {
     _musicPost('/api/music/radio/played', { rel_path: s.rel_path });
     const row = _mq('music_radio_pos');
     if (row) row.textContent = `${i + 1}/${musicQueue.length}`;
   }
+}
+
+/** @brief Point the player at track `s`: its music video (through the gallery's
+ *  CIMVideo, which serves the browser copy and shows its progress) when it has one
+ *  and videos are on, else the audio stream with the visualizer. */
+function _setSource(s, video) {
+  const a = _audio();
+  const v = video === undefined ? (musicVideos && window.CIMVideo ? s.video : null) : video;
+  _mpVideoOn = !!v;
+  _mq('mp_video_wrap')?.classList.toggle('hidden', !v);
+  for (const id of ['mp_vis', 'mp_backdrop', 'mp_cover_layer', 'mp_title_layer'])
+    _mq(id)?.classList.toggle('hidden', !!v);
+  a.autoplay = true;                      // CIMVideo sets the source when the copy is ready
+  if (v) { window.CIMVideo.load(a, v); return; }
+  if (window.CIMVideo) window.CIMVideo.clear(a);
+  a.src = musicStreamUrl(s.rel_path);
+  a.play().catch(() => {});
+}
+
+function musicToggleVideos() {
+  musicVideos = !musicVideos;
+  try { localStorage.setItem('cim.music.videos', musicVideos ? '1' : '0'); } catch (e) {}
+  _videosButton();
+  const s = musicQueue[musicQueueIdx];
+  if (s && s.video) { _setSource(s); _visStart(); }
+}
+function _videosButton() {
+  const b = _mq('mp_videos_btn'); if (!b) return;
+  b.classList.toggle('bg-pink-700', musicVideos); b.classList.toggle('bg-gray-700', !musicVideos);
+  b.title = musicVideos ? 'Music videos: on' : 'Music videos: off (audio and the visualizer)';
 }
 
 function _showNowPlaying(s) {
@@ -987,13 +943,11 @@ function musicSetVolume(v) {
   const a = _audio(); if (!a) return;
   a.volume = Math.max(0, Math.min(1, +v)); a.muted = false;
   try { localStorage.setItem('cim.music.volume', String(a.volume)); } catch (e) {}
-  _syncVolumeUi(true);
+  _syncVolumeUi();
 }
-function musicToggleMute() { const a = _audio(); if (a) { a.muted = !a.muted; _syncVolumeUi(true); } }
-/** @param copy  carry the playing element's volume / mute over to the other one */
-function _syncVolumeUi(copy) {
+function musicToggleMute() { const a = _audio(); if (a) { a.muted = !a.muted; _syncVolumeUi(); } }
+function _syncVolumeUi() {
   const a = _audio(); if (!a) return;
-  if (copy) for (const o of [_audioEl(), _videoEl()]) if (o && o !== a) { o.volume = a.volume; o.muted = a.muted; }
   const m = _mq('mp_mute'), v = _mq('mp_volume');
   if (v) v.value = a.muted ? 0 : a.volume;
   if (m) m.textContent = (a.muted || a.volume === 0) ? '🔇' : a.volume < 0.5 ? '🔉' : '🔊';
@@ -1036,15 +990,9 @@ function _renderQueue() {
 
 // -- scrub bar + audio events -------------------------------------------------------
 function _scrubInit() {
-  const bar = _mq('mp_scrub'), au = _audioEl();
-  if (!bar || !au || bar._wired) return;
+  const bar = _mq('mp_scrub'), a = _audio();
+  if (!bar || !a || bar._wired) return;
   bar._wired = true;
-  // `a` is whichever element plays the current track (audio file or music video)
-  const els = [au, _videoEl()].filter(Boolean);
-  const A = () => _audio();
-  const a = { get duration() { return A().duration; }, get currentTime() { return A().currentTime; },
-              set currentTime(v) { A().currentTime = v; }, get buffered() { return A().buffered; },
-              get paused() { return A().paused; } };
   let dragging = false;
   const frac = e => {
     const r = bar.getBoundingClientRect();
@@ -1078,34 +1026,39 @@ function _scrubInit() {
       _mq('mp_buffered').style.width = (d && b.length ? (b.end(b.length - 1) / d) * 100 : 0) + '%';
     } catch (e) {}
   };
-  // events from the element that isn't playing the current track are ignored
-  const on = (ev, fn) => els.forEach(el => el.addEventListener(ev, e => { if (e.target === A()) fn(e); }));
-  on('timeupdate', tick);
-  on('durationchange', tick);
-  on('progress', tick);
-  on('ended', () => playNext(true));
+  a.addEventListener('timeupdate', tick);
+  a.addEventListener('durationchange', tick);
+  a.addEventListener('progress', tick);
+  a.addEventListener('ended', () => playNext(true));
   const playState = () => {
     const b = _mq('mp_play'); if (b) b.textContent = a.paused ? '▶' : '❚❚';
     const ic = _mq('music_np_chip_icon'); if (ic) ic.textContent = a.paused ? '❚❚' : '♪';
     if (!a.paused) _visStart();
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = a.paused ? 'paused' : 'playing';
   };
-  on('play', playState);
-  on('pause', playState);
-  on('error', e => {
-    if (!e.target.getAttribute('src')) return;
-    if (e.target === _videoEl()) { _videoFailed(); return; }
+  a.addEventListener('play', playState);
+  a.addEventListener('pause', playState);
+  a.addEventListener('error', () => {
+    if (!a.getAttribute('src')) return;
+    const s = musicQueue[musicQueueIdx];
+    if (_mpVideoOn && s && s.video !== s.rel_path) {
+      // the track's video won't play: the track's own audio does
+      showToastM('Music video unavailable - playing the audio.');
+      _setSource(s, null);
+      return;
+    }
     showToastM('Could not play this track - skipping.');
     setTimeout(() => playNext(true), 800);
   });
-  let vol = 1;
-  try { const v = parseFloat(localStorage.getItem('cim.music.volume')); if (!isNaN(v)) vol = v; } catch (e) {}
-  for (const el of els) el.volume = Math.max(0, Math.min(1, vol));
-  _syncVolumeUi();
   try { musicVideos = localStorage.getItem('cim.music.videos') !== '0'; } catch (e) {}
   _videosButton();
-  const vi = _videoEl();
-  if (vi) vi.addEventListener('dblclick', musicVideoFullscreen);
+  a.addEventListener('dblclick', () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else if (_mpVideoOn && a.requestFullscreen) a.requestFullscreen().catch(() => {});
+  });
+  let vol = 1;
+  try { const v = parseFloat(localStorage.getItem('cim.music.volume')); if (!isNaN(v)) vol = v; } catch (e) {}
+  a.volume = Math.max(0, Math.min(1, vol)); _syncVolumeUi();
   try { if (localStorage.getItem('cim.music.queue') === '1') _mq('mp_queue')?.classList.remove('hidden'); } catch (e) {}
   try {
     const vm = localStorage.getItem('cim.music.vis');
@@ -1141,10 +1094,11 @@ function _mediaSession(s) {
     });
     if (!_mediaSession._wired) {
       _mediaSession._wired = true;
+      const a = _audio();
       const h = {
-        play: () => _audio().play().catch(() => {}), pause: () => _audio().pause(),
+        play: () => a.play().catch(() => {}), pause: () => a.pause(),
         previoustrack: () => playPrev(), nexttrack: () => playNext(),
-        seekto: d => { if (d && d.seekTime != null) _audio().currentTime = d.seekTime; },
+        seekto: d => { if (d && d.seekTime != null) a.currentTime = d.seekTime; },
       };
       for (const k in h) { try { navigator.mediaSession.setActionHandler(k, h[k]); } catch (e) {} }
     }
@@ -1164,7 +1118,7 @@ function _visInit() {
   _scrubInit();
   if (_visCtx) return;
   const AC = window.AudioContext || window.webkitAudioContext;
-  const a = _audioEl();
+  const a = _audio();
   if (!AC || !a) return;
   try {
     _visCtx = new AC();
@@ -1224,7 +1178,7 @@ function _visStart() {
   if (_visRaf || _visMode === 'off' || !_visAnalyser || _mpVideoOn) return;
   const loop = () => {
     _visRaf = 0;
-    const a = _audioEl();
+    const a = _audio();
     const showing = typeof mediaMode !== 'undefined' && mediaMode === 'music';
     if (!a || _visMode === 'off' || !showing || _mpVideoOn) return;
     _visDraw(a.paused);
@@ -1348,7 +1302,7 @@ function _radioButton() {
   if (pos && !musicRadio) pos.textContent = '';
 }
 
-const _musicPlayed = new Set();   // songs (song keys) played under auto-similar, so it doesn't loop
+const _musicPlayed = new Set();   // songs (song keys) played under auto-similar, so none comes back
 
 function toggleAutoSimilar() {
   musicAutoSimilar = !musicAutoSimilar;
@@ -1371,8 +1325,7 @@ async function playNextSimilar() {
   const s = musicQueue[musicQueueIdx];
   if (!s) return;
   _musicPlayed.add(songKey(s));
-  // the server already leaves out other versions of this song; skip every song
-  // played so far too, so a song never comes back as another album's copy
+  // the server leaves out other versions of this song; skip songs played so far too
   const songs = await fetchSimilar(s.rel_path, 30);
   if (!songs) return;
   const next = songs.find(x => !_musicPlayed.has(songKey(x))) || songs[0];
@@ -1448,7 +1401,7 @@ function fillMusicEditor(s) {
     ? '<span class="text-green-400">embedded</span>' : '<span class="text-amber-500">no embedding</span>';
   t('mt_path', s.rel_path);
   const mv = _mq('mt_video');
-  if (mv) { mv.classList.toggle('hidden', !s.video); mv.textContent = s.video ? '🎬 ' + s.video : ''; }
+  if (mv) { mv.classList.toggle('hidden', !s.video || s.video === s.rel_path); mv.textContent = s.video ? '🎬 ' + s.video : ''; }
   t('mt_saved', '');
   const dl = _mq('music_download');
   if (dl) { dl.href = musicStreamUrl(s.rel_path); dl.setAttribute('download', s.rel_path.split('/').pop()); }

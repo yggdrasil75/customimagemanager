@@ -147,11 +147,12 @@ def test_shuffle_by_artist_is_one_per_song(client, chicago):
 
 
 # -- music videos -------------------------------------------------------------------
-def _touch(app, rel, data=b"\x00" * 64):
+def _touch(app, host, rel):
     ap = os.path.join(app.MEDIA_DIR, rel)
     os.makedirs(os.path.dirname(ap), exist_ok=True)
     with open(ap, "wb") as f:
-        f.write(data)
+        f.write(b"\x00" * 64)
+    host.emit("file.index", rel_path=rel, abs_path=ap, force=True)
     return ap
 
 
@@ -159,63 +160,62 @@ def _song(client, rel):
     return client.get("/api/music/track", query_string={"rel_path": rel}).get_json()["song"]
 
 
-def test_music_video_by_name_and_beside_the_track(client, chicago, app, host):
-    yt = "music/Chicago/Videos/Chicago - Saturday in the Park (Official Video) [abcdefghijk].mp4"
-    beside = "music/Chicago/Chicago V/02 - 25 or 6 to 4.mp4"
-    by_folder = "music/Chicago/Videos/Beginnings.webm"
-    for rel in (yt, beside, by_folder):
-        ap = _touch(app, rel)
-        host.emit("file.index", rel_path=rel, abs_path=ap, force=True)
-    for al in _ALBUMS:     # every version of the song has the video
-        sat = next(r for r in chicago if r.startswith(f"music/Chicago/{al}/") and "Saturday" in r)
-        assert _song(client, sat)["video"] == yt
-    assert _song(client, "music/Chicago/Chicago V/02 - 25 or 6 to 4.flac")["video"] == beside
-    assert _song(client, "music/Chicago/Live in Japan/03 - Beginnings.flac")["video"] == by_folder
-    assert _song(client, "music/Chicago/Chicago V/06 - Old Days.flac")["video"] is None
-    # the video lists in the songs reply too
-    songs = client.get("/api/music/songs", query_string={"q": "Beginnings"}).get_json()["songs"]
-    assert {s["video"] for s in songs} == {by_folder}
+def test_a_video_beside_a_track_is_its_video_only(client, chicago, app, host):
+    track = "music/Chicago/Chicago V/01 - Saturday in the Park.flac"
+    vid = "music/Chicago/Chicago V/01 - Saturday in the Park.mp4"
+    _touch(app, host, vid)
+    assert _song(client, track)["video"] == vid
+    # the other albums' versions of the song don't get it
+    for al in _ALBUMS[1:]:
+        other = next(r for r in chicago if r.startswith(f"music/Chicago/{al}/") and "Saturday" in r)
+        assert _song(client, other)["video"] is None
+    # the video's own row is the same song as its track
+    assert _song(client, vid)["song_key"] == _song(client, track)["song_key"]
 
 
-def test_music_video_route(client, chicago, app, host):
-    rel = "music/Chicago/Videos/Old Days.mp4"
-    _touch(app, rel)
-    host.emit("file.index", rel_path=rel, abs_path=os.path.join(app.MEDIA_DIR, rel), force=True)
-    r = client.get("/api/music/video/" + rel)
-    assert r.status_code in (200, 202)          # 202: a browser copy is being made
-    assert client.get("/api/music/video/music/Chicago/Chicago V/06 - Old Days.flac").status_code == 404
-    _touch(app, "loose/clip.mp4")
-    try:
-        assert client.get("/api/music/video/loose/clip.mp4").status_code == 404
-    finally:
-        shutil.rmtree(os.path.join(app.MEDIA_DIR, "loose"), ignore_errors=True)
+def test_a_standalone_video_is_a_track_of_its_own(client, chicago, app, host):
+    vid = "music/Chicago/Singles/Old Days.mp4"
+    _touch(app, host, vid)
+    assert _song(client, vid)["video"] == vid
+    for r in chicago:
+        assert _song(client, r)["video"] is None
 
 
-def test_deleted_video_drops_out(client, chicago, app, host):
-    rel = "music/Chicago/Videos/Old Days.mp4"
-    ap = _touch(app, rel)
-    host.emit("file.index", rel_path=rel, abs_path=ap, force=True)
-    track = "music/Chicago/Chicago V/06 - Old Days.flac"
-    assert _song(client, track)["video"] == rel
-    os.remove(ap)
-    host.emit("file.deleted", rel_path=rel)
-    assert _song(client, track)["video"] is None
-
-
-def test_a_music_video_track_is_one_more_version(client, chicago, app, host):
-    """! @brief A video in the section is a track of its own: it plays as itself, and in
-    a radio round it and the song's audio versions are one song."""
-    rel = "music/Chicago/Videos/Chicago - Old Days (Official Video) [abcdefghijk].mp4"
-    ap = _touch(app, rel)
-    host.emit("file.index", rel_path=rel, abs_path=ap, force=True)
+def test_a_track_video_and_its_track_play_once_per_round(client, chicago, app, host):
+    vid = "music/Chicago/Chicago V/06 - Old Days.mp4"
+    _touch(app, host, vid)
     db = app.module_host.db()
     db.execute("UPDATE music SET emb=?, emb_sig=? WHERE rel_path=?",
-               (ml._pack_emb(_SONGS["Old Days"]), "test-audio", rel))
+               (ml._pack_emb(_SONGS["Old Days"]), "test-audio", vid))
     db.commit()
-    s = _song(client, rel)
-    assert s["video"] == rel and s["song_key"] == ml.song_key("Old Days", "Chicago")
     d = client.post("/api/music/radio/next", json={"seed": 4}).get_json()
     keys = [x["song_key"] for x in d["songs"]]
     assert len(keys) == len(set(keys)) == len(_SONGS)
-    sim = client.post("/api/music/similar", json={"rel_path": rel, "top_k": 5}).get_json()["songs"]
-    assert ml.song_key("Old Days", "Chicago") not in [x["song_key"] for x in sim]
+
+
+def test_deleted_video_drops_out(client, chicago, app, host):
+    track = "music/Chicago/Chicago V/06 - Old Days.flac"
+    vid = "music/Chicago/Chicago V/06 - Old Days.mp4"
+    ap = _touch(app, host, vid)
+    assert _song(client, track)["video"] == vid
+    os.remove(ap)
+    host.emit("file.deleted", rel_path=vid)
+    assert _song(client, track)["video"] is None
+
+
+def test_artist_folder_tracks_and_concerts(client, chicago, app, host):
+    """! @brief Compilation-style tracks straight in the artist folder pair with a video
+    of the same name there; a full concert video there is a track of its own."""
+    db = app.module_host.db()
+    loose = "music/Chicago/Hard Habit to Break.flac"
+    db.execute("INSERT OR REPLACE INTO music(rel_path,title,artist,album,duration,tags,created) "
+               "VALUES(?,?,?,?,?,?,?)", (loose, "Hard Habit to Break", "Chicago", "", 240.0, "[]", time.time()))
+    db.commit()
+    vid = "music/Chicago/Hard Habit to Break.mp4"
+    concert = "music/Chicago/Live at Tanglewood 1970.mp4"
+    _touch(app, host, vid)
+    _touch(app, host, concert)
+    assert _song(client, loose)["video"] == vid
+    assert _song(client, concert)["video"] == concert
+    assert _song(client, concert)["song_key"] != _song(client, loose)["song_key"]
+    assert all(_song(client, r)["video"] is None for r in chicago)
