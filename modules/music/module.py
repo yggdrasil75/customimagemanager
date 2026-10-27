@@ -19,7 +19,13 @@ place. This module owns:
   - the 'music' centre-pane media mode (music_player.html: cover, visualizer,
     scrub bar, transport, up-next) and the Track controls tab
     (music_editor.html), the same split books and comics use;
-  - gallery search results for tracks (one tile per track, like books).
+  - gallery search results for tracks (one tile per track, like books);
+  - song identity (music_lib.song_key): the versions of one song across albums
+    (studio / live / remaster / best-of / accidental copies) count as one song,
+    so radio, shuffle-by and auto-similar never play them back to back;
+  - music videos: a video in a music section that is the same song as a track
+    (same folder and name, or the same artist + title) plays in the player in
+    place of the visualizer (/api/music/video/<path>).
 """
 import io
 import json
@@ -41,7 +47,7 @@ from . import music_lib as ml
 MANIFEST = {
     "id":          "music",
     "name":        "Music",
-    "version":     "2.0.0",
+    "version":     "2.1.0",
     "description": "Music library: artists/albums/songs, player, tag editor, audio "
                    "similarity (embeddings, clustering, shuffle-by).",
     "core":        False,
@@ -216,6 +222,7 @@ def register(host):
             state["status"] = "idle"
         finally:
             state["indexing"] = False
+            _videos_dirty()
 
     def embed_all(force=False):
         if state["embedding"]:
@@ -308,6 +315,7 @@ def register(host):
                     upsert(rel_path, abs_path, force=force)
                 except Exception as e:
                     log.error(f"music index {rel_path}: {e}")
+                _videos_dirty()
             elif host.db().execute("SELECT 1 FROM music WHERE rel_path=?", (rel_path,)).fetchone():
                 host.update_file(rel_path, table="music", remove=True, dont_write=True)
             return None
@@ -326,12 +334,18 @@ def register(host):
             log.error(f"music index {rel_path}: {e}")
         return True                      # handled: core skips the image path
     host.on("file.index", _file_index)
-    host.on("upload.stored", lambda rel_path, filename:
-            threading.Thread(target=index_all, daemon=True).start() if _is_music(rel_path) else None)
+    def _upload_stored(rel_path, filename):
+        if _is_video(rel_path) and _in_section(rel_path):
+            _videos_dirty()
+        if _is_music(rel_path):
+            threading.Thread(target=index_all, daemon=True).start()
+    host.on("upload.stored", _upload_stored)
 
     def _file_renamed(old_rel, new_rel):
         """! @brief A track keeps its row inside the sections; moved out it stops being
         music, moved in it becomes one."""
+        if _is_video(old_rel) or _is_video(new_rel):
+            _videos_dirty()
         if not _is_track_file(old_rel) and not _is_track_file(new_rel):
             return None
         if _is_music(new_rel):
@@ -348,6 +362,8 @@ def register(host):
     host.on("file.renamed", _file_renamed)
 
     def _file_deleted(rel_path):
+        if _is_video(rel_path):
+            _videos_dirty()
         host.update_file(rel_path, table="music", remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)
 
@@ -369,7 +385,19 @@ def register(host):
                 "samplerate": r["samplerate"], "channels": r["channels"],
                 "cluster": r["cluster"], "tags": json.loads(r["tags"] or "[]"),
                 "has_emb": r["emb"] is not None,
-                "has_cover": _has_cover(r), "size": r["size"], "created": r["created"]}
+                "has_cover": _has_cover(r), "size": r["size"], "created": r["created"],
+                "song_key": _row_key(r), "video": _video_for(r["rel_path"], _row_key(r))}
+
+    def _row_key(r):
+        """! @brief The track's song key (music_lib.song_key), "" when its title folds to
+        nothing (then it is a song of its own)."""
+        try:
+            if _is_video(r["rel_path"]):
+                keys = _video_song_keys(r["rel_path"], r["title"], r["artist"], r["albumartist"])
+                return keys[0] if keys else ""
+            return ml.song_key(r["title"], r["artist"], r["albumartist"])
+        except (IndexError, KeyError):
+            return ""
 
     def _has_cover(r):
         try:
@@ -595,6 +623,118 @@ def register(host):
         info = _folder_info(artist_dir)
         return {"folder": artist_dir, "picture_rel": info["image"],
                 "description_rel": info["description_rel"], "description": info["description"]}
+
+    # -- music videos ------------------------------------------------------------
+    # A music video is a track of its own (a video row in the music table), and
+    # also the video of every version of its song: a track plays it in place of
+    # the visualizer when it sits beside it with the same name (03 - Song.flac +
+    # 03 - Song.mp4) or names the same song - its own title / artist tags,
+    # "Artist - Title (Official Video) [id].mp4", or "Title.mp4" under the
+    # artist's folder (Artist/Videos/...). The index is built from the video
+    # rows, again whenever a video is indexed, moved or deleted, and at most
+    # every _VIDEO_TTL seconds.
+    _VIDEO_TTL = 600.0
+    _VIDEOS = {"built": 0.0, "dirty": True, "sibling": {}, "by_key": {}}
+    _video_lock = threading.Lock()
+
+    def _videos_dirty():
+        _VIDEOS["dirty"] = True
+
+    def _video_song_keys(rel, title, artist="", albumartist=""):
+        """! @brief The song keys a video stands for, best first: its tags, then
+        "Artist - Title" in the name, then the artist folder + the title."""
+        _, artist_dir = _section_dirs(rel)
+        folder_artist = os.path.basename(artist_dir) if artist_dir else ""
+        stem = os.path.splitext(os.path.basename(rel))[0]
+        title = (title or "").strip() or stem
+        keys = []
+        if artist or albumartist:
+            keys.append(ml.song_key(title, artist, albumartist))
+        for t in dict.fromkeys((title, stem)):
+            parts = re.split(r"\s+[-\u2013\u2014]\s+", t, maxsplit=1)
+            if len(parts) == 2:
+                left, right = parts
+                if not left.strip().isdigit():
+                    keys.append(ml.song_key(right, left))
+                keys.append(ml.song_key(right, folder_artist))
+            keys.append(ml.song_key(t, folder_artist))
+        return [k for k in dict.fromkeys(keys) if k]
+
+    def _video_index():
+        """! @brief {"sibling": {(dir, stem): rel}, "by_key": {song_key: [rel]}} over the
+        video rows, rebuilt when stale."""
+        now = time.time()
+        if not _VIDEOS["dirty"] and now - _VIDEOS["built"] < _VIDEO_TTL:
+            return _VIDEOS
+        with _video_lock:
+            if not _VIDEOS["dirty"] and now - _VIDEOS["built"] < _VIDEO_TTL:
+                return _VIDEOS
+            _VIDEOS["dirty"] = False
+            exts = sorted(getattr(host.media, "VIDEO_EXTS", ()) or ())
+            sibling, by_key = {}, {}
+            if exts:
+                like = " OR ".join("lower(rel_path) LIKE ?" for _ in exts)
+                for r in db().execute(f"SELECT rel_path, title, artist, albumartist FROM music WHERE {like}",
+                                      [f"%{e}" for e in exts]):
+                    rel = r["rel_path"]
+                    d, name = os.path.split(rel)
+                    sibling[(d, os.path.splitext(name)[0].lower())] = rel
+                    for k in _video_song_keys(rel, r["title"], r["artist"], r["albumartist"]):
+                        by_key.setdefault(k, []).append(rel)
+            _VIDEOS.update(sibling=sibling, by_key=by_key, built=time.time())
+        return _VIDEOS
+
+    def _can_see(rel):
+        try:
+            return bool(host.check_path(rel))
+        except Exception:
+            return False
+
+    def _video_for(rel_path, key=""):
+        """! @brief The music video of a track (rel path) the requester may see, or None:
+        a video track is its own; else the one beside it with the same name first,
+        then one that is the same song, nearest the track (same artist folder, same
+        section) first."""
+        if _is_video(rel_path):
+            return rel_path
+        try:
+            idx = _video_index()
+        except Exception as e:
+            log.error(f"music video index: {e}")
+            return None
+        d, name = os.path.split(rel_path)
+        cands = []
+        v = idx["sibling"].get((d, os.path.splitext(name)[0].lower()))
+        if v:
+            cands.append(v)
+        if key and key in idx["by_key"]:
+            _, artist_dir = _section_dirs(rel_path)
+            base = rel_path[:len(rel_path) - len(host.core.library_section(rel_path)[2] or "")]
+            cands += sorted(idx["by_key"][key], key=lambda c: (
+                not (artist_dir and c.startswith(artist_dir + "/")), not c.startswith(base), c))
+        for c in cands:
+            if _can_see(c):
+                return c
+        return None
+
+    def video(filename):
+        """! @brief Stream a music video: like /api/file for a video (the browser copy when
+        the original won't play; 202 + progress while that copy is being made), but
+        under the Music tab's permission and only for videos in a music section."""
+        if not _is_video(filename) or not _in_section(filename) or not host.check_path(filename):
+            return jsonify({"success": False, "error": "not found"}), 404
+        fp = host.safe_path(host.media_dir, filename)
+        if not fp or not os.path.exists(fp):
+            return jsonify({"success": False, "error": "not found"}), 404
+        enc = host.get_service("encoding")
+        serve = getattr(enc, "video_serve_path", None) if enc is not None else None
+        if serve is not None and request.args.get("original") not in ("1", "true"):
+            path, extra = serve(filename, fp)
+            if path is None:
+                return jsonify({"success": False, "preparing": True, **(extra or {})}), 202
+            if path != fp:
+                return send_file(os.path.abspath(path), mimetype=extra, conditional=True)
+        return send_file(os.path.abspath(fp), mimetype=host.media.mime_for(filename), conditional=True)
 
     def artists():
         a = request.args
@@ -832,15 +972,34 @@ def register(host):
         if not seed_vecs:
             return jsonify({"success": False, "error": "Seed has no embedding. Generate embeddings first."})
         paths, embs = load_embeddings()
-        order = ml.shuffle_by(seed_vecs, paths, embs, temperature=temp, zscore=_zscore())
-        return jsonify({"success": True, "songs": songs_for(order)})
+        order = ml.shuffle_by(seed_vecs, paths, embs, temperature=temp, zscore=_zscore(), limit=len(paths))
+        # versions of one song sit side by side in embedding space: keep the first
+        # (best-scored) of each, so the list is songs, not 15 takes of one
+        out = one_per_song(songs_for(order))[:500]
+        return jsonify({"success": True, "songs": out})
 
-    def similar_tracks(rel_path, top_k=60):
+    def one_per_song(songs, skip_keys=()):
+        """! @brief The first of each song (by song_key) in a list of song dicts,
+        leaving out the songs in `skip_keys`."""
+        seen, out = set(skip_keys), []
+        for s_ in songs:
+            k = s_.get("song_key") or ("path:" + s_["rel_path"])
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(s_)
+        return out
+
+    def similar_tracks(rel_path, top_k=60, distinct=True):
         """! @brief (hits, songs, error): the tracks nearest to one track in the current
-        space - the editor's Similar button and the player's next-track pick."""
+        space - the editor's Similar button and the player's next-track pick.
+        @param distinct  other versions of the same song (and repeats of a song among
+                         the hits) are left out: the nearest neighbours of a song are
+                         otherwise its own live / remaster / compilation copies."""
         if not host.check_path(rel_path):
             return [], [], "not found"
-        row = db().execute("SELECT emb, emb_sig FROM music WHERE rel_path=?", (rel_path,)).fetchone()
+        row = db().execute("SELECT rel_path, emb, emb_sig, title, artist, albumartist FROM music WHERE rel_path=?",
+                           (rel_path,)).fetchone()
         space = _audio_space()
         if not space:
             return [], [], "No audio embedding model (Settings → Models → Audio embedding)."
@@ -855,10 +1014,15 @@ def register(host):
                 return [], [], "Could not embed the track."
             host.update_file(rel_path, table="music", dont_write=True,
                              set={"emb": ml._pack_emb(v), "emb_sig": space})
-        hits = rank_by_vector(v, exclude=rel_path, limit=top_k)
+        hits = rank_by_vector(v, exclude=rel_path, limit=top_k * 6 if distinct else top_k)
         if not hits:
             return [], [], f"No other tracks embedded in '{space}' - press Embed first."
         out = songs_for([p for p, _ in hits])
+        if distinct:
+            seed_key = _row_key(row) if row else ""
+            out = one_per_song(out, skip_keys=(seed_key,) if seed_key else ())[:top_k]
+            keep = {s_["rel_path"] for s_ in out}
+            hits = [h for h in hits if h[0] in keep]
         score = dict(hits)
         for s_ in out:
             s_["score"] = round(score.get(s_["rel_path"], 0.0), 4)
@@ -980,7 +1144,8 @@ def register(host):
             return [], {}, f"Fewer than 2 tracks embedded in '{space}' - press Embed first."
         w, wp = where(["emb_sig=?"], [space])
         rows = {r["rel_path"]: r for r in db().execute(
-            f"SELECT rel_path, title, album, genre, tags, comment, duration FROM music{w}", wp)}
+            f"SELECT rel_path, title, artist, albumartist, album, genre, tags, comment, duration "
+            f"FROM music{w}", wp)}
         embs_by_path = dict(zip(paths, embs))
         dur = {p: float(rows[p]["duration"] or 240.0) for p in paths if p in rows}
         rng = random.Random(seed)
@@ -1002,25 +1167,52 @@ def register(host):
                     twice.append(p)
         if len(keep) < 2:
             return [], {}, "Nothing left to play after the seasonal / rating filters."
-        last = _radio_get("last_vec")
-        order = ml.route_playlist(keep, [embs_by_path[p] for p in keep],
-                                  start_vec=np.asarray(last, np.float32) if last else None,
-                                  zscore=_zscore(space), seed=rng.randrange(1 << 30))
         gap = float(host.config.get("music_radio_min_gap_hours") or 0) * 3600.0
-        # recently played tracks: not before `gap` of playback has gone by
         now = time.time()
         recent = {r["rel_path"]: r["t"] for r in db().execute(
             "SELECT rel_path, MAX(played_at) t FROM music_plays WHERE played_at>? GROUP BY rel_path",
             (now - gap,))} if gap > 0 else {}
-        if recent:
+        # one version of each song per round: the versions of a song (live, remaster,
+        # best-of, a stray copy) sit next to each other in embedding space, so the
+        # walk would otherwise play them back to back. A version not played lately
+        # is picked first; the others get their turn in later rounds.
+        def skey(p):
+            r = rows.get(p)
+            k = _row_key(r) if r is not None else ""
+            return k or ("path:" + p)
+        groups = {}
+        for p in keep:
+            groups.setdefault(skey(p), []).append(p)
+        chosen = set()
+        for g in groups.values():
+            fresh = [p for p in g if p not in recent] or g
+            chosen.add(fresh[rng.randrange(len(fresh))] if len(fresh) > 1 else fresh[0])
+        n_rated = len(keep)
+        versions_skipped = n_rated - len(chosen)
+        keep = [p for p in keep if p in chosen]
+        twice = [p for p in twice if p in chosen]
+        # a song counts as recently played whichever version played
+        recent_song = {}
+        for p, t in recent.items():
+            k = skey(p)
+            recent_song[k] = max(t, recent_song.get(k, 0.0))
+        if len(keep) < 2:
+            return [], {}, "Nothing left to play after the seasonal / rating filters."
+        last = _radio_get("last_vec")
+        order = ml.route_playlist(keep, [embs_by_path[p] for p in keep],
+                                  start_vec=np.asarray(last, np.float32) if last else None,
+                                  zscore=_zscore(space), seed=rng.randrange(1 << 30))
+        # recently played songs: not before `gap` of playback has gone by
+        if recent_song:
             cum, moved = 0.0, []
             for p in list(order):
-                if p in recent and cum < gap - (now - recent[p]):
+                t = recent_song.get(skey(p))
+                if t is not None and cum < gap - (now - t):
                     moved.append(p); order.remove(p)
                 else:
                     cum += dur.get(p, 240.0)
             for p in moved:
-                need = gap - (now - recent[p])
+                need = gap - (now - recent_song[skey(p)])
                 if _place_after_gap(order, dur, p, need, -1, embs_by_path) is None:
                     order.append(p)
         # loved tracks a second time, a gap of playback later
@@ -1038,8 +1230,8 @@ def register(host):
         _radio_set("current", order)
         total = sum(dur.get(p, 240.0) for p in order)
         info = {"round": n_round, "tracks": len(order), "hours": round(total / 3600.0, 1),
-                "seasonal_skipped": len(skip & set(paths)), "rating_skipped": len(paths) - len(skip & set(paths)) - len(keep),
-                "repeats": repeats, "space": space}
+                "seasonal_skipped": len(skip & set(paths)), "rating_skipped": len(paths) - len(skip & set(paths)) - n_rated,
+                "repeats": repeats, "versions_skipped": versions_skipped, "space": space}
         return songs_for_ordered(order), info, None
 
     def songs_for_ordered(order):
@@ -1073,7 +1265,8 @@ def register(host):
 
     def similar():
         d = request.json or {}
-        hits, out, err = similar_tracks(d.get("rel_path", ""), min(200, int(d.get("top_k", 60))))
+        hits, out, err = similar_tracks(d.get("rel_path", ""), min(200, int(d.get("top_k", 60))),
+                                        distinct=d.get("distinct", True) not in (False, 0, "0", "false"))
         if err:
             return jsonify({"success": False, "error": err})
         return jsonify({"success": True, "songs": out})
@@ -1205,6 +1398,7 @@ def register(host):
         ("/api/music/shuffle", shuffle, ["POST"], R), ("/api/music/similar", similar, ["POST"], R),
         ("/api/music/radio/next", radio_next, ["POST"], R), ("/api/music/radio/played", radio_played, ["POST"], R),
         ("/api/music/radio/status", radio_status, ["GET"], R),
+        ("/api/music/video/<path:filename>", video, ["GET"], R),
     ):
         host.add_route(rule, fn, methods=methods, feature="tab.music", level=level)
 
@@ -1213,7 +1407,7 @@ def register(host):
                                        rp, set={k: d[k] for k in _TAG_KEYS + ("tags",) if k in d}
                                    ).get("success", False),
                                    "similar_tracks": similar_tracks, "semantic_songs": semantic_songs,
-                                   "radio_round": radio_round})
+                                   "radio_round": radio_round, "video_for": _video_for})
 
     ## @brief The editor's Similar button routes audio here (embedding module hosts
     # it). The embedding module may load after us, so register lazily.

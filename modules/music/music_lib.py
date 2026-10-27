@@ -7,7 +7,9 @@ module.py; nothing here touches the app.
 """
 from __future__ import annotations
 import os
+import re
 import struct
+import unicodedata
 import numpy as np
 from optional_deps import optional_import
 
@@ -292,6 +294,95 @@ def read_cover(abs_path: str, any_image: bool = False):
     except Exception:
         pass
     return None
+
+# -- song identity: one song across albums, versions and copies -------------------
+# A song a band put on 15 albums (studio, live, remaster, best-of) is 15 rows with
+# near-identical embeddings, so a walk through embedding space plays them back to
+# back. song_key() names the song itself: artist + title with the version noise
+# (remaster / live / edit / feat. / "Official Video" ...) taken off, so every
+# version of it, and its music video, share one key.
+_VERSION_RX = re.compile(
+    r"\b(re-?master\w*|live|version|ver|edit|mix|remix|mono|stereo|demo|single|radio|acoustic|"
+    r"extended|instrumental|feat|ft|featuring|bonus|deluxe|anniversary|take|session|unplugged|"
+    r"explicit|clean|re-?recorded|re-?record|original|official|video|music\s+video|lyrics?|"
+    r"audio|visuali[sz]er|hd|hq|4k|1080p|720p|mv|clip|\d{4})\b", re.I)
+_BRACKET_RX = re.compile(r"[\(\[\{]([^\(\)\[\]\{\}]*)[\)\]\}]")
+_YT_ID_RX = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_DASH_RX = re.compile(r"\s+[-–—]\s+")
+_TRACKNO_RX = re.compile(r"^\s*\d{1,3}\s*(?:[-._)]\s*|\s+-\s+)(?=\S)")
+_FEAT_RX = re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", re.I)
+
+
+def _fold(s: str) -> str:
+    """! @brief Lower-case, accents off, '&' as 'and', punctuation as spaces."""
+    s = unicodedata.normalize("NFKD", str(s or ""))
+    s = "".join(c for c in s if not unicodedata.combining(c)).lower()
+    s = s.replace("&", " and ").replace("'", "").replace("’", "").replace("`", "")
+    return " ".join(re.sub(r"[\W_]+", " ", s).split())
+
+
+def clean_title(title: str) -> str:
+    """! @brief A title with its version / release noise taken off (still readable):
+    'Saturday in the Park (2002 Remaster)' -> 'Saturday in the Park';
+    'Chicago - 25 or 6 to 4 (Official Video) [dQw4w9WgXcQ]' keeps '25 or 6 to 4'
+    once the artist part is split off by the caller."""
+    t = str(title or "").strip()
+
+    def br(m):
+        inner = m.group(1).strip()
+        if not inner or _YT_ID_RX.match(inner) or _VERSION_RX.search(inner):
+            return " "
+        return " " + inner + " "
+    prev = None
+    while prev != t:                     # nested / repeated brackets
+        prev, t = t, _BRACKET_RX.sub(br, t)
+    parts = _DASH_RX.split(t)
+    if len(parts) > 1:                   # "Title - 2002 Remaster", "Title - Live at ..."
+        keep = [parts[0]]
+        for p in parts[1:]:
+            if _VERSION_RX.search(p):
+                break
+            keep.append(p)
+        t = " - ".join(keep)
+    t = _TRACKNO_RX.sub("", t)
+    t = _FEAT_RX.sub("", t)
+    return " ".join(t.split())
+
+
+def clean_artist(artist: str) -> str:
+    a = _FEAT_RX.sub("", str(artist or "").strip())
+    a = _fold(a)
+    return a[4:] if a.startswith("the ") else a
+
+
+def song_key(title: str, artist: str = "", albumartist: str = "") -> str:
+    """! @brief The song's identity across albums and versions: '<artist>\\x1f<title>',
+    both folded; "" when the title folds to nothing (the caller then treats the
+    track as its own song). The track artist wins over the album artist, so a
+    track on a 'Various Artists' compilation still matches the band's albums."""
+    t = _fold(clean_title(title))
+    if not t:
+        return ""
+    return clean_artist(artist or albumartist) + "\x1f" + t
+
+
+def spread_versions(order, key_of, window=1):
+    """! @brief Reorder as little as possible so no two tracks of the same song sit
+    within `window` places of each other: a clashing track swaps with the nearest
+    later track that does not clash. `key_of(item)` gives the song key ("" = unique)."""
+    out = list(order)
+    n = len(out)
+    for i in range(1, n):
+        k = key_of(out[i])
+        if not k or not any(key_of(out[j]) == k for j in range(max(0, i - window), i)):
+            continue
+        for j in range(i + 1, n):
+            kj = key_of(out[j])
+            if not kj or not any(key_of(out[m]) == kj for m in range(max(0, i - window), i)):
+                out[i], out[j] = out[j], out[i]
+                break
+    return out
+
 
 # -- embedding ------------------------------------------------------------------
 def _pack_emb(vec: np.ndarray) -> bytes:

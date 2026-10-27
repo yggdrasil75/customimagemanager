@@ -15,6 +15,9 @@
     <span id="mp_queue_label" class="text-[10px] text-gray-400 whitespace-nowrap"></span>
     <div class="flex gap-1 items-center">
       <span data-ext-area="music_player_tools" class="contents"></span>
+      <button onclick="musicToggleVideos()" id="mp_videos_btn"
+        title="Music videos: on (a track with a video plays it in place of the visualizer)"
+        class="text-[10px] bg-pink-700 hover:bg-pink-600 px-2 py-1 rounded">🎬 Videos</button>
       <select id="mp_vis_mode" onchange="musicSetVisMode(this.value)" title="Visualizer"
         class="bg-gray-700 rounded border border-gray-600 text-[10px] px-1 py-1">
         <option value="bars">Bars</option>
@@ -28,11 +31,15 @@
   </div>
 
   <div class="flex-1 flex overflow-hidden min-h-0">
-    <!-- stage: cover + visualizer -->
+    <!-- stage: cover + visualizer, or the track's music video -->
     <div id="mp_stage" class="flex-1 relative overflow-hidden bg-black min-w-0">
       <div id="mp_backdrop" class="absolute inset-0 bg-center bg-cover opacity-25 blur-2xl scale-110"></div>
       <canvas id="mp_vis" class="absolute inset-0 w-full h-full"></canvas>
-      <div class="absolute inset-0 flex items-center justify-center p-6 pb-24 pointer-events-none">
+      <div id="mp_video_wrap" class="hidden absolute inset-0 bg-black flex items-center justify-center">
+        <video id="mp_video" preload="metadata" playsinline title="Double-click: full screen"
+          class="w-full h-full object-contain"></video>
+      </div>
+      <div id="mp_cover_layer" class="absolute inset-0 flex items-center justify-center p-6 pb-24 pointer-events-none">
         <div id="mp_cover_wrap"
           class="relative w-[min(38vh,50%)] aspect-square rounded-lg overflow-hidden shadow-2xl border border-gray-700 bg-gray-800">
           <div id="mp_cover_fallback" class="absolute inset-0 flex items-center justify-center text-6xl text-white/70">♪</div>
@@ -40,13 +47,15 @@
         </div>
       </div>
       <!-- title along the bottom, clear of the cover and the visualizer ring -->
-      <div class="absolute left-0 right-0 bottom-0 px-6 pb-5 pt-10 text-center pointer-events-none
+      <div id="mp_title_layer" class="absolute left-0 right-0 bottom-0 px-6 pb-5 pt-10 text-center pointer-events-none
                   bg-gradient-to-t from-black/70 to-transparent">
         <div id="mp_title" class="text-xl font-bold truncate drop-shadow">Nothing playing</div>
         <div id="mp_sub" class="text-sm text-gray-300 truncate drop-shadow">Pick a track from the Music tab</div>
       </div>
       <div id="mp_radio_badge"
         class="hidden absolute top-2 left-2 text-[10px] bg-red-600/90 px-2 py-0.5 rounded font-bold">● RADIO</div>
+      <div id="mp_video_badge"
+        class="hidden absolute top-2 right-2 text-[10px] bg-pink-700/90 px-2 py-0.5 rounded font-bold pointer-events-none">🎬 MUSIC VIDEO</div>
     </div>
 
     <!-- up next -->
