@@ -15,7 +15,7 @@
     ["wide", "Wide"], ["ultrawide", "Ultra-wide"], ["tall", "Tall"]];
   const DAY = "\\d{4}-\\d{2}-\\d{2}";
   const DATE_RE = new RegExp(`^(${DATE_KEYS.join("|")}):(>=|<=)?(${DAY})(?:\\.\\.(${DAY}))?$`, "i");
-  const DIM_RE = /^(width|height|min|max):?(<=|>=|<|>|=)\d+$/i;
+  const DIM_RE = /^(width|height|min|max)(:(<=|>=|<|>|=)?\d+(\.\.\d+)?|(<=|>=|<|>|=)\d+)$/i;
 
   let prefixes = null;          // Set of search-token prefixes this install answers ("fav:")
   let infoPromise = null;

@@ -370,10 +370,6 @@ def _db_close():
                 conn.rollback()
         except Exception:
             pass
-        # No PRAGMA optimize here: it may run ANALYZE over `files` and its indexes
-        # under the write lock, and worker threads close by the dozen (a sync
-        # pool, every bulk job) - the planner statistics are refreshed once at
-        # startup (_init_db) instead.
         try:
             conn.close()
         except Exception:
@@ -1061,7 +1057,8 @@ def _purge_file_everywhere(rel_path):
 def _get_file_row(rel_path):
     return _db().execute("SELECT * FROM files WHERE rel_path=?", (rel_path,)).fetchone()
 
-_FILTER_RE = re.compile(r'(width|height|min|max):?\s*(<=|>=|<|>|=)\s*(\d+)$', re.I)
+# width>512, width:>512, width:512 (exact), width:100..2000 (range) - with or without the colon
+_FILTER_RE = re.compile(r'(width|height|min|max)(?::(?=\d|<|>|=)|(?=<|>|=))(<=|>=|<|>|=)?(\d+)(?:\.\.(\d+))?$', re.I)
 # min / max = shorter / longer side: "min<512" means either side under 512
 _DIM_COLS = {"width": "width", "height": "height",
              "min": "MIN(width,height)", "max": "MAX(width,height)"}
@@ -1141,11 +1138,19 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
     text, where, params, structured = [], [], [], []
     for tok in _SEARCH_TOKEN_RE.findall(search or ""):
         m = _FILTER_RE.match(tok)
-        if m:
-            col, opx, val = m.group(1).lower(), m.group(2), int(m.group(3))
-            where.append(f"{_DIM_COLS[col]} {opx} ?")
-            params.append(val)
-            structured.append(("dim", col, opx, val))  # images only
+        if m and not (m.group(4) and m.group(2)):          # "width:>1..2" is malformed
+            col, val = m.group(1).lower(), int(m.group(3))
+            if m.group(4):
+                hi = int(m.group(4))
+                where.append(f"{_DIM_COLS[col]} BETWEEN ? AND ?")
+                params += [min(val, hi), max(val, hi)]
+                structured.append(("dim", col, ">=", min(val, hi)))
+                structured.append(("dim", col, "<=", max(val, hi)))
+            else:
+                opx = m.group(2) or "="
+                where.append(f"{_DIM_COLS[col]} {opx} ?")
+                params.append(val)
+                structured.append(("dim", col, opx, val))  # images only
             continue
         dm = _DATE_RE.match(tok)
         if dm:
@@ -4686,12 +4691,25 @@ def api_list():
             return jsonify({"success": False, "error": err,
                             "files": [], "total": 0, "page": page,
                             "page_size": state["page_size"]})
+        contains = request.args.get("contains", "").strip()
         return jsonify({"success": True, "files": entries, "total": total,
-                        "page": page, "page_size": state["page_size"], "mode": "semantic"})
+                        "page": page, "page_size": state["page_size"], "mode": "semantic",
+                        "contains": bool(contains) and any(e.get("filename") == contains for e in entries)})
 
     entries, total = _query_files(search, page * state["page_size"], state["page_size"], folder, album)
-    return jsonify({"success":True,"files":entries,"total":total,
-                    "page":page,"page_size": state["page_size"]})
+    out = {"success":True,"files":entries,"total":total,
+           "page":page,"page_size": state["page_size"]}
+    # ?contains=<rel_path>: does this query match that file at all (any page)?
+    # Lets the client keep the open image selected when a new search still includes it.
+    contains = request.args.get("contains", "").strip()
+    if contains:
+        if any(e.get("filename") == contains or e.get("folder") == contains for e in entries):
+            out["contains"] = True
+        else:
+            where_sql, p, _, _ = _files_where(search, folder, album)
+            sql = f"SELECT 1 FROM files{where_sql}{' AND' if where_sql else ' WHERE'} rel_path=? LIMIT 1"
+            out["contains"] = _db().execute(sql, (*p, contains)).fetchone() is not None
+    return jsonify(out)
 
 @app.route("/api/list_all")
 @_auth.require_feature("tab.gallery")

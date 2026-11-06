@@ -432,6 +432,11 @@ async function loadGallery(){
   if(typeof galleryModalMode!=='undefined' && galleryModalMode==='album' && currentAlbum){
     params.set('album', currentAlbum);
   }
+  // A new search: remember the open file so we can tell whether it survived.
+  const searchChanged=(currentSearch!==_lastListedSearch);
+  _lastListedSearch=currentSearch;
+  const prevFile=window.currentFile||'';
+  if(searchChanged && prevFile) params.set('contains', prevFile);
   const data=await fetch('/api/list?'+params).then(r=>r.json());
   if(data.success===false){
     // Semantic search (sem:/~ prefix) can fail with a helpful message; show it
@@ -443,6 +448,19 @@ async function loadGallery(){
   totalFiles=data.total;
   renderGallery(data.files);
   updatePager();
+  if(searchChanged) _autoSelectAfterSearch(prevFile, data);
+}
+
+/** @brief After a search: keep the open image if the results still include it,
+ *  otherwise open the first result. A changed folder or page alone never moves
+ *  the selection - only a new search does. */
+let _lastListedSearch=(typeof currentSearch!=='undefined')?currentSearch:'';
+function _autoSelectAfterSearch(prevFile, data){
+  if(prevFile && data.contains) return;            // still in the results: leave it selected
+  const first=(galleryFiles||[])[0];
+  if(!first || first.filename===prevFile) return;
+  if(typeof selectedFiles!=='undefined' && selectedFiles.size){ selectedFiles.clear(); refreshSelectionUI(); }
+  selectFile(first.filename);
 }
 
 /** @brief Render a fixed result set (cluster members / similar / outliers) in the grid. */
