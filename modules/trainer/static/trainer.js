@@ -58,6 +58,8 @@
     const lbl = $('tr_gsafe_label');
     if (lbl) lbl.innerText = gallerySafe ? 'Gallery-safe (adds boxes only)' : 'Gallery-unsafe (isolated copy)';
     renderCounts(); renderGrid();
+    loadLabelSummary();
+    resumeJob();
   }
 
   async function trSetGallerySafe() {
@@ -78,18 +80,187 @@
   }
 
   async function trBuildSet() {
+    const folder = $('tr_folder') ? $('tr_folder').value : '';
+    const all = !!($('tr_all') && $('tr_all').checked);
     const n = parseInt($('tr_n').value, 10) || 0;
-    if (n < 1) { alert('Set a count of 1 or more.'); return; }
-    trStatus('Building set...');
+    if (!all && n < 1) { alert('Set a count of 1 or more, or tick All.'); return; }
+    const name = ($('tr_new_name') ? $('tr_new_name').value : '').trim();
+    trStatus('Building set...'); alStatus('Copying images into the new set...');
     const d = await jpost('/api/trainer/select', {
-      strategy: $('tr_strategy').value, n,
+      strategy: $('tr_strategy').value, n: all ? 0 : n, all, folder, name,
       exclude_all_sets: $('tr_exclude_sets').checked,
       media: $('tr_media').value,
       gallery_safe: $('tr_build_gsafe') ? $('tr_build_gsafe').checked : false,
     });
-    if (!d.success) { trStatus('Error: ' + (d.error || '?')); return; }
-    trStatus(`${d.set}: ${d.count} images (${d.strategy})`);
+    if (!d.success) { trStatus('Error: ' + (d.error || '?')); alStatus('Error: ' + (d.error || '?')); return; }
+    trStatus(`${d.set}: ${d.count} images` + (d.folder ? ` from ${d.folder}` : ` (${d.strategy})`));
+    alStatus(`${d.set}: ${d.count} images copied. Now type what to find below.`);
+    if ($('tr_new_name')) $('tr_new_name').value = '';
     await loadSets(d.set);
+    trLoadFolders();
+    const pr = $('tr_al_prompt'); if (pr) pr.focus();
+  }
+
+  // -- folder source ----------------------------------------------------------
+  async function trLoadFolders() {
+    const sel = $('tr_folder');
+    if (!sel) return;
+    const keep = sel.value;
+    let d;
+    try { d = await jget('/api/trainer/folders?media=' + enc($('tr_media') ? $('tr_media').value : 'image')); }
+    catch (e) { return; }
+    if (!d || !d.success) return;
+    sel.innerHTML = '<option value="">Whole library</option>' + (d.folders || []).map(f => {
+      const depth = f.folder.split('/').length - 1;
+      const v = esc(f.folder);
+      return `<option value="${v}">${'\u00a0\u00a0'.repeat(depth)}${esc(f.folder.split('/').pop())} (${f.count})</option>`;
+    }).join('');
+    if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+    trFolderChange();
+  }
+
+  function trFolderChange() {
+    const all = $('tr_all'), n = $('tr_n'), folder = $('tr_folder');
+    if (!all || !n) return;
+    if (folder && !folder.value && all.checked) all.checked = false;   // "all" means all of a folder
+    all.disabled = !(folder && folder.value);
+    n.disabled = all.checked;
+    const nm = $('tr_new_name');
+    if (nm) nm.placeholder = (folder && folder.value) ? folder.value.split('/').pop() : 'auto (Set N)';
+  }
+
+  async function trRenameSet() {
+    if (!currentSet) return;
+    const name = (prompt('New name for this set:', currentSet) || '').trim();
+    if (!name || name === currentSet) return;
+    const d = await jpost('/api/trainer/rename', { set: currentSet, name });
+    if (!d.success) { alert(d.error || 'Rename failed'); return; }
+    currentSet = d.set;
+    await loadSets(d.set);
+  }
+
+  // -- auto-label (ad-hoc VLM prompt over the whole set) -----------------------
+  let alTimer = null, alJob = null;
+  const esc = t => String(t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  function alStatus(t) { const el = $('tr_al_text'), pr = $('tr_al_progress');
+    if (el) el.innerText = t; if (pr && t) pr.classList.remove('hidden'); }
+
+  function labelFromPrompt(p) {
+    return p.replace(/^\s*(please\s+)?(find|locate|detect|box|mark|identify|show)\s+(me\s+)?((the|all|every|each|any)\s+(of\s+the\s+)?)?/i, '')
+            .replace(/[.?!]+$/, '').trim();
+  }
+  function trAlPromptInput() {
+    const lbl = $('tr_al_label'), p = $('tr_al_prompt');
+    if (lbl && p) lbl.placeholder = labelFromPrompt(p.value) || 'from prompt';
+  }
+
+  async function trAutoLabel() {
+    if (!currentSet) { alert('Create or pick a set first.'); return; }
+    const prompt = ($('tr_al_prompt').value || '').trim();
+    if (!prompt) { $('tr_al_prompt').focus(); return; }
+    const d = await jpost('/api/trainer/autolabel', {
+      set: currentSet, prompt,
+      label: ($('tr_al_label').value || '').trim(),
+      mode: $('tr_al_mode').value,
+      confirm: $('tr_al_confirm').checked,
+    });
+    if (!d.success) { alStatus('Error: ' + (d.error || '?')); return; }
+    $('tr_al_prompt').value = ''; $('tr_al_label').value = ''; trAlPromptInput();
+    watchJob(d.job);
+  }
+
+  async function trAutoLabelCancel() {
+    if (!alJob) return;
+    await jpost('/api/trainer/autolabel/cancel', { job: alJob.id });
+    alStatus('Stopping after the images already in flight...');
+  }
+
+  function renderJob(j) {
+    const pct = j.total ? Math.round(100 * j.done / j.total) : 0;
+    const bar = $('tr_al_bar'); if (bar) bar.style.width = pct + '%';
+    let t = `"${j.label}": ${j.done}/${j.total} - ${j.boxes} boxes on ${j.boxed} images`;
+    if (j.none) t += `, ${j.none} with none`;
+    if (j.skipped) t += `, ${j.skipped} skipped`;
+    if (j.errors) t += `, ${j.errors} errors`;
+    if (!j.running) t = (j.cancel ? 'Stopped. ' : 'Done. ') + t;
+    alStatus(t);
+    const el = $('tr_al_text');
+    if (el && j.error_list && j.error_list.length) el.title = j.error_list.join('\n');
+    const go = $('tr_al_go'), stop = $('tr_al_stop');
+    if (go) go.disabled = !!j.running;
+    if (stop) stop.classList.toggle('hidden', !j.running);
+  }
+
+  function watchJob(job) {
+    alJob = job; renderJob(job);
+    if (alTimer) clearInterval(alTimer);
+    let lastDone = job.done;
+    alTimer = setInterval(async () => {
+      let d;
+      try { d = await jget('/api/trainer/autolabel?job=' + enc(alJob.id)); } catch (e) { return; }
+      const j = d && d.job; if (!j) { clearInterval(alTimer); alTimer = null; return; }
+      alJob = j; renderJob(j);
+      // refresh grid colours every ~20 images so progress is visible
+      if (j.done - lastDone >= 20 && j.set === currentSet) { lastDone = j.done; loadMembers(); }
+      if (!j.running) {
+        clearInterval(alTimer); alTimer = null;
+        if (j.set === currentSet) {
+          await loadMembers(); loadClasses();
+          // the open image may have just been boxed - reload it in the editor
+          if (window.currentFile && items.some(i => i.rel_path === window.currentFile) &&
+              typeof selectFile === 'function') selectFile(window.currentFile);
+        }
+      }
+    }, 1500);
+  }
+
+  async function resumeJob() {
+    if (!currentSet) return;
+    try {
+      const d = await jget('/api/trainer/autolabel?set=' + enc(currentSet));
+      if (d && d.job && d.job.running) watchJob(d.job);
+      else if (!alTimer) {
+        const go = $('tr_al_go'), stop = $('tr_al_stop');
+        if (go) go.disabled = false; if (stop) stop.classList.add('hidden');
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  async function loadLabelSummary() {
+    const box = $('tr_al_summary'), dl = $('tr_al_labels');
+    if (!box) return;
+    if (!currentSet) { box.innerHTML = ''; return; }
+    let d;
+    try { d = await jget('/api/trainer/label_summary?set=' + enc(currentSet)); } catch (e) { return; }
+    const labels = (d && d.labels) || [];
+    if (dl) dl.innerHTML = labels.map(l => `<option value="${esc(l.label)}">`).join('');
+    if (!labels.length) { box.innerHTML = '<p class="text-xs text-gray-600">No boxes in this set yet.</p>'; return; }
+    box.innerHTML = labels.map(l => `
+      <div class="flex items-center gap-1 text-xs bg-gray-900 border border-gray-700 rounded px-2 py-1">
+        <span class="flex-1 truncate text-gray-200" title="${esc(l.label)}">${esc(l.label)}</span>
+        <span class="text-gray-500 whitespace-nowrap" title="boxes / images">${l.boxes} / ${l.images} img</span>
+        ${l.unconfirmed ? `<button class="text-amber-300 hover:text-amber-200 px-1" title="Confirm all ${l.unconfirmed} unconfirmed boxes so they train" data-al-act="confirm" data-al-label="${esc(l.label)}">&#10003;${l.unconfirmed}</button>` : ''}
+        <button class="text-indigo-300 hover:text-indigo-200 px-1" title="Rename this label on every image in the set" data-al-act="rename" data-al-label="${esc(l.label)}">&#9998;</button>
+        <button class="text-red-400 hover:text-red-300 px-1" title="Delete this label's boxes from every image in the set" data-al-act="delete" data-al-label="${esc(l.label)}">&#10005;</button>
+      </div>`).join('');
+    box.querySelectorAll('[data-al-act]').forEach(b => b.onclick = () => labelEdit(b.dataset.alAct, b.dataset.alLabel));
+  }
+
+  async function labelEdit(action, label) {
+    const body = { set: currentSet, label, action };
+    if (action === 'rename') {
+      const to = (prompt(`Rename "${label}" to:`, label) || '').trim();
+      if (!to || to === label) return;
+      body.to = to;
+    } else if (action === 'delete') {
+      if (!confirm(`Delete every "${label}" box in "${currentSet}"?`)) return;
+    }
+    const d = await jpost('/api/trainer/label_edit', body);
+    if (!d.success) { alert(d.error || 'Failed'); return; }
+    await loadMembers(); loadClasses();
+    if (window.currentFile && items.some(i => i.rel_path === window.currentFile) &&
+        typeof selectFile === 'function') selectFile(window.currentFile);
   }
 
   async function trClearSet() {
@@ -800,6 +971,7 @@
     loadSets();      // always refresh on open (sets/boxes may have changed elsewhere)
     loadClasses();   // refresh the box-class filter list
     loadDevices();   // query torch for real devices, replacing the CPU placeholder
+    trLoadFolders(); // folders for "copy a folder into a new set"
     trSubtab(_trSub);              // re-show the active sub-tab (refreshes module sub-tabs)
   }
 
@@ -846,6 +1018,8 @@
   // expose the handlers the pane markup calls
   Object.assign(window, {
     trInit, trOnSetChange, trBuildSet, trClearSet, trDeleteSet,
+    trLoadFolders, trFolderChange, trRenameSet,
+    trAutoLabel, trAutoLabelCancel, trAlPromptInput,
     trOpen, trPick, trPickByPath, trStartTraining, trChangePage, trRedraw,
     trSnap, trSnapAll, trLoadRuns,
     trValidate, trAccept, onBoxesSaved,

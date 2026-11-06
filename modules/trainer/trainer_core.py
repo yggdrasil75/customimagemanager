@@ -280,8 +280,14 @@ def _copy_into_set(set_name, src_rel):
     work_absdir = get_safe_path(MEDIA_DIR, work_reldir)
     os.makedirs(work_absdir, exist_ok=True)
     bn = os.path.basename(src_rel)
+    stem, ext = os.path.splitext(bn)
     work_rel = f"{work_reldir}/{bn}"
     work_abs = get_safe_path(MEDIA_DIR, work_rel)
+    i = 2
+    while os.path.exists(work_abs):          # same basename from another folder
+        work_rel = f"{work_reldir}/{stem}_{i}{ext}"
+        work_abs = get_safe_path(MEDIA_DIR, work_rel)
+        i += 1
     try:
         shutil.copy2(src_abs, work_abs)
         # bring along sibling label/sidecar so existing boxes come with the copy
@@ -437,41 +443,358 @@ def trainer_checked():
     return jsonify({"success": True})
 
 
+def trainer_folders():
+    """! @brief GET -> every library folder with media, and how many images sit at or
+    below it, for the 'copy a folder into a new set' picker."""
+    media = (request.args.get("media") or "image")
+    kinds = {"image"} if media == "image" else {"image", "video"}
+    return jsonify({"success": True, "folders": ts.list_folders(_db(), kinds)})
+
+
 def trainer_select():
     """! @brief Pick N images by strategy, COPY each into the set's isolated input folder
     (media/.training_sets/<set>/input/), and store both source and work paths.
-    Editing the set never touches the gallery original."""
+    Editing the set never touches the gallery original.
+
+    Optional: `folder` limits picks to that folder (and below), `all` (or n <= 0
+    with a folder) takes every image there, `name` names the new set."""
     d = request.json or {}
     strategy = d.get("strategy", "random")
     if strategy not in ts.STRATEGIES:
         return jsonify({"success": False, "error": f"unknown strategy {strategy!r}"}), 400
     try:
-        n = max(0, int(d.get("n", 0)))
+        n = max(0, int(d.get("n") or 0))
     except (TypeError, ValueError):
         return jsonify({"success": False, "error": "n must be an integer"}), 400
+    folder = (d.get("folder") or "").strip().strip("/")
+    if d.get("all") or (folder and n <= 0):
+        n = 10 ** 9
     exclude_all_sets = bool(d.get("exclude_all_sets", True))
     media = (d.get("media") or "image")
     kinds = {"image"} if media == "image" else {"image", "video"}
     gallery_safe = bool(d.get("gallery_safe", False))
+    name = (d.get("name") or "").strip()
+    if name and ts.set_exists(_db(), name):
+        return jsonify({"success": False, "error": f"a set named {name!r} already exists"}), 400
+    if not name and folder:                  # importing a folder: name the set after it
+        base = folder.rsplit("/", 1)[-1]
+        name, i = base, 2
+        while ts.set_exists(_db(), name):
+            name, i = f"{base} {i}", i + 1
     try:
-        name = ts.next_set_name(_db())
+        name = name or ts.next_set_name(_db())
         picks = ts.select(_db(), strategy, n, exclude_all_sets=exclude_all_sets, kinds=kinds,
-                          iter_emb=(HOST.get_service("embedding") or {}).get("iter_embeddings_ordered"))
+                          iter_emb=(HOST.get_service("embedding") or {}).get("iter_embeddings_ordered"),
+                          folder=folder or None)
+        if not picks:
+            return jsonify({"success": False, "error": "no images matched" +
+                            (f" in {folder}" if folder else "") +
+                            (" (all are already in a set?)" if exclude_all_sets else "")}), 400
         ts.create_set(_db(), name)
         ts.set_meta(_db(), name, gallery_safe=gallery_safe)
         # Copy each pick into the isolated folder; store rel->work mapping.
         work_map = {}
-        for rp in picks:
+        for i, rp in enumerate(picks):
             wp = _copy_into_set(name, rp)
             if wp:
                 work_map[rp] = wp
+            if i % 25 == 0:
+                HOST.set_status(f"Copying into {name}: {i}/{len(picks)}")
         ts.keep(_db(), name, picks, work_paths_map=work_map)
+        HOST.set_status("Ready.")
     except Exception as e:
         training_logger.error(f"select failed: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
-    return jsonify({"success": True, "set": name, "strategy": strategy,
+    return jsonify({"success": True, "set": name, "strategy": strategy, "folder": folder,
                     "gallery_safe": gallery_safe,
                     "count": len(picks), "files": _member_entries(name)})
+
+
+def trainer_rename():
+    """! @brief Rename a set: DB rows, its isolated folder (work_paths follow), and
+    its training-run folders, so validation still finds its models."""
+    import re
+    d = request.json or {}
+    old = (d.get("set") or "").strip()
+    new = (d.get("name") or "").strip()
+    if not old or not new:
+        return jsonify({"success": False, "error": "set + name required"}), 400
+    if old == new:
+        return jsonify({"success": True, "set": new})
+    if not ts.set_exists(_db(), old):
+        return jsonify({"success": False, "error": f"unknown set {old!r}"}), 404
+    if _JOBS_BY_SET.get(old):
+        return jsonify({"success": False, "error": "auto-label is running on this set"}), 409
+    try:
+        ts.rename_set(_db(), old, new)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    so, sn = _set_safe(old), _set_safe(new)
+    if so != sn:
+        src = get_safe_path(MEDIA_DIR, f"{TRAIN_SETS_DIR}/{so}")
+        dst = get_safe_path(MEDIA_DIR, f"{TRAIN_SETS_DIR}/{sn}")
+        if src and dst and os.path.isdir(src):
+            if os.path.exists(dst):
+                shutil.rmtree(dst, ignore_errors=True)    # stale leftovers of a deleted set
+            shutil.move(src, dst)
+        db = _db()
+        op, np_ = f"{TRAIN_SETS_DIR}/{so}/", f"{TRAIN_SETS_DIR}/{sn}/"
+        for rec in ts.member_records(db, new):
+            wp = rec["work_path"] or ""
+            if wp.startswith(op):
+                db.execute("UPDATE training_set_members SET work_path=? WHERE set_name=? AND rel_path=?",
+                           (np_ + wp[len(op):], new, rec["rel_path"]))
+        db.commit()
+        pat = re.compile(r"^set_" + re.escape(so) + r"((?:_train_\d+)?)$")
+        for _backend, root in _run_dirs():
+            if not os.path.isdir(root):
+                continue
+            for nm in os.listdir(root):
+                m = pat.match(nm)
+                if m:
+                    tgt = os.path.join(root, f"set_{sn}{m.group(1)}")
+                    if not os.path.exists(tgt):
+                        os.rename(os.path.join(root, nm), tgt)
+        w = ts.get_meta(_db(), new).get("weights")
+        if w:
+            w2 = re.sub(r"([\\/])set_" + re.escape(so) + r"((?:_train_\d+)?)([\\/])",
+                        lambda m: f"{m.group(1)}set_{sn}{m.group(2)}{m.group(3)}", w)
+            if w2 != w:
+                ts.set_meta(_db(), new, weights=w2)
+    return jsonify({"success": True, "set": new})
+
+
+# -- VLM auto-label: "find the blue tube" over a whole set --------------------
+# One ad-hoc prompt, no saved AI action needed. Every member's work copy is sent
+# to the vision LLM; the boxes it returns are written under one class name.
+# Runs on a background thread; the UI polls /api/trainer/autolabel?job=.
+_JOBS = {}            # job id -> state dict
+_JOBS_BY_SET = {}     # set name -> running job id
+_JOBS_LOCK = threading.Lock()
+
+
+def _label_from_prompt(prompt):
+    import re
+    p = re.sub(r"^\s*(please\s+)?(find|locate|detect|box|mark|identify|show)\s+"
+               r"(me\s+)?((the|all|every|each|any)\s+(of\s+the\s+)?)?", "", prompt, flags=re.I)
+    p = re.sub(r"[.?!]+$", "", p).strip()
+    return p or prompt.strip()
+
+
+def _autolabel_prompt(prompt, label):
+    return (f"{prompt.strip()}\n\nDraw one tight bounding box around EVERY instance of "
+            f"this in the image, using class_name \"{label}\". If there are none, return an "
+            f"empty boxes list. Do not box anything else.")
+
+
+def _autolabel_one(job, rel):
+    """! @brief Run the prompt on one work copy and merge the boxes in."""
+    fp = get_safe_path(MEDIA_DIR, rel)
+    if not fp or not os.path.exists(fp):
+        raise RuntimeError("missing")
+    meta = read_metadata(fp) or {}
+    regions = list(meta.get("regions", []) or [])
+    label = job["label"]
+    has_label = any((r.get("class_name") or "").strip() == label and not _is_debug(r) for r in regions)
+    if job["mode"] == "skip" and has_label:
+        return "skipped", 0
+    img = read_jxl(fp)
+    if img is None:
+        raise RuntimeError("decode failed")
+    llm = HOST.get_service("llm")
+    boxes = llm["call"](job["full_prompt"], HOST.core.to_bgr(img), "boxes") or []
+    new = []
+    for b in boxes:
+        cb = _clamp_box(b)
+        if cb:
+            new.append({"class_name": label, "cx": cb["cx"], "cy": cb["cy"],
+                        "w": cb["w"], "h": cb["h"], "confirmed": job["confirm"]})
+    if job["mode"] == "replace":
+        regions = [r for r in regions if _is_debug(r) or (r.get("class_name") or "").strip() != label]
+    elif not new:
+        return "none", 0
+    regions += new
+    if not update_file(fp, set={"regions": regions}, meta=meta).get("success"):
+        raise RuntimeError("write failed")
+    return ("boxed" if new else "none"), len(new)
+
+
+def _autolabel_worker(job_id):
+    from concurrent.futures import ThreadPoolExecutor
+    job = _JOBS[job_id]
+
+    def one(rel):
+        if job["cancel"]:
+            return
+        try:
+            res, nb = _autolabel_one(job, rel)
+            with _JOBS_LOCK:
+                job[res] += 1
+                job["boxes"] += nb
+        except Exception as e:
+            with _JOBS_LOCK:
+                job["errors"] += 1
+                if len(job["error_list"]) < 20:
+                    job["error_list"].append(f"{os.path.basename(rel)}: {e}")
+            training_logger.error(f"autolabel {rel}: {e}")
+        with _JOBS_LOCK:
+            job["done"] += 1
+        HOST.set_status(f"Auto-label '{job['label']}' on {job['set']}: {job['done']}/{job['total']}")
+
+    try:
+        workers = max(1, int(state.get("oai_concurrency") or 1))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(one, job["paths"]))
+    finally:
+        job["running"] = False
+        job["finished"] = time.time()
+        with _JOBS_LOCK:
+            _JOBS_BY_SET.pop(job["set"], None)
+        HOST.set_status(f"Auto-label '{job['label']}' {'cancelled' if job['cancel'] else 'done'}: "
+                        f"{job['boxes']} boxes on {job['boxed']} images")
+
+
+def _job_view(job):
+    return {k: v for k, v in job.items() if k not in ("paths", "full_prompt")}
+
+
+def trainer_autolabel_start():
+    """! @brief POST {set, prompt, label?, mode: skip|replace|add, confirm, only?}.
+    Starts the VLM over the set's members (or just `only` = [work paths])."""
+    d = request.json or {}
+    set_name = (d.get("set") or "").strip()
+    prompt = (d.get("prompt") or "").strip()
+    if not set_name or not prompt:
+        return jsonify({"success": False, "error": "set + prompt required"}), 400
+    llm = HOST.get_service("llm")
+    if not llm:
+        return jsonify({"success": False, "error": "Vision LLM module is not enabled"}), 400
+    if not (state.get("oai_endpoint") or "").strip() or not (state.get("oai_model") or "").strip():
+        return jsonify({"success": False, "error": "set the OpenAI-compatible endpoint + chat model in settings"}), 400
+    label = (d.get("label") or "").strip() or _label_from_prompt(prompt)
+    mode = d.get("mode") if d.get("mode") in ("skip", "replace", "add") else "skip"
+    paths = ts.work_paths(_db(), set_name)
+    only = d.get("only")
+    if isinstance(only, list) and only:
+        want = {p for p in only if isinstance(p, str)}
+        paths = [p for p in paths if p in want]
+    if not paths:
+        return jsonify({"success": False, "error": "no images in this set"}), 400
+    with _JOBS_LOCK:
+        if _JOBS_BY_SET.get(set_name):
+            return jsonify({"success": False, "error": "auto-label already running on this set",
+                            "job": _JOBS_BY_SET[set_name]}), 409
+        job_id = f"al{int(time.time() * 1000)}"
+        _JOBS[job_id] = {"id": job_id, "set": set_name, "prompt": prompt, "label": label,
+                         "mode": mode, "confirm": bool(d.get("confirm", True)),
+                         "full_prompt": _autolabel_prompt(prompt, label), "paths": paths,
+                         "total": len(paths), "done": 0, "boxed": 0, "none": 0, "skipped": 0,
+                         "boxes": 0, "errors": 0, "error_list": [], "running": True,
+                         "cancel": False, "started": time.time(), "finished": None}
+        _JOBS_BY_SET[set_name] = job_id
+    classes = state.get("classes")
+    if isinstance(classes, list) and label not in classes:
+        classes.append(label)
+        try:
+            HOST.core.save_classes()
+        except Exception as e:
+            training_logger.warning(f"autolabel save_classes: {e}")
+    threading.Thread(target=_autolabel_worker, args=(job_id,), daemon=True).start()
+    return jsonify({"success": True, "job": _job_view(_JOBS[job_id])})
+
+
+def trainer_autolabel_status():
+    """! @brief GET ?job= (or ?set= for that set's running job) -> progress."""
+    job_id = (request.args.get("job") or "").strip()
+    if not job_id:
+        job_id = _JOBS_BY_SET.get((request.args.get("set") or "").strip(), "")
+    job = _JOBS.get(job_id)
+    if not job:
+        return jsonify({"success": True, "job": None})
+    return jsonify({"success": True, "job": _job_view(job)})
+
+
+def trainer_autolabel_cancel():
+    d = request.json or {}
+    job = _JOBS.get((d.get("job") or "").strip()) or \
+        _JOBS.get(_JOBS_BY_SET.get((d.get("set") or "").strip(), ""))
+    if job:
+        job["cancel"] = True
+    return jsonify({"success": True})
+
+
+def trainer_label_summary():
+    """! @brief GET ?set= -> [{label, boxes, images}] over the set's non-debug boxes,
+    so the auto-label panel shows what each prompt has produced."""
+    set_name = (request.args.get("set") or "").strip()
+    if not set_name:
+        return jsonify({"success": False, "error": "set name required"}), 400
+    agg = {}
+    for wp in ts.work_paths(_db(), set_name):
+        fp = get_safe_path(MEDIA_DIR, wp)
+        if not fp or not os.path.exists(fp):
+            continue
+        seen = set()
+        for r in (read_metadata(fp) or {}).get("regions", []) or []:
+            nm = (r.get("class_name") or "").strip()
+            if not nm or _is_debug(r):
+                continue
+            a = agg.setdefault(nm, {"label": nm, "boxes": 0, "images": 0, "unconfirmed": 0})
+            a["boxes"] += 1
+            if not r.get("confirmed", True):
+                a["unconfirmed"] += 1
+            if nm not in seen:
+                seen.add(nm)
+                a["images"] += 1
+    return jsonify({"success": True, "labels": sorted(agg.values(), key=lambda a: a["label"].lower())})
+
+
+def trainer_label_edit():
+    """! @brief POST {set, label, action: rename|confirm|delete, to?} applied to that
+    label's boxes on every member of the set (work copies only)."""
+    d = request.json or {}
+    set_name = (d.get("set") or "").strip()
+    label = (d.get("label") or "").strip()
+    action = d.get("action")
+    to = (d.get("to") or "").strip()
+    if not set_name or not label or action not in ("rename", "confirm", "delete"):
+        return jsonify({"success": False, "error": "set, label and a valid action required"}), 400
+    if action == "rename" and not to:
+        return jsonify({"success": False, "error": "new name required"}), 400
+    if _JOBS_BY_SET.get(set_name):
+        return jsonify({"success": False, "error": "auto-label is running on this set"}), 409
+    changed = 0
+    for wp in ts.work_paths(_db(), set_name):
+        fp = get_safe_path(MEDIA_DIR, wp)
+        if not fp or not os.path.exists(fp):
+            continue
+        meta = read_metadata(fp) or {}
+        regions = list(meta.get("regions", []) or [])
+        out, hit = [], False
+        for r in regions:
+            if _is_debug(r) or (r.get("class_name") or "").strip() != label:
+                out.append(r); continue
+            hit = True
+            if action == "delete":
+                continue
+            r = dict(r)
+            if action == "rename":
+                r["class_name"] = to
+            else:
+                r["confirmed"] = True
+            out.append(r)
+        if hit:
+            update_file(fp, set={"regions": out}, meta=meta)
+            changed += 1
+    if action == "rename":
+        classes = state.get("classes")
+        if isinstance(classes, list) and to not in classes:
+            classes.append(to)
+            try:
+                HOST.core.save_classes()
+            except Exception:
+                pass
+    return jsonify({"success": True, "images": changed})
 
 
 def trainer_keep():
@@ -645,7 +968,8 @@ def trainer_validate():
         fp = get_safe_path(MEDIA_DIR, rp)
         if not fp or not os.path.exists(fp):
             continue
-        if not _is_still(fp):     # stills only (any stored format); skip video members
+        base = os.path.splitext(fp)[0]
+        if not os.path.exists(base + ".jxl"):     # stills only; skip video members
             continue
         img = read_jxl(fp)
         if img is None:
@@ -825,7 +1149,7 @@ def train():
     want_set = set(want) if want else None
 
     # Gather, per still image, only the regions whose class we're training on.
-    labelled = []            # (image path, jpg_name, [regions])
+    labelled = []            # (base, jpg_name, [regions])
     skipped_video = 0
     n_dup_skipped = 0
     present_classes = set()
@@ -834,7 +1158,7 @@ def train():
         if not abs_path:
             continue
         base = os.path.splitext(abs_path)[0]
-        if not _is_still(abs_path):
+        if not os.path.exists(base + ".jxl"):
             skipped_video += 1
             continue
         regions = (read_metadata(abs_path) or {}).get("regions", []) or []
@@ -852,7 +1176,7 @@ def train():
         keep, dups = tv.split_dups(keep)   # double-tagged object -> train on it once
         n_dup_skipped += len(dups)
         if keep:
-            labelled.append((abs_path, os.path.basename(base), keep))
+            labelled.append((base, os.path.basename(base), keep))
 
     if not labelled:
         HOST.set_status("No matching labelled images in this set!")
@@ -932,9 +1256,10 @@ def train():
             img_dst = os.path.join(dset_dir, split)
             os.makedirs(img_dst, exist_ok=True)
             out = []
-            for src, bn, regions in pairs:
+            for base, bn, regions in pairs:
                 jpg = os.path.join(img_dst, bn + ".jpg")
-                _write_jpg(src, jpg)
+                subprocess.run(['djxl', base + ".jxl", jpg],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if crop_to_boxes:
                     regions = _crop_jpg_to_boxes(jpg, regions)
                 out.append((bn, regions))
@@ -987,17 +1312,19 @@ def train():
         return made
 
     aug_made = 0
-    for src, bn, regions in tr_set:
+    for base, bn, regions in tr_set:
         jpg = os.path.join(dset_dir, "images/train", bn + ".jpg")
-        _write_jpg(src, jpg)
+        subprocess.run(['djxl', base + ".jxl", jpg],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if crop_to_boxes:
             regions = _crop_jpg_to_boxes(jpg, regions)
         _write_label(os.path.join(dset_dir, "labels/train"), bn, regions)
         if aug_on:
             aug_made += (_augment_into(dset_dir, "images/train", "labels/train", bn, regions) or 0)
-    for src, bn, regions in val_set:
+    for base, bn, regions in val_set:
         jpg = os.path.join(dset_dir, "images/val", bn + ".jpg")
-        _write_jpg(src, jpg)
+        subprocess.run(['djxl', base + ".jxl", jpg],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if crop_to_boxes:
             regions = _crop_jpg_to_boxes(jpg, regions)
         _write_label(os.path.join(dset_dir, "labels/val"), bn, regions)

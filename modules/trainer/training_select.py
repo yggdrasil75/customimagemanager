@@ -194,6 +194,23 @@ def create_set(db, name):
     db.commit()
 
 
+def rename_set(db, old, new):
+    """! @brief Rename a set's DB rows (members keep their rows; caller moves files
+    and rewrites work_path). Raises ValueError if `new` is taken."""
+    ensure_tables(db)
+    if db.execute("SELECT 1 FROM training_sets WHERE name=?", (new,)).fetchone():
+        raise ValueError(f"a set named {new!r} already exists")
+    db.execute("UPDATE training_sets SET name=?, updated=? WHERE name=?", (new, time.time(), old))
+    db.execute("UPDATE training_set_members SET set_name=? WHERE set_name=?", (new, old))
+    db.execute("UPDATE training_set_meta SET set_name=? WHERE set_name=?", (new, old))
+    db.commit()
+
+
+def set_exists(db, name):
+    ensure_tables(db)
+    return bool(db.execute("SELECT 1 FROM training_sets WHERE name=?", (name,)).fetchone())
+
+
 def delete_set(db, name):
     ensure_tables(db)
     db.execute("DELETE FROM training_set_members WHERE set_name=?", (name,))
@@ -305,23 +322,46 @@ def remove(db, name, rel_paths):
 # -- selection strategies ------------------------------------------------------
 ## @brief `kinds` is a set of allowed media_kind values ('image', 'video'). None => all.
 # YOLO can't train on audio, so callers pass {'image'} or {'image','video'}.
-def _kind_clause(kinds):
-    if not kinds:
-        return "", []
-    marks = ",".join("?" for _ in kinds)
-    return f" WHERE COALESCE(media_kind,'image') IN ({marks})", list(kinds)
+def _kind_clause(kinds, folder=None):
+    """! @brief WHERE clause for the media-kind filter and an optional folder prefix
+    (e.g. 'admin/boxline23' matches everything at or below that folder)."""
+    conds, params = [], []
+    if kinds:
+        conds.append(f"COALESCE(media_kind,'image') IN ({','.join('?' for _ in kinds)})")
+        params += list(kinds)
+    folder = (folder or "").strip().strip("/")
+    if folder:
+        esc = folder.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        conds.append("rel_path LIKE ? ESCAPE '\\'")
+        params.append(esc + "/%")
+    return ((" WHERE " + " AND ".join(conds)) if conds else ""), params
 
 
-def _all_paths(db, exclude, kinds=None):
-    where, params = _kind_clause(kinds)
+def _all_paths(db, exclude, kinds=None, folder=None):
+    where, params = _kind_clause(kinds, folder)
     rows = db.execute("SELECT rel_path FROM files" + where, params).fetchall()
     return [r["rel_path"] for r in rows if r["rel_path"] not in exclude]
 
 
-def select_recent(db, n, exclude, kinds=None):
+def list_folders(db, kinds=None):
+    """! @brief Every folder holding media, with how many files sit at or below it.
+    [{folder, count}] sorted by folder."""
+    where, params = _kind_clause(kinds)
+    counts = {}
+    for r in db.execute("SELECT rel_path FROM files" + where, params).fetchall():
+        parts = r["rel_path"].split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            f = "/".join(parts[:i])
+            if f.startswith("."):
+                break
+            counts[f] = counts.get(f, 0) + 1
+    return [{"folder": f, "count": n} for f, n in sorted(counts.items())]
+
+
+def select_recent(db, n, exclude, kinds=None, folder=None):
     """! @brief Semi-random over the most recent n*2 files by mtime."""
     pool_size = max(n * 2, n)
-    where, params = _kind_clause(kinds)
+    where, params = _kind_clause(kinds, folder)
     rows = db.execute(
         "SELECT rel_path FROM files" + where + " ORDER BY mtime DESC LIMIT ?",
         params + [pool_size + len(exclude)]).fetchall()
@@ -330,14 +370,14 @@ def select_recent(db, n, exclude, kinds=None):
     return pool[:n]
 
 
-def select_random(db, n, exclude, kinds=None):
-    pool = _all_paths(db, exclude, kinds)
+def select_random(db, n, exclude, kinds=None, folder=None):
+    pool = _all_paths(db, exclude, kinds, folder)
     if len(pool) <= n:
         return pool
     return random.sample(pool, n)
 
 
-def select_diverse(db, n, exclude, kinds=None, iter_emb=None):
+def select_diverse(db, n, exclude, kinds=None, iter_emb=None, folder=None):
     """! @brief Greedy farthest-point sampling over whole-image embeddings.
 
     Picks a random seed, then repeatedly adds the image whose nearest already-
@@ -361,10 +401,10 @@ def select_diverse(db, n, exclude, kinds=None, iter_emb=None):
             dim = None
     if not dim:
         # no embeddings computed - nothing to be diverse over
-        return select_random(db, n, exclude, kinds)
+        return select_random(db, n, exclude, kinds, folder)
     allowed = None
-    if kinds:
-        where, params = _kind_clause(kinds)
+    if kinds or folder:
+        where, params = _kind_clause(kinds, folder)
         allowed = {r["rel_path"] for r in
                    db.execute("SELECT rel_path FROM files" + where, params).fetchall()}
 
@@ -378,7 +418,7 @@ def select_diverse(db, n, exclude, kinds=None, iter_emb=None):
             names.append(rp)
             mats.append(mat[i])
     if not names:
-        return select_random(db, n, exclude, kinds)
+        return select_random(db, n, exclude, kinds, folder)
     if len(names) <= n:
         return names
 
@@ -401,7 +441,7 @@ STRATEGIES = {"recent": select_recent, "random": select_random, "diverse": selec
 
 
 def select(db, strategy, n, exclude_all_sets=True, set_name=None, extra_exclude=None,
-           kinds=None, iter_emb=None):
+           kinds=None, iter_emb=None, folder=None):
     """! @brief Return a list of rel_paths chosen by strategy.
 
     exclude_all_sets -- when True, skip any image that already lives in ANY set,
@@ -413,6 +453,8 @@ def select(db, strategy, n, exclude_all_sets=True, set_name=None, extra_exclude=
                         None means no filter. Audio is never trainable by YOLO.
     iter_emb         -- embedding iterator for the 'diverse' strategy (see
                         select_diverse); ignored by the others.
+    folder           -- only pick from this folder (and its subfolders), e.g.
+                        'admin/boxline23'. None/'' = whole library.
     """
     ensure_tables(db)
     n = max(0, int(n))
@@ -426,8 +468,8 @@ def select(db, strategy, n, exclude_all_sets=True, set_name=None, extra_exclude=
         exclude |= set(extra_exclude)
     fn = STRATEGIES.get(strategy, select_random)
     if fn is select_diverse:
-        return fn(db, n, exclude, kinds, iter_emb=iter_emb)
-    return fn(db, n, exclude, kinds)
+        return fn(db, n, exclude, kinds, iter_emb=iter_emb, folder=folder)
+    return fn(db, n, exclude, kinds, folder=folder)
 
 
 def create_run(db, strategy, n, exclude_all_sets=True, kinds=None):

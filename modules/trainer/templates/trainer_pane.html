@@ -21,6 +21,8 @@
       <div class="flex gap-2 items-center">
         <select id="tr_set_select" onchange="trOnSetChange()"
           class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white"></select>
+        <button onclick="trRenameSet()" data-feature="ai.trainer.keep"
+          class="text-xs text-indigo-300 hover:text-indigo-200 whitespace-nowrap" title="Give this set a name.">Rename</button>
         <button onclick="trDeleteSet()" data-feature="ai.trainer.keep"
           class="text-xs text-red-400 hover:text-red-300 whitespace-nowrap">Delete</button>
       </div>
@@ -41,9 +43,26 @@
       <summary class="text-xs font-bold text-gray-300 cursor-pointer select-none">Build a new set</summary>
       <div class="space-y-2 mt-2">
         <div class="flex items-center gap-2">
+          <span class="text-xs text-gray-400 w-14">Name</span>
+          <input id="tr_new_name" type="text" placeholder="auto (folder name or Set N)"
+            class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-gray-400 w-14">From</span>
+          <select id="tr_folder" onchange="trFolderChange()"
+            class="flex-1 min-w-0 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"
+            title="Copy from one folder (and its subfolders), e.g. a production line's upload folder.">
+            <option value="">Whole library</option>
+          </select>
+          <button onclick="trLoadFolders()" class="text-xs text-gray-400 hover:text-gray-200" title="Refresh folder list">&#x21bb;</button>
+        </div>
+        <div class="flex items-center gap-2">
           <span class="text-xs text-gray-400 w-14">Count</span>
           <input id="tr_n" type="number" value="50" min="1"
             class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
+          <label class="flex items-center gap-1 text-xs text-gray-300 whitespace-nowrap"
+                 title="Take every image in the chosen folder instead of a count.">
+            <input id="tr_all" type="checkbox" class="accent-indigo-500" onchange="trFolderChange()"> All</label>
         </div>
         <div class="grid grid-cols-2 gap-2">
           <div>
@@ -75,6 +94,45 @@
         <p class="text-xs text-gray-500">Images are copied into the set's own folder, so editing, adding, or
           removing boxes never changes your gallery. Recent = latest nx2; diverse = most distinct embeddings.
           YOLO can't use audio.</p>
+      </div>
+    </details>
+    <!-- Auto-label: type what to find, the vision LLM boxes it on every image in
+         the set. No saved AI action needed. Repeat per component. -->
+    <details id="tr_auto" class="border-t border-gray-700 pt-2" data-feature="ai.trainer.keep" open>
+      <summary class="text-xs font-bold text-emerald-300 cursor-pointer select-none">Auto-label with VLM</summary>
+      <div class="space-y-2 mt-2">
+        <input id="tr_al_prompt" type="text" placeholder='e.g. find the blue tube'
+          onkeydown="if(event.key==='Enter')trAutoLabel()" oninput="trAlPromptInput()"
+          class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-gray-400 w-14">Label</span>
+          <input id="tr_al_label" type="text" placeholder="from prompt" list="tr_al_labels"
+            class="flex-1 min-w-0 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"
+            title="Class name the boxes get. Empty = taken from the prompt (find the blue tube -> blue tube).">
+          <datalist id="tr_al_labels"></datalist>
+        </div>
+        <div class="flex items-center gap-2">
+          <select id="tr_al_mode" class="flex-1 min-w-0 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-xs"
+            title="Skip: only images without this label yet. Replace: redo this label everywhere. Add: keep existing and add more.">
+            <option value="skip">Images missing this label</option>
+            <option value="replace">All images, replace this label</option>
+            <option value="add">All images, add to existing</option>
+          </select>
+          <label class="flex items-center gap-1 text-xs text-gray-300 whitespace-nowrap"
+                 title="Confirmed boxes are used for training right away. Unchecked: boxes arrive unconfirmed (yellow) for review.">
+            <input id="tr_al_confirm" type="checkbox" checked class="accent-emerald-500"> Confirm</label>
+        </div>
+        <div class="flex gap-2">
+          <button id="tr_al_go" onclick="trAutoLabel()"
+            class="flex-1 bg-emerald-700 hover:bg-emerald-600 py-1.5 rounded font-bold text-sm">Box it on all images</button>
+          <button id="tr_al_stop" onclick="trAutoLabelCancel()"
+            class="hidden bg-red-800 hover:bg-red-700 px-3 py-1.5 rounded text-sm">Stop</button>
+        </div>
+        <div id="tr_al_progress" class="hidden">
+          <div class="h-1.5 bg-gray-700 rounded overflow-hidden"><div id="tr_al_bar" class="h-full bg-emerald-500" style="width:0%"></div></div>
+          <p id="tr_al_text" class="text-xs text-gray-400 mt-1"></p>
+        </div>
+        <div id="tr_al_summary" class="space-y-1 max-h-40 overflow-y-auto"></div>
       </div>
     </details>
     <button onclick="trClearSet()" data-feature="ai.trainer.keep"
