@@ -34,6 +34,15 @@ import object_grouping as og
 from modules.model_broker import NoProviderError
 from optional_deps import optional_import
 
+
+class _PartialFailure(RuntimeError):
+    """! @brief Some files of a background batch failed: the host skips only
+    `.failed` for the session and counts the rest as done."""
+
+    def __init__(self, failed, msg):
+        super().__init__(msg)
+        self.failed = list(failed)
+
 cv2, _HAVE_CV2 = optional_import("cv2")
 
 
@@ -399,34 +408,90 @@ def register(host):
 
     ## @brief Background sweep (Models -> Embeddings -> "Run in background"): every image
     # without a vector in the background model's space, one at a time.
+    # The sweep walks the library once per pass with a cursor (rel_path order):
+    # each claim reads on from where the last one stopped instead of rescanning
+    # every already-embedded file from the top (quadratic over 300k images).
+    _cursor = {"tag": None, "after": ""}
+
     def _bg_pending(db, n, skip=()):
         tag = _embed_tag(host.request_model("embed", role="bg"), role="bg")
         _last_tag["bg"] = tag
-        # stream the rows instead of LIMIT n: files that failed this session are passed
-        # over without ever hiding the rest of the library behind them
+        if _cursor["tag"] != tag:                 # another model: a new pass
+            _cursor.update(tag=tag, after="")
+        sql = ("SELECT f.rel_path FROM files f LEFT JOIN image_embeddings e "
+               "ON e.rel_path=f.rel_path AND e.model=? "
+               "WHERE f.media_kind='image' AND e.rel_path IS NULL AND f.rel_path > ? ORDER BY f.rel_path")
         out = []
-        for r in db.execute(
-                "SELECT f.rel_path FROM files f LEFT JOIN image_embeddings e "
-                "ON e.rel_path=f.rel_path AND e.model=? "
-                "WHERE f.media_kind='image' AND e.rel_path IS NULL ORDER BY f.rel_path", (tag,)):
-            if r["rel_path"] not in skip:
-                out.append(r["rel_path"])
-                if len(out) >= n:
-                    break
+        for start in (_cursor["after"], ""):      # read on, then wrap once for what was passed over
+            for r in db.execute(sql, (tag, start)):
+                if r["rel_path"] not in skip and r["rel_path"] not in out:
+                    out.append(r["rel_path"])
+                    if len(out) >= n:
+                        break
+            if len(out) >= n or start == "":
+                break
+        _cursor["after"] = out[-1] if out else ""
         return out
 
-    def _bg_run(rel, fp, handle):
+    def _bg_run(rels, fps, handle):
+        """! @brief One batch: decode in parallel (JXL decode is the slow part on CPU),
+        embed in one forward pass when the model offers .batch, store once.
+        Worker threads have no Flask app context, and core helpers answer errors with
+        jsonify(): run under one so a bad file fails alone instead of the batch."""
+        with host.app.app_context():
+            return _bg_run_batch(rels, handle)
+
+    def _bg_run_batch(rels, handle):
+        from concurrent.futures import ThreadPoolExecutor
         db = host.db()
         tag = _embed_tag(handle, role="bg")
-        if _have_embedding(db, rel, tag, _img_mtime(rel)):
-            return                        # another worker got there first: nothing to do
-        img = _img_loader(rel)
-        if img is None:
-            raise RuntimeError("decode failed")
-        n = _stage_embeddings_with(db, [rel], lambda _r: img, handle, tag, mtime_of=_img_mtime)
-        if not n:
-            raise RuntimeError("embedder returned nothing for a decoded image (endpoint rejected it)")
-    host.add_background_sweep("embed", _bg_pending, _bg_run)
+        todo = [r for r in rels if not _have_embedding(db, r, tag, _img_mtime(r))]
+        if not todo:
+            return
+        with ThreadPoolExecutor(max_workers=min(8, len(todo))) as ex:
+            imgs = list(ex.map(lambda r: _safe_load(r), todo))
+        pairs = [(r, im) for r, im in zip(todo, imgs) if im is not None]
+        failed = [r for r, im in zip(todo, imgs) if im is None]
+        vecs = []
+        if pairs:
+            fn = getattr(handle, "batch", None)
+            if callable(fn):
+                try:
+                    vecs = list(fn([im for _, im in pairs]))
+                except Exception as e:
+                    host.logger.warning(f"background embed: batch failed, one at a time ({e})")
+                    vecs = []
+            if len(vecs) != len(pairs):
+                vecs = []
+                for _, im in pairs:
+                    try:
+                        vecs.append(handle(im))
+                    except Exception as e:
+                        host.logger.warning(f"background embed: {e}")
+                        vecs.append(None)
+        rows = []
+        for (r, _), v in zip(pairs, vecs):
+            if v is None:
+                failed.append(r)
+                continue
+            v = _normalise(np.asarray(v, np.float32))
+            rows.append((r, len(v), _pack(v), tag, _img_mtime(r), time.time()))
+        if rows:
+            _flush_embeddings(db, rows)
+        if failed:
+            # only the failures are skipped for the session, not the whole batch
+            raise _PartialFailure(failed, f"{len(failed)} of {len(todo)} images could not be "
+                                          f"decoded or embedded (first: {failed[0]})")
+
+    def _safe_load(rel):
+        # decode threads are fresh threads: give them the app context the worker has
+        try:
+            with host.app.app_context():
+                return _img_loader(rel)
+        except Exception:
+            return None
+
+    host.add_background_sweep("embed", _bg_pending, _bg_run, batch=32)
 
     ## @brief -- progress: how much of the library has a vector -----------------
     # Counted in the space the sweep fills (the background model when "Run in

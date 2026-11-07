@@ -265,3 +265,63 @@ def test_sweep_pending_passes_over_failed_files(app, monkeypatch):
     assert sw["pending"](db, 2, skip=set(allp)) == []
     db.executemany("DELETE FROM files WHERE rel_path=?", [(r,) for r in rows])
     db.commit()
+
+
+def test_sweep_batch_embeds_in_one_call_and_skips_only_failures(app, monkeypatch):
+    """! @brief The background sweep sends a batch through .batch once, stores every
+    vector, and reports only the files that failed (not the whole batch)."""
+    import os
+    import types
+    import numpy as np
+    from cimtest import png_bytes
+    h = app.module_host
+    sw = h.background_sweeps["embed"]
+    assert sw["batch"] > 1
+    db = app._db()
+    folder = os.path.join(app.MEDIA_DIR, "zz_sweep_batch")
+    os.makedirs(folder, exist_ok=True)
+    good = []
+    for i in range(3):
+        rel = f"zz_sweep_batch/{i}.png"
+        with open(os.path.join(app.MEDIA_DIR, rel), "wb") as f:
+            f.write(png_bytes(seed=7400 + i))
+        good.append(rel)
+    bad = "zz_sweep_batch/missing.png"
+    db.executemany("INSERT OR IGNORE INTO files(rel_path, media_kind) VALUES(?, 'image')",
+                   [(r,) for r in good + [bad]])
+    db.commit()
+    calls = []
+
+    def single(img):
+        raise AssertionError("batch path not used")
+
+    def batch(imgs):
+        calls.append(len(imgs))
+        return [np.ones(8, np.float32) * (k + 1) for k in range(len(imgs))]
+    single.batch = batch
+    single.model = types.SimpleNamespace(space="sweep-batch-space")
+    try:
+        try:
+            import threading
+            box = {}
+            def go():
+                try:
+                    sw["run"](good + [bad], [None] * 4, single)
+                except Exception as e:
+                    box["e"] = e
+            t = threading.Thread(target=go); t.start(); t.join()   # like a worker thread
+            if "e" in box:
+                raise box["e"]
+            raised = None
+        except Exception as e:
+            raised = e
+        assert calls == [3], repr(raised)
+        assert raised is not None and list(getattr(raised, "failed", [])) == [bad]
+        n = db.execute("SELECT COUNT(*) FROM image_embeddings WHERE model='sweep-batch-space'").fetchone()[0]
+        assert n == 3
+    finally:
+        db.execute("DELETE FROM image_embeddings WHERE model='sweep-batch-space'")
+        db.executemany("DELETE FROM files WHERE rel_path=?", [(r,) for r in good + [bad]])
+        db.commit()
+        import shutil
+        shutil.rmtree(folder, ignore_errors=True)

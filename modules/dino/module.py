@@ -144,7 +144,16 @@ def register(host):
         if not got:
             raise RuntimeError(f"DINO backbone {mid} failed to load")
         model, proc = got
-        return lambda img, *a, **k: (embed_crops(model, proc, [cv2.cvtColor(og.as_bgr(img), cv2.COLOR_BGR2RGB)]) or [None])[0]
+
+        def run(img, *a, **k):
+            return (embed_crops(model, proc, [cv2.cvtColor(og.as_bgr(img), cv2.COLOR_BGR2RGB)]) or [None])[0]
+
+        def batch(imgs, *a, **k):
+            """! @brief Many images in one forward pass (the background sweep's path)."""
+            return embed_crops(model, proc, [cv2.cvtColor(og.as_bgr(i), cv2.COLOR_BGR2RGB) for i in imgs])
+        run.batch = batch
+        run.registry_key = registry_key(mid)
+        return run
 
     def _v3_ok():
         """! @brief DINOv3 weights are gated: loading needs an HF token (accepted
@@ -172,4 +181,4 @@ def register(host):
                       reason=why, cost_mb=1600, gpu=og.has_gpu())
         host.provide_model("embed.bodies", fam, loader=_bodies_loader, **common)
         host.provide_model("embed", fam, loader=_image_loader, **common)
-    host.logger.info("dino module: registered embed / embed.bodies (v2, v3)")
+    host.logger.info("dino module: registered embed / embed.bodies (v2, v3)")

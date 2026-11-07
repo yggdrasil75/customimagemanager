@@ -539,7 +539,8 @@ class Host:
         @param run      fn(rel, abs, handle) computes and stores it; with batch > 1,
                         fn(rels, abs_paths, handle).
         A pending fn that takes a `skip` keyword gets the rel_paths that failed this
-        session, so it can return the work after them.
+        session, so it can return the work after them. A run fn that raises an error
+        with a `.failed` list (part of a batch failed) has only those skipped.
         Detect / segment capabilities use the ingest path instead.
         """
         import inspect
@@ -610,7 +611,9 @@ class Host:
                     break
                 n *= 4
             if slot:
-                self.thread_manager.release_key(slot)
+                # a GPU job token: release_key() ignores it, so it leaked one GPU job
+                # per empty claim until the sweep could never be admitted again
+                self.thread_manager.release_model(slot)
             self._sweep_idle[cap] = now + 60
         return None
 
@@ -635,9 +638,16 @@ class Host:
             if n // 25 != (n - len(ok)) // 25:
                 self.set_status(f"[bg {cap}] {n} done...")
         except Exception as e:
-            for r in rels:  # skip failures instead of retrying them every tick
+            # skip failures instead of retrying them every tick; an error carrying
+            # .failed (part of a batch) skips just those and counts the rest done
+            failed = getattr(e, "failed", None)
+            bad = list(failed) if failed is not None else rels
+            for r in bad:
                 self._sweep_skip.add((cap, r))
-            self.logger.error(f"background {cap} {rels[0]}{' +%d' % (len(rels) - 1) if len(rels) > 1 else ''}: {e}")
+            if failed is not None:
+                self._sweep_done[cap] = self._sweep_done.get(cap, 0) + max(0, len(rels) - len(bad))
+            self.logger.error(f"background {cap} {bad[0] if bad else rels[0]}"
+                              f"{' +%d' % (len(bad) - 1) if len(bad) > 1 else ''}: {e}")
         finally:
             self._sweep_inflight = max(0, self._sweep_inflight - 1)
             for k in job.get("keys") or [job["key"]]:

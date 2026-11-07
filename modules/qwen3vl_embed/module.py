@@ -74,6 +74,11 @@ def _model_class():
     return Qwen3VLForEmbedding
 
 
+# CUDA out-of-memory (torch >= 2.1 names it at top level; older under torch.cuda)
+_OOM = (getattr(torch, "OutOfMemoryError", None) or getattr(getattr(torch, "cuda", None), "OutOfMemoryError", None)
+        or MemoryError) if _HAVE_TORCH else MemoryError
+
+
 def _normalise(v, dims=0):
     v = np.asarray(v, np.float32)
     if dims and dims < len(v):
@@ -92,9 +97,14 @@ class _Embedder:
                                                   padding_side="right")
 
     def _run(self, instruction, content, images=None, max_tokens=0):
-        messages = [{"role": "system", "content": [{"type": "text", "text": instruction}]},
-                    {"role": "user", "content": content}]
-        text = self.proc.apply_chat_template([messages], add_generation_prompt=True,
+        return self._run_many(instruction, [content], images, max_tokens)[0]
+
+    def _run_many(self, instruction, contents, images=None, max_tokens=0):
+        """! @brief One forward pass over several conversations (right padded; each
+        row's vector is its last real token). @return one row per conversation."""
+        convs = [[{"role": "system", "content": [{"type": "text", "text": instruction}]},
+                  {"role": "user", "content": c}] for c in contents]
+        text = self.proc.apply_chat_template(convs, add_generation_prompt=True,
                                              tokenize=False)
         # the image processor's own smart_resize: sides to multiples of
         # patchxmerge (32) inside the pixel budget, aspect kept
@@ -107,7 +117,7 @@ class _Embedder:
             out = self.model(**inputs)
         h, m = out.last_hidden_state, inputs["attention_mask"]
         last = m.shape[1] - m.flip(1).argmax(1) - 1          # last real token per row
-        return h[torch.arange(h.shape[0], device=h.device), last].float().cpu().numpy()[0]
+        return h[torch.arange(h.shape[0], device=h.device), last].float().cpu().numpy()
 
     def embed_image(self, img_bgr, max_tokens, dims):
         if img_bgr is None:
@@ -115,6 +125,31 @@ class _Embedder:
         pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
         v = self._run(DOC_INSTRUCTION, [{"type": "image"}], images=[pil], max_tokens=max_tokens)
         return _normalise(v, dims)
+
+    def embed_images(self, imgs_bgr, max_tokens, dims, per_pass=8):
+        """! @brief Many images, `per_pass` per forward pass (halved on out-of-memory).
+        @return one vector (or None for a None image) per input, in order."""
+        out = [None] * len(imgs_bgr)
+        todo = [(i, Image.fromarray(cv2.cvtColor(im, cv2.COLOR_BGR2RGB)))
+                for i, im in enumerate(imgs_bgr) if im is not None]
+        step = max(1, int(per_pass or 1))
+        k = 0
+        while k < len(todo):
+            chunk = todo[k:k + step]
+            try:
+                rows = self._run_many(DOC_INSTRUCTION, [[{"type": "image"}]] * len(chunk),
+                                      images=[p for _, p in chunk], max_tokens=max_tokens)
+            except _OOM:
+                if step == 1:
+                    raise
+                if _HAVE_TORCH and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                step = max(1, step // 2)          # retry this chunk smaller
+                continue
+            for (i, _), v in zip(chunk, rows):
+                out[i] = _normalise(v, dims)
+            k += len(chunk)
+        return out
 
     def embed_text(self, text, dims):
         text = (text or "").strip()
@@ -152,6 +187,10 @@ def register(host):
                         validate=lambda v: max(64, min(1800, int(v or 1024))))
     host.add_config_key("qwen3vl_embed_dims", default=0,
                         validate=lambda v: max(0, int(v or 0)))
+    # images per forward pass for batched embedding (the background sweep); halves
+    # itself on out-of-memory, so too high costs a retry, not a failure
+    host.add_config_key("qwen3vl_embed_batch", default=8,
+                        validate=lambda v: max(1, min(64, int(v or 8))))
 
     def _loader():
         size = host.model_variant("embed")["size"] or "2b"
@@ -164,6 +203,12 @@ def register(host):
 
         def run(img, *a, **k):
             return emb.embed_image(og.as_bgr(img), max_tokens, dims)
+
+        def batch(imgs, *a, **k):
+            """! @brief Several images per forward pass (the background sweep's path)."""
+            per = int(host.config.get("qwen3vl_embed_batch") or 8)
+            return emb.embed_images([og.as_bgr(i) for i in imgs], max_tokens, dims, per_pass=per)
+        run.batch = batch
         run.embed_text = lambda text: emb.embed_text(text, dims)
         run.space = f"qwen3vl-embed:{size}" + (f":{dims}" if dims else "")
         run.registry_key = registry_key(mid)
@@ -183,6 +228,9 @@ def register(host):
             {"key": "qwen3vl_embed_dims", "label": "Vector dims (MRL)", "kind": "number",
              "help": "0 = native (2048 for 2B, 4096 for 8B). Smaller vectors stay comparable "
                      "and keep the table small; changing it means regenerating."},
+            {"key": "qwen3vl_embed_batch", "label": "Images per pass (background)", "kind": "number",
+             "help": "How many images the background sweep sends through the model at once. "
+                     "Higher is faster until VRAM runs out; on out-of-memory it halves itself."},
         ])
     ## @brief embed.text: the same model as a text-only pick. Useful when one model
     # should serve everything; a dedicated text model (text_embed module) is
