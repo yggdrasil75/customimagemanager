@@ -491,7 +491,9 @@ def register(host):
         except Exception:
             return None
 
-    host.add_background_sweep("embed", _bg_pending, _bg_run, batch=32)
+    # progress: the Embeddings card in Settings > Models, like every background sweep
+    host.add_background_sweep("embed", _bg_pending, _bg_run, batch=32,
+                              progress=lambda db: {k: _embed_progress()[k] for k in ("done", "total")})
 
     ## @brief -- progress: how much of the library has a vector -----------------
     # Counted in the space the sweep fills (the background model when "Run in
@@ -524,29 +526,9 @@ def register(host):
 
     @host.route("/api/embedding/progress", feature="tab.review")
     def embedding_progress():
-        """! @brief {done, total, left, pct, space, background} plus a settings-section
-        view ("view") for Settings > Models."""
-        d = dict(_embed_progress())
-        state = ("complete" if not d["left"] else
-                 "running in background" if d["background"] else "background off")
-        d["view"] = {
-            "rows": [{"label": "Embedded", "value": f"{d['done']:,} / {d['total']:,} ({d['pct']:.1f}%)",
-                      "tone": "ok" if not d["left"] else None},
-                     {"label": "Left", "value": f"{d['left']:,}", "tone": "muted" if not d["left"] else "warn"},
-                     {"label": "State", "value": state,
-                      "tone": "ok" if not d["left"] else ("muted" if not d["background"] else None)},
-                     {"label": "Failed this session", "value": f"{d['failed']:,}",
-                      "tone": "warn" if d["failed"] else "muted"},
-                     {"label": "Space", "value": d["space"], "tone": "muted"}],
-            "live": True,
-        }
-        return jsonify({"success": True, **d})
+        """! @brief {done, total, left, pct, space, background, failed} (side panel bar)."""
+        return jsonify({"success": True, **_embed_progress()})
 
-    host.add_settings_section(
-        "models", "embed_progress", title="Image embedding progress",
-        text="Images with an embedding in the space being filled. Turn on "
-             "Embeddings > Run in background above to fill the rest.",
-        status_url="/api/embedding/progress", poll=10, feature="settings.models", order=50)
 
     def _stored_models(db):
         """! @brief [{model, count, dim}] for every embedding space the library holds."""

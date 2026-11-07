@@ -189,7 +189,15 @@ def register(host):
             raise RuntimeError(pose_data["note"])
         _store(fp, pose_data)
         _mark(rel, pose_data, host.broker.selected_id("pose", "bg"))
-    host.add_background_sweep("pose", _bg_pending, _bg_run)
+    def _bg_progress(db):
+        model = host.broker.selected_id("pose", "bg") or ""
+        total = db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image' "
+                           "AND (comic_folder IS NULL OR comic_folder='')").fetchone()[0]
+        done = db.execute(
+            "SELECT COUNT(DISTINCT f.rel_path) FROM files f JOIN pose_runs p ON p.rel_path=f.rel_path AND p.model=? "
+            "WHERE f.media_kind='image' AND (f.comic_folder IS NULL OR f.comic_folder='')", (model,)).fetchone()[0]
+        return {"done": done, "total": total}
+    host.add_background_sweep("pose", _bg_pending, _bg_run, progress=_bg_progress)
 
     # -- POST /api/pose ---------------------------------------------------
     def api_pose():

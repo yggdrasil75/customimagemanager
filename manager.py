@@ -4421,6 +4421,12 @@ def api_models():
     """! @brief Capabilities, their providers (sizes, types, widgets) and the current picks."""
     return jsonify({"capabilities": _models_payload()})
 
+@app.route("/api/background/progress")
+@_auth.require_feature("settings.models", level="read")
+def api_background_progress():
+    """! @brief Each background sweep's progress (Settings > Models bars)."""
+    return jsonify({"success": True, "sweeps": module_host.sweep_progress()})
+
 @app.route("/api/models/classes")
 @_auth.require_feature("settings.models")
 def api_models_classes():

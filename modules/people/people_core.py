@@ -611,9 +611,18 @@ def _body_sweep_pending(db, n):
 def _body_sweep_run(rels, fps, handle):
     _face_detect_batch(rels, person_run=handle, faces=False, bodies=True)
 
+def _sweep_progress(col):
+    def fn(db):
+        r = db.execute(f"SELECT COUNT(*) t, SUM(CASE WHEN COALESCE({col},0)<>0 THEN 1 ELSE 0 END) d "
+                       "FROM files WHERE media_kind='image'").fetchone()
+        return {"done": int(r[1] or 0), "total": int(r[0] or 0)}
+    return fn
+
 def _register_sweeps():
-    HOST.add_background_sweep("detect.faces", _face_sweep_pending, _face_sweep_run, batch=FACE_BATCH)
-    HOST.add_background_sweep("detect.persons", _body_sweep_pending, _body_sweep_run, batch=FACE_BATCH)
+    HOST.add_background_sweep("detect.faces", _face_sweep_pending, _face_sweep_run, batch=FACE_BATCH,
+                              progress=_sweep_progress("face_done"))
+    HOST.add_background_sweep("detect.persons", _body_sweep_pending, _body_sweep_run, batch=FACE_BATCH,
+                              progress=_sweep_progress("body_done"))
 
 def _mark_face_done(rel: str) -> None:
     """! @brief Mark a file's face-boxing pass complete."""

@@ -226,7 +226,18 @@ def register(host):
         db = host.db()
         _write_iqa(db, rel, stars, res.get("raw"), host.broker.selected_id("iqa", "bg") or "")
         db.commit()
-    host.add_background_sweep("iqa", _bg_pending, _bg_run)
+    def _bg_progress(db):
+        """! @brief Images rated by hand or scored by the background model, of all."""
+        model = host.broker.selected_id("iqa", "bg") or ""
+        total = db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image' "
+                           "AND (comic_folder IS NULL OR comic_folder='')").fetchone()[0]
+        done = db.execute(
+            "SELECT COUNT(*) FROM files f JOIN ratings r ON r.rel_path=f.rel_path "
+            "WHERE f.media_kind='image' AND (f.comic_folder IS NULL OR f.comic_folder='') "
+            "AND (r.user_stars IS NOT NULL OR (r.iqa_stars IS NOT NULL AND COALESCE(r.iqa_model,'')=?))",
+            (model,)).fetchone()[0]
+        return {"done": done, "total": total}
+    host.add_background_sweep("iqa", _bg_pending, _bg_run, progress=_bg_progress)
 
     # -- endpoints --------------------------------------------------------
     def api_iqa_models():

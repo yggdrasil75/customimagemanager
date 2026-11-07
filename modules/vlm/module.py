@@ -274,7 +274,15 @@ def register(host):
         host.update_file(rel, table="classify_runs", dont_write=True,
                          set={"model": host.broker.selected_id("classify", "bg") or "", "class_name": name,
                               "conf": (top or {}).get("conf"), "updated": time.time()})
-    host.add_background_sweep("classify", _cls_pending, _cls_run)
+    def _cls_progress(db):
+        model = host.broker.selected_id("classify", "bg") or ""
+        total = db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image' "
+                           "AND (comic_folder IS NULL OR comic_folder='')").fetchone()[0]
+        done = db.execute(
+            "SELECT COUNT(DISTINCT f.rel_path) FROM files f JOIN classify_runs c ON c.rel_path=f.rel_path AND c.model=? "
+            "WHERE f.media_kind='image' AND (f.comic_folder IS NULL OR f.comic_folder='')", (model,)).fetchone()[0]
+        return {"done": done, "total": total}
+    host.add_background_sweep("classify", _cls_pending, _cls_run, progress=_cls_progress)
 
     # -- tag: free-form tags ------------------------------------------------
     def _tag(img_bgr, prompt="", *a, **k):

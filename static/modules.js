@@ -340,6 +340,7 @@ const SPEED_BADGE = { fast: "fast", balanced: "balanced", accurate: "accurate" }
       mount.appendChild(row);
     }
     if (window.applyFeatureVisibility) applyFeatureVisibility(mount);
+    _bgProgressStart();
   }
   /** @brief "Run on every image" toggle + class whitelist for region-producing
    *  capabilities. Classes come from the selected provider (may load weights).
@@ -424,9 +425,58 @@ const SPEED_BADGE = { fast: "fast", balanced: "balanced", accurate: "accurate" }
         bp ? (bp.types || []) : [], c.bg && c.bg.type, (t) => pickBg({ type: t }))));
       wrap.appendChild(grid);
     }
+    // this capability's background sweep progress (filled by _bgProgressTick)
+    const prog = document.createElement("div");
+    prog.className = "hidden mt-2"; prog.dataset.bgProgress = c.id;
+    wrap.appendChild(prog);
     return wrap;
   }
   window.buildModelPicker = buildModelPicker;
+
+  // -- background sweep progress bars (one per capability card) ------------------
+  // Polled only while a card is on screen; the server caches the counts.
+  let _bgTimer = null;
+  function _bgBar(r) {
+    const fmt = (n) => Number(n || 0).toLocaleString();
+    const has = r.total != null && r.done != null;
+    const left = has ? Math.max(0, r.total - r.done) : null;
+    const pct = has ? (r.total ? Math.min(100, Math.floor((100 * r.done) / r.total)) : 100) : 0;
+    const state = has && !left ? '<span class="text-emerald-400">complete</span>'
+      : !r.enabled ? '<span class="text-gray-500">background off</span>'
+      : r.idle ? '<span class="text-gray-500">waiting</span>'
+      : '<span class="text-sky-400">running</span>';
+    const counts = has ? `${fmt(r.done)} / ${fmt(r.total)} (${pct}%)` : `${fmt(r.session_done)} done this session`;
+    const extra = [];
+    if (has && left) extra.push(`${fmt(left)} left`);
+    if (r.failed) extra.push(`<span class="text-red-400" title="Files that errored this session (see the log); retried after a restart.">${fmt(r.failed)} failed</span>`);
+    return `<div class="flex items-center justify-between gap-2 text-[11px]">
+        <span class="text-gray-400">Background progress: <span class="text-gray-200">${counts}</span></span>
+        <span class="whitespace-nowrap">${state}</span></div>
+      ${has ? `<div class="h-1.5 bg-gray-700 rounded overflow-hidden mt-0.5"><div class="h-full ${left ? "bg-sky-500" : "bg-emerald-500"}" style="width:${pct}%"></div></div>` : ""}
+      ${extra.length ? `<div class="text-[10px] text-gray-500 mt-0.5">${extra.join(" | ")}</div>` : ""}`;
+  }
+  async function _bgProgressTick() {
+    const els = [...document.querySelectorAll("[data-bg-progress]")].filter((el) => el.isConnected);
+    if (!els.length) { clearInterval(_bgTimer); _bgTimer = null; return; }
+    if (document.hidden || !els.some((el) => el.closest("#model_capabilities")?.offsetParent)) return;
+    let d;
+    try { d = await fetch("/api/background/progress").then((r) => (r.ok ? r.json() : null)); } catch (e) { return; }
+    if (!d || !d.success) return;
+    const by = {};
+    (d.sweeps || []).forEach((r) => { by[r.cap] = r; });
+    for (const el of els) {
+      const r = by[el.dataset.bgProgress];
+      // a capability without a sweep (detect runs at upload) has no bar; one with
+      // background off shows it only while there is something to report
+      const show = r && (r.enabled || (r.total != null && r.done > 0 && r.done < r.total));
+      el.classList.toggle("hidden", !show);
+      el.innerHTML = show ? _bgBar(r) : "";
+    }
+  }
+  function _bgProgressStart() {
+    _bgProgressTick();
+    if (!_bgTimer) _bgTimer = setInterval(_bgProgressTick, 10000);
+  }
   window.moduleFieldEl = fieldEl;
 
   async function buildSettingsTabs() {

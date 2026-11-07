@@ -243,7 +243,7 @@ def test_progress_route(client, ungated):
     j = client.get("/api/embedding/progress").get_json()
     assert j["success"], j
     assert j["done"] <= j["total"] and j["left"] == j["total"] - j["done"], j
-    assert {r["label"] for r in j["view"]["rows"]} >= {"Embedded", "Left", "State"}, j
+    assert {"space", "background", "failed", "pct"} <= set(j), j
 
 
 def test_sweep_pending_passes_over_failed_files(app, monkeypatch):

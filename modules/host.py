@@ -533,11 +533,13 @@ class Host:
         self.thread_manager.register_source(
             name, claim, handle, key_of=key_of, cost_of=cost_of)
 
-    def add_background_sweep(self, cap_id, pending, run, batch=1):
+    def add_background_sweep(self, cap_id, pending, run, batch=1, progress=None):
         """! @brief Give a capability's "run in background" switch its work.
         @param pending  fn(db, n) -> up to n rel_paths still lacking this output.
         @param run      fn(rel, abs, handle) computes and stores it; with batch > 1,
                         fn(rels, abs_paths, handle).
+        @param progress optional fn(db) -> {"done": int, "total": int} over the library,
+                        shown as this capability's bar in Settings > Models.
         A pending fn that takes a `skip` keyword gets the rel_paths that failed this
         session, so it can return the work after them. A run fn that raises an error
         with a `.failed` list (part of a batch failed) has only those skipped.
@@ -551,7 +553,36 @@ class Host:
         self.background_sweeps[cap_id] = {"pending": pending, "run": run,
                                           "batch": max(1, int(batch or 1)),
                                           "takes_skip": takes_skip,
+                                          "progress": progress,
                                           "module_id": self._current_module}
+
+    def sweep_progress(self, max_age=15.0):
+        """! @brief Every background sweep's progress: [{cap, enabled, done, total,
+        failed, session_done, idle}]. done/total come from the sweep's progress fn
+        (cached max_age s: it counts the library); without one they are None."""
+        now = time.time()
+        cache = self.__dict__.setdefault("_sweep_prog_cache", {})
+        enabled = set(self.broker.background_capabilities())
+        out = []
+        for cap, sw in list(self.background_sweeps.items()):
+            row = {"cap": cap, "enabled": cap in enabled, "done": None, "total": None,
+                   "failed": self.sweep_failed(cap), "session_done": self._sweep_done.get(cap, 0),
+                   "idle": self._sweep_idle.get(cap, 0) > now}
+            fn = sw.get("progress")
+            if fn:
+                hit = cache.get(cap)
+                if hit and now - hit[0] < max_age:
+                    row.update(hit[1])
+                else:
+                    try:
+                        got = dict(fn(self.db()) or {})
+                    except Exception as e:
+                        self.logger.warning(f"background {cap} progress: {e}")
+                        got = {}
+                    cache[cap] = (now, got)
+                    row.update(got)
+            out.append(row)
+        return out
 
     def sweep_failed(self, cap_id):
         """! @brief How many files the background sweep of `cap_id` gave up on this
