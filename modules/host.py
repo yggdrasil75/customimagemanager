@@ -538,11 +538,24 @@ class Host:
         @param pending  fn(db, n) -> up to n rel_paths still lacking this output.
         @param run      fn(rel, abs, handle) computes and stores it; with batch > 1,
                         fn(rels, abs_paths, handle).
+        A pending fn that takes a `skip` keyword gets the rel_paths that failed this
+        session, so it can return the work after them.
         Detect / segment capabilities use the ingest path instead.
         """
+        import inspect
+        try:
+            takes_skip = "skip" in inspect.signature(pending).parameters
+        except (TypeError, ValueError):
+            takes_skip = False
         self.background_sweeps[cap_id] = {"pending": pending, "run": run,
                                           "batch": max(1, int(batch or 1)),
+                                          "takes_skip": takes_skip,
                                           "module_id": self._current_module}
+
+    def sweep_failed(self, cap_id):
+        """! @brief How many files the background sweep of `cap_id` gave up on this
+        session (errors are not retried until a restart)."""
+        return sum(1 for c, _ in list(self._sweep_skip) if c == cap_id)
 
     def _sweep_claim(self):
         caps = [c for c in self.broker.background_capabilities() if c in self.background_sweeps]
@@ -569,7 +582,15 @@ class Host:
             n = max(16, want)
             while True:
                 try:
-                    rows = list(self.background_sweeps[cap]["pending"](self.db(), n))
+                    pend = self.background_sweeps[cap]["pending"]
+                    if self.background_sweeps[cap].get("takes_skip"):
+                        # skip files that failed this session in the query itself: a run of
+                        # >1000 failures at the head of the order would otherwise hide all
+                        # the work behind them and idle the sweep for good
+                        skip = {r for c, r in list(self._sweep_skip) if c == cap}
+                        rows = list(pend(self.db(), n, skip=skip))
+                    else:
+                        rows = list(pend(self.db(), n))
                 except Exception as e:
                     self.logger.error(f"background {cap} pending: {e}"); rows = []
                 rels, keys = [], []

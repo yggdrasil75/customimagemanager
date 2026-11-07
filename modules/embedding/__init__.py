@@ -160,10 +160,13 @@ def register(host):
         except RuntimeError:
             return None
 
+    _last_tag = {}          # role -> the space last embedded into (progress reads it)
+
     def _embed_tag(handle=None, role="fg"):
         handle = handle or _try_handle()
         space = getattr(getattr(handle, "model", None), "space", None)
         if space:
+            _last_tag[role] = str(space)          # what the progress readout counts
             return str(space)
         pid = host.broker.selected_id("embed", role)
         return f"{pid}:{host.model_variant('embed', role).get('size') or ''}"
@@ -396,13 +399,21 @@ def register(host):
 
     ## @brief Background sweep (Models -> Embeddings -> "Run in background"): every image
     # without a vector in the background model's space, one at a time.
-    def _bg_pending(db, n):
+    def _bg_pending(db, n, skip=()):
         tag = _embed_tag(host.request_model("embed", role="bg"), role="bg")
-        return [r["rel_path"] for r in db.execute(
-            "SELECT f.rel_path FROM files f LEFT JOIN image_embeddings e "
-            "ON e.rel_path=f.rel_path AND e.model=? "
-            "WHERE f.media_kind='image' AND e.rel_path IS NULL ORDER BY f.rel_path LIMIT ?",
-            (tag, n)).fetchall()]
+        _last_tag["bg"] = tag
+        # stream the rows instead of LIMIT n: files that failed this session are passed
+        # over without ever hiding the rest of the library behind them
+        out = []
+        for r in db.execute(
+                "SELECT f.rel_path FROM files f LEFT JOIN image_embeddings e "
+                "ON e.rel_path=f.rel_path AND e.model=? "
+                "WHERE f.media_kind='image' AND e.rel_path IS NULL ORDER BY f.rel_path", (tag,)):
+            if r["rel_path"] not in skip:
+                out.append(r["rel_path"])
+                if len(out) >= n:
+                    break
+        return out
 
     def _bg_run(rel, fp, handle):
         db = host.db()
@@ -430,17 +441,19 @@ def register(host):
         db = host.db()
         bg_on = "embed" in host.broker.background_capabilities()
         role = "bg" if bg_on else "fg"
-        try:
-            tag = _embed_tag(host.request_model("embed", role=role), role=role)
-        except Exception:
-            tag = _embed_tag(role=role)
+        # never load a model to answer a progress poll (it could push the sweep's
+        # model out of memory): use the space last embedded into, else the pick's name
+        tag = _last_tag.get(role)
+        if not tag:
+            pid = host.broker.selected_id("embed", role)
+            tag = f"{pid}:{host.model_variant('embed', role).get('size') or ''}"
         total = db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image'").fetchone()[0]
         done = db.execute(
             "SELECT COUNT(*) FROM files f JOIN image_embeddings e "
             "ON e.rel_path=f.rel_path AND e.model=? WHERE f.media_kind='image'", (tag,)).fetchone()[0]
         d = {"done": done, "total": total, "left": max(0, total - done),
              "pct": (100.0 * done / total) if total else 100.0,
-             "space": tag, "background": bg_on}
+             "space": tag, "background": bg_on, "failed": host.sweep_failed("embed")}
         _prog_cache.update(at=now, data=d)
         return d
 
@@ -457,6 +470,8 @@ def register(host):
                      {"label": "Left", "value": f"{d['left']:,}", "tone": "muted" if not d["left"] else "warn"},
                      {"label": "State", "value": state,
                       "tone": "ok" if not d["left"] else ("muted" if not d["background"] else None)},
+                     {"label": "Failed this session", "value": f"{d['failed']:,}",
+                      "tone": "warn" if d["failed"] else "muted"},
                      {"label": "Space", "value": d["space"], "tone": "muted"}],
             "live": True,
         }

@@ -549,8 +549,10 @@ def adopt_ids(cfg=None):
                 ltmp = link + f".tierswap-{uuid.uuid4().hex[:8]}"
                 os.symlink(new, ltmp); os.replace(ltmp, link)
                 n += 1
-        except OSError as e:
-            log.error(f"adopt id for {rel}: {e}")
+        except Exception as e:
+            # one bad file (a sidecar exiv2 can't parse, a read-only dir) must not stop
+            # the rebalance: the object keeps its uuid name and still resolves
+            log.warning(f"adopt id for {rel}: {e}")
     if n:
         log.info(f"adopt: aligned {n} tier objects with their sidecar DocumentID")
     return n

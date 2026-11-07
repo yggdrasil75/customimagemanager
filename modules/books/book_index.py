@@ -290,7 +290,9 @@ def sniff(path: str) -> str | None:
             return _PALM_BOOK_TYPES[tc]
         # Looks structurally like a PDB (printable type/creator) but isn't a
         # book type -> say so explicitly so classify() can reject with a reason.
-        if all(32 <= b < 127 for b in tc) and head[0] not in (0, 32):
+        # (not a zip: a stored zip whose first member is text - a .cbz with
+        # ComicInfo.xml first - has printable bytes there too)
+        if all(32 <= b < 127 for b in tc) and head[0] not in (0, 32) and head[:4] != b'PK\x03\x04':
             return 'palm-other'
 
     # -- ZIP-based: epub vs cbz vs docx vs plain zip ---------------------------
@@ -1628,6 +1630,15 @@ def epub_is_comic(abs_path: str) -> bool:
     big novel costs a few small reads."""
     try:
         with zipfile.ZipFile(abs_path) as z:
+            # an epub may say what it is: <meta name="cim:kind" content="book"/> keeps
+            # picture-heavy pages whose HTML matters (text around the art, layouts
+            # that break out of the panel) in the flowing reader
+            for n in z.namelist():
+                if n.lower().endswith(".opf"):
+                    m = re.search(rb'<meta[^>]+name=["\']cim:kind["\'][^>]+content=["\'](\w+)', z.read(n))
+                    if m:
+                        return m.group(1).lower() == b"comic"
+                    break
             spine = _epub_spine(z)
             if len(spine) < 2:
                 return False

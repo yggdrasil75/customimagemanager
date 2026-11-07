@@ -106,7 +106,7 @@
         <div class="h-1.5 bg-gray-700 rounded overflow-hidden">
           <div class="h-full ${d.left ? 'bg-sky-500' : 'bg-emerald-500'}" style="width:${pct}%"></div>
         </div>
-        ${d.left ? `<div class="text-[10px] text-gray-500">${fmt(d.left)} left</div>` : ''}`;
+        ${d.left || d.failed ? `<div class="text-[10px] text-gray-500">${d.left ? fmt(d.left) + ' left' : ''}${d.left && d.failed ? ' | ' : ''}${d.failed ? `<span class="text-red-400" title="Images the background sweep gave up on this session (see the log for why); retried after a restart.">${fmt(d.failed)} failed</span>` : ''}</div>` : ''}`;
     });
   }
   window.EmbeddingUI.refreshEmbedProgress = refreshEmbedProgress;

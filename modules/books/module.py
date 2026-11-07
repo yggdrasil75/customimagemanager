@@ -117,7 +117,10 @@ def register(host):
 
     # Archive / PDF page access for the comics module (cbz/cbr/cb7 pages).
     # Metadata writes for other modules (metasrc applies lookups through it).
-    host.provide_service("books", {"update_meta": book_routes.update_meta})
+    # index_one: a module that writes or grows a book/comic archive in place
+    # (webcomic downloads) puts it on the shelf / refreshes its page count.
+    host.provide_service("books", {"update_meta": book_routes.update_meta,
+                                   "index_one": book_routes.index_one})
     host.register_metadata_writer(
         "book", book_routes.write_book_meta, fields=book_routes._META_KEYS,
         claims=lambda rel: host.db().execute("SELECT 1 FROM books WHERE rel_path=?",

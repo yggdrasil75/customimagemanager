@@ -244,3 +244,24 @@ def test_progress_route(client, ungated):
     assert j["success"], j
     assert j["done"] <= j["total"] and j["left"] == j["total"] - j["done"], j
     assert {r["label"] for r in j["view"]["rows"]} >= {"Embedded", "Left", "State"}, j
+
+
+def test_sweep_pending_passes_over_failed_files(app, monkeypatch):
+    """! @brief Failures at the head of the order must not hide the work after them
+    (the claim window used to fill with them and the sweep idled for good)."""
+    import types
+    h = app.module_host
+    sw = h.background_sweeps.get("embed")
+    assert sw and sw["takes_skip"]
+    db = app._db()
+    rows = [f"zz_sweep_skip/{i}.jxl" for i in range(3)]
+    db.executemany("INSERT OR IGNORE INTO files(rel_path, media_kind) VALUES(?, 'image')", [(r,) for r in rows])
+    db.commit()
+    fake = types.SimpleNamespace(model=types.SimpleNamespace(space="sweep-test-space"))
+    monkeypatch.setattr(h, "request_model", lambda *a, **k: fake)
+    allp = sw["pending"](db, 10 ** 6)
+    assert len(allp) >= 3
+    assert sw["pending"](db, 1, skip=set(allp[:-1])) == allp[-1:]
+    assert sw["pending"](db, 2, skip=set(allp)) == []
+    db.executemany("DELETE FROM files WHERE rel_path=?", [(r,) for r in rows])
+    db.commit()
