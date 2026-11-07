@@ -81,9 +81,42 @@
   // Export for use by review.js
   window.EmbeddingUI = { refreshEmbedStatus };
 
+  // -- Library progress (side panel) ---------------------------------------------
+  // A bar in the AI tools area: how many images have an embedding. Hidden once
+  // the library is complete and the background sweep is off.
+  async function refreshEmbedProgress() {
+    if (document.hidden) return;
+    let d;
+    try { d = await fetch('/api/embedding/progress').then(r => r.ok ? r.json() : null); } catch (e) { return; }
+    if (!d || !d.success) return;
+    const fmt = n => Number(n || 0).toLocaleString();
+    const pct = Math.floor(d.pct || 0);
+    const state = !d.left ? '<span class="text-emerald-400">complete</span>'
+      : d.background ? '<span class="text-sky-400">running</span>'
+      : '<span class="text-gray-500">background off</span>';
+    document.querySelectorAll('.embedding-progress').forEach(el => {
+      el.classList.toggle('hidden', !d.left && !d.background);
+      el.title = `Embedding space: ${d.space}` +
+        (d.background ? '' : '\nSettings > Models > Embeddings > Run in background fills the rest.');
+      el.innerHTML = `
+        <div class="flex items-center justify-between gap-2 text-[11px]">
+          <span class="text-gray-300 truncate">Embeddings: ${fmt(d.done)} / ${fmt(d.total)} (${pct}%)</span>
+          <span class="whitespace-nowrap">${state}</span>
+        </div>
+        <div class="h-1.5 bg-gray-700 rounded overflow-hidden">
+          <div class="h-full ${d.left ? 'bg-sky-500' : 'bg-emerald-500'}" style="width:${pct}%"></div>
+        </div>
+        ${d.left ? `<div class="text-[10px] text-gray-500">${fmt(d.left)} left</div>` : ''}`;
+    });
+  }
+  window.EmbeddingUI.refreshEmbedProgress = refreshEmbedProgress;
+
   /** @brief Inject buttons into the general extension areas. */
   function buildButtons() {
     if (!window.registerControlButton) return;
+    registerControlButton("ai_tools", '<div class="embedding-progress hidden space-y-0.5" data-feature="tab.review"></div>');
+    refreshEmbedProgress();
+    setInterval(refreshEmbedProgress, 10000);
     // Per-image embed button in the AI tools area (optional, for future use)
     // registerControlButton("ai_tools", ...);
 

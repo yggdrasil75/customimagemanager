@@ -417,6 +417,57 @@ def register(host):
             raise RuntimeError("embedder returned nothing for a decoded image (endpoint rejected it)")
     host.add_background_sweep("embed", _bg_pending, _bg_run)
 
+    ## @brief -- progress: how much of the library has a vector -----------------
+    # Counted in the space the sweep fills (the background model when "Run in
+    # background" is on, else the foreground pick). Cached briefly: it counts the
+    # whole library and is polled by the side panel and the Models settings pane.
+    _prog_cache = {"at": 0.0, "data": None}
+
+    def _embed_progress():
+        now = time.time()
+        if _prog_cache["data"] is not None and now - _prog_cache["at"] < 8:
+            return _prog_cache["data"]
+        db = host.db()
+        bg_on = "embed" in host.broker.background_capabilities()
+        role = "bg" if bg_on else "fg"
+        try:
+            tag = _embed_tag(host.request_model("embed", role=role), role=role)
+        except Exception:
+            tag = _embed_tag(role=role)
+        total = db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image'").fetchone()[0]
+        done = db.execute(
+            "SELECT COUNT(*) FROM files f JOIN image_embeddings e "
+            "ON e.rel_path=f.rel_path AND e.model=? WHERE f.media_kind='image'", (tag,)).fetchone()[0]
+        d = {"done": done, "total": total, "left": max(0, total - done),
+             "pct": (100.0 * done / total) if total else 100.0,
+             "space": tag, "background": bg_on}
+        _prog_cache.update(at=now, data=d)
+        return d
+
+    @host.route("/api/embedding/progress", feature="tab.review")
+    def embedding_progress():
+        """! @brief {done, total, left, pct, space, background} plus a settings-section
+        view ("view") for Settings > Models."""
+        d = dict(_embed_progress())
+        state = ("complete" if not d["left"] else
+                 "running in background" if d["background"] else "background off")
+        d["view"] = {
+            "rows": [{"label": "Embedded", "value": f"{d['done']:,} / {d['total']:,} ({d['pct']:.1f}%)",
+                      "tone": "ok" if not d["left"] else None},
+                     {"label": "Left", "value": f"{d['left']:,}", "tone": "muted" if not d["left"] else "warn"},
+                     {"label": "State", "value": state,
+                      "tone": "ok" if not d["left"] else ("muted" if not d["background"] else None)},
+                     {"label": "Space", "value": d["space"], "tone": "muted"}],
+            "live": True,
+        }
+        return jsonify({"success": True, **d})
+
+    host.add_settings_section(
+        "models", "embed_progress", title="Image embedding progress",
+        text="Images with an embedding in the space being filled. Turn on "
+             "Embeddings > Run in background above to fill the rest.",
+        status_url="/api/embedding/progress", poll=10, feature="settings.models", order=50)
+
     def _stored_models(db):
         """! @brief [{model, count, dim}] for every embedding space the library holds."""
         return [{"model": r["model"], "count": r["c"], "dim": r["dim"]} for r in db.execute(
