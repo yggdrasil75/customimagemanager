@@ -10,12 +10,12 @@ grows the output in place:
           is appended straight into the archive (no extract-and-rebuild), and
           the shelf is refreshed when the run ends
     epub  the whole page body (art plus the text and layout around it) per
-          page, one book per chapter - for comics like Unsounded whose pages
-          are more than one picture
+          page, one book per chapter - for comics whose pages are more than
+          one picture (text around the art, layouts, animations)
 
-Built-in profiles read WEBTOON, Unsounded and Sequential Art; anything else
-uses heuristics (largest image, a link saying "next") or your own CSS
-selectors. Runs go through the fetch queue (progress, cancel, retries,
+Three styles: webtoon (vertical episodes), full page (the whole page as
+EPUB) and generic (page images as CBZ). Each uses heuristics (largest image,
+a learned next link) unless you give CSS selectors. Runs go through the fetch queue (progress, cancel, retries,
 the low-disk pause) and a check interval makes it a fetch watch, so new
 pages arrive on their own.
 
@@ -36,7 +36,7 @@ MANIFEST = {
     "id":          "webcomic",
     "name":        "Webcomics",
     "version":     "1.0.0",
-    "description": "Follow webcomics (WEBTOON, Unsounded, Sequential Art, most others) and keep them "
+    "description": "Follow webcomics (webtoons, full-page comics, newspaper-style strips) and keep them "
                    "downloaded as .cbz comics or .epub books that grow as new pages come out.",
     "core":        False,
     "requires":    ["fetch", "books", "comics"],
@@ -47,7 +47,7 @@ MANIFEST = {
 FETCHER = "webcomic"
 TAB = "webcomic"
 
-_PROFILE_OPTS = [["auto", "Detect from the URL"]] + [
+_PROFILE_OPTS = [["auto", "Webtoon if the site is one, else generic"]] + [
     [k, v["label"]] for k, v in scrape.PROFILES.items()]
 
 
@@ -68,25 +68,33 @@ def register(host):
               "<i>next</i> link is learned from the two and checked on the second, and the URL pattern "
               "(page 41 -> 42, chapter rollover) backs it up when a button is missing or needs extra clicks. "
               "Each run continues from the last page it got and adds the new pages to the comic in place. "
-              "WEBTOON, Unsounded and Sequential Art are recognised from the URL; other sites use the largest "
-              "image and a link saying <i>next</i>, or the CSS selectors you give. "
+              "<i>Style</i>: <i>Webtoon</i> for vertical episodes, <i>Full page</i> when the page around the art "
+              "matters (kept as .epub), <i>Generic</i> for page images and strips. "
+              "Art is found as the largest image unless you give CSS selectors. "
               "Set <i>Check every</i> to pick up new pages automatically.",
         fields=[
             {"key": "url", "label": "Start at (page URL)", "kind": "text",
-             "placeholder": "https://www.webtoons.com/en/.../viewer?title_no=679&episode_no=1"},
+             "placeholder": "https://example.com/comic/page-1"},
             {"key": "second_url", "label": "Second page URL (recommended)", "kind": "text", "default": "",
              "help": "the page after the first: the next link is learned from these two pages and "
                      "checked on the second, so the button needn't say \"next\""},
             {"key": "series", "label": "Name", "kind": "text", "default": "",
              "help": "empty = the site's title"},
-            {"key": "profile", "label": "Site", "kind": "select", "default": "auto", "options": _PROFILE_OPTS},
+            {"key": "profile", "label": "Style", "kind": "select", "default": "auto", "options": _PROFILE_OPTS},
             {"key": "output", "label": "Save as", "kind": "select", "default": "auto",
-             "options": [["auto", "Site default"], ["cbz", "Comic (.cbz, pages are images)"],
+             "options": [["auto", "Style default"], ["cbz", "Comic (.cbz, pages are images)"],
                          ["epub", "Book (.epub, keeps the whole page)"]]},
             {"key": "group", "label": "One file per", "kind": "select", "default": "auto",
-             "options": [["auto", "Site default"], ["chapter", "Chapter"], ["episode", "Episode / page URL"],
-                         ["volume", "N pages (volume)"], ["single", "Whole comic, one file"]]},
-            {"key": "volume_size", "label": "Pages per volume", "kind": "number", "default": 100},
+             "options": [["auto", "Style default"], ["chapter", "Chapter (any length)"],
+                         ["episode", "Episode"], ["volume", "Fixed number of pages"],
+                         ["single", "Whole comic, one file"]]},
+            {"key": "chapter_sel", "label": "Chapter marker (CSS, optional)", "kind": "text", "default": "",
+             "help": "an element whose text names the chapter, e.g. <i>.chapter-title</i> or the chapter "
+                     "drop-down <i>select#chapters</i>. Empty = found from the URL, the page title and headings; "
+                     "a page without a marker stays in the chapter before it"},
+            {"key": "volume_size", "label": "Pages per file (fixed / fallback)", "kind": "number", "default": 100,
+             "help": "for <i>Fixed number of pages</i>, and for chapter grouping until a first chapter "
+                     "marker is found"},
             {"key": "folder", "label": "Put files in", "kind": "text", "default": "comics/{series}",
              "help": "library folder; {series} = the name"},
             {"key": "every_h", "label": "Check for new pages every (hours)", "kind": "number", "default": 24,
@@ -115,7 +123,7 @@ def register(host):
         url = cfg.get("url") or ""
         pid = cfg.get("profile") if cfg.get("profile") not in (None, "", "auto") else None
         ov = {"images": cfg.get("sel_images") or None, "next": cfg.get("sel_next") or None,
-              "content": cfg.get("sel_content") or None}
+              "content": cfg.get("sel_content") or None, "chapter_sel": cfg.get("chapter_sel") or None}
         if cfg.get("output") in ("cbz", "epub"):
             ov["output"] = cfg["output"]
         if cfg.get("group") not in (None, "", "auto"):
@@ -291,11 +299,10 @@ def register(host):
                     imgs.append((ir.content, e))
             return imgs, assets
 
-        def group_for(url, idx, fallback=None):
-            gkey, gtitle = scrape.group_of(prof, url, idx)
-            if fallback and prof.get("group") in ("volume", "single"):
-                return fallback
-            return gkey, gtitle
+        def group_for(url, idx, page=None, prev=None):
+            """! @brief The archive this page goes in; a page with no chapter marker
+            stays in `prev` (chapters are any length)."""
+            return scrape.group_of(prof, url, idx, page=page, learned=st.get("learned"), prev=prev)
 
         def note_group(gkey, gtitle):
             groups = st.setdefault("groups", [])
@@ -314,7 +321,7 @@ def register(host):
                 open_groups.add(gkey)
                 path = writer.path_for(gtitle)
             else:
-                num = (int(gkey[1:]) + 1) if prof.get("group") == "volume" and gkey[1:].isdigit() \
+                num = (int(gkey[1:]) + 1) if gkey.startswith("v") and gkey[1:].isdigit() \
                     else (scrape._num(gkey) or None)
                 if after:
                     path = writer.insert_after(gkey, gtitle, after, url, imgs, page_title=page["title"], number=num)
@@ -357,7 +364,8 @@ def register(host):
                     continue
                 prev, cur, n = a, step(a, pa, prefer_pattern=True), 0
                 while cur and n < 60 and not nav.same_page(cur[0], b) and cur[0].split("#")[0] not in known:
-                    g2 = group_for(cur[0], int(st.get("pages") or 0), (gk, gt))
+                    g2 = group_for(cur[0], int(st.get("pages") or 0), cur[1], prev=(gk, gt))
+                    gk, gt = g2
                     store(cur[0], cur[1], g2[0], g2[1], after=prev)
                     known.add(cur[0].split("#")[0])
                     st["pages"] = int(st.get("pages") or 0) + 1
@@ -405,12 +413,12 @@ def register(host):
             # -- walk forward --------------------------------------------------------
             visited = {url.split("#")[0]}             # never walk back into this run's pages
             if not resume:
-                gkey, gtitle = group_for(url, 0)
+                gkey, gtitle = group_for(url, 0, page)
                 if not ctx.seen(url):
                     st["last_hash"] = store(url, page, gkey, gtitle)
                     st["pages"] = 1
                     got += 1
-                st["group"], st["last_url"] = gkey, url
+                st["group"], st["group_title"], st["last_url"] = gkey, gtitle, url
                 save_state()
                 yield (None, {})
             while not ctx.stopping():
@@ -423,7 +431,8 @@ def register(host):
                 url, page, why = nxt
                 visited.add(url.split("#")[0])
                 idx = int(st.get("pages") or 0)
-                gkey, gtitle = scrape.group_of(prof, url, idx)
+                gkey, gtitle = group_for(url, idx, page,
+                                         prev=(st["group"], st.get("group_title")) if st.get("group") else None)
                 if st.get("group") and st["group"] != gkey:
                     finish_group(st["group"])
                 if url.split("#")[0].rstrip("/") in skips:
@@ -436,7 +445,7 @@ def register(host):
                     st["last_hash"] = h
                     st["pages"] = idx + 1
                     got += 1
-                st["group"], st["last_url"] = gkey, url
+                st["group"], st["group_title"], st["last_url"] = gkey, gtitle, url
                 save_state()
                 ctx.message(f"{series}: page {st.get('pages', 0)} ({gtitle or 'all'}, via {why}) "
                             f"- {got} new this run")

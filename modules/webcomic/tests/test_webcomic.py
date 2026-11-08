@@ -24,66 +24,95 @@ def _mod(name):
 
 # -- profiles against page shapes ------------------------------------------------
 
-WEBTOON = """<html><head><meta property="og:title" content="unOrdinary"></head><body>
-<div class="subj_info"><a class="subj" href="/list">unOrdinary</a></div>
+WEBTOON = """<html><head><meta property="og:site_name" content="Strip Site"></head><body>
+<div class="subj_info"><a class="subj" href="/list">Tall Tale</a></div>
 <h1 class="subj_episode">Episode 1</h1>
 <div id="_imageList" class="viewer_img">
- <img src="https://webtoons-static/bg_transparency.png" data-url="https://webtoon-phinf.pstatic.net/a/001.jpg" class="_images">
- <img src="https://webtoons-static/bg_transparency.png" data-url="https://webtoon-phinf.pstatic.net/a/002.jpg" class="_images">
+ <img src="https://static.example/bg_transparency.png" data-url="https://img.example/a/001.jpg" class="_images">
+ <img src="https://static.example/bg_transparency.png" data-url="https://img.example/a/002.jpg" class="_images">
 </div>
-<a href="https://www.webtoons.com/en/super-hero/unordinary/episode-2/viewer?title_no=679&episode_no=2" class="pg_next _nextEpisode">Next Episode</a>
+<a href="https://www.webtoons.com/en/fantasy/tall-tale/episode-2/viewer?title_no=1&episode_no=2" class="pg_next _nextEpisode">Next Episode</a>
 <a href="https://www.patreon.com/x">Next</a>
 </body></html>"""
 
-UNSOUNDED = """<html><body><div id="nav"><a href="ch01_01.html">first</a>
+FULLPAGE = """<html><body><div id="nav"><a href="ch01_01.html">first</a>
 <a href="ch01_02.html" class="back">back</a><a href="ch01_04.html" class="forward">forward</a></div>
 <div id="comic"><img src="../../pageart/ch01_03.jpg">
  <div style="background-image:url('../../pageart/bg03.png')"><p>Text set beside the art</p></div>
  <script>track()</script></div>
 <img src="/images/logo.png"></body></html>"""
 
-SEQART = """<html><body><a href="/sequentialart.php?s=1"><img src="first.png" alt="First"></a>
-<a href="/sequentialart.php?s=41"><img id="prevOne" src="prev.png" alt="Previous"></a>
-<img src="SA_0042.jpg" id="strip">
-<a href="/sequentialart.php?s=43"><img id="nextOne" src="next.png" alt="Next"></a>
-<a href="/sequentialart.php?s=1300"><img src="last.png" alt="Last"></a></body></html>"""
+STRIP = """<html><body><a href="/strip.php?s=1"><img src="first.png" alt="First"></a>
+<a href="/strip.php?s=41"><img id="prevOne" src="prev.png" alt="Previous"></a>
+<img src="S_0042.jpg" id="strip">
+<a href="/strip.php?s=43"><img id="nextOne" src="next.png" alt="Next"></a>
+<a href="/strip.php?s=1300"><img src="last.png" alt="Last"></a></body></html>"""
 
 
-def test_webtoon_profile():
+def test_webtoon_style():
     sc = _mod("scrape")
-    url = "https://www.webtoons.com/en/super-hero/unordinary/episode-1/viewer?title_no=679&episode_no=1"
+    url = "https://www.webtoons.com/en/fantasy/tall-tale/episode-1/viewer?title_no=1&episode_no=1"
     p = sc.profile_for(url)
-    assert p["id"] == "webtoons"
+    assert p["id"] == "webtoon"
     pg = sc.parse_page(WEBTOON, url, p)
-    assert pg["images"] == ["https://webtoon-phinf.pstatic.net/a/001.jpg",
-                            "https://webtoon-phinf.pstatic.net/a/002.jpg"]   # data-url, not the placeholder
+    assert pg["images"] == ["https://img.example/a/001.jpg",
+                            "https://img.example/a/002.jpg"]   # data-url, not the placeholder
     assert pg["next"].endswith("episode_no=2")
-    assert pg["title"] == "Episode 1" and pg["series"] == "unOrdinary"
-    assert sc.group_of(p, url, 0) == ("1", "Episode 001")
+    assert pg["title"] == "Episode 1" and pg["series"] == "Tall Tale"
+    assert sc.group_of(p, url, 0, pg) == ("ch00001", "Episode 001")
 
 
-def test_unsounded_profile_keeps_the_page_body():
+def test_full_page_style_keeps_the_page_body():
     sc = _mod("scrape")
-    url = "https://www.casualvillain.com/Unsounded/comic/ch01/ch01_03.html"
-    p = sc.profile_for(url)
-    assert p["id"] == "unsounded" and p["output"] == "epub"
-    pg = sc.parse_page(UNSOUNDED, url, p)
-    assert pg["images"] == ["https://www.casualvillain.com/Unsounded/pageart/ch01_03.jpg"]
-    assert pg["next"] == "https://www.casualvillain.com/Unsounded/comic/ch01/ch01_04.html"
+    url = "https://comic.example/story/comic/ch01/ch01_03.html"
+    p = sc.profile_for(url, "fullpage")
+    assert p["output"] == "epub"
+    pg = sc.parse_page(FULLPAGE, url, p)
+    assert pg["images"] == ["https://comic.example/story/pageart/ch01_03.jpg"]
+    assert pg["next"] == "https://comic.example/story/comic/ch01/ch01_04.html"
     assert "Text set beside the art" in pg["content_html"] and "track()" not in pg["content_html"]
-    assert sc.group_of(p, url, 0) == ("ch01", "Chapter 001")
+    assert sc.group_of(p, url, 0, pg) == ("ch00001", "Chapter 001")
 
 
-def test_sequential_art_profile_and_volumes():
+def test_generic_style_on_a_strip_and_fixed_size_files():
     sc = _mod("scrape")
-    url = "https://www.collectedcurios.com/sequentialart.php?s=42"
+    url = "https://strips.example/strip.php?s=42"
     p = sc.profile_for(url)
-    assert p["id"] == "sequentialart"
-    pg = sc.parse_page(SEQART, url, p)
-    assert pg["images"] == ["https://www.collectedcurios.com/SA_0042.jpg"]
+    assert p["id"] == "generic"
+    pg = sc.parse_page(STRIP, url, p)
+    assert pg["images"] == ["https://strips.example/S_0042.jpg"]
     assert pg["next"].endswith("s=43")
+    p = dict(p, group="volume", volume_size=100)
     assert sc.group_of(p, url, 41) == ("v0000", "0001-0100")
     assert sc.group_of(p, url, 100) == ("v0001", "0101-0200")
+
+
+def test_chapters_of_any_length_without_chapter_urls():
+    """! @brief URLs say nothing about chapters (/page/57): markers on the page start a
+    chapter, unmarked pages stay in the one before, whatever its length."""
+    sc = _mod("scrape")
+    p = sc.profile_for("https://x.example/page/1", "fullpage")
+    def pg(html, u):
+        return sc.parse_page(f"<html><head><title>{html}</title></head><body><div id='comic'>"
+                             f"<img src='/a.png'></div></body></html>", u, p)
+    prev = None
+    seen = []
+    for i, title in enumerate(["My Comic - Chapter 1: Start", "My Comic - page", "My Comic - page",
+                               "My Comic - Ch. 2 cover", "My Comic - page", "My Comic - Chapter 10"]):
+        u = f"https://x.example/page/{i + 1}"
+        prev = sc.group_of(p, u, i, pg(title, u), prev=prev)
+        seen.append(prev[1])
+    assert seen == ["Chapter 001", "Chapter 001", "Chapter 001", "Chapter 002", "Chapter 002", "Chapter 010"]
+    # a chapter drop-down / heading picked by your selector
+    p2 = dict(p, chapter_sel="select#chap")
+    page = sc.parse_page("<html><body><select id='chap'><option>Prologue</option>"
+                         "<option selected>Chapter 7 - Rain</option></select><div id='comic'><img src='/b.png'>"
+                         "</div></body></html>", "https://x.example/page/90", p2)
+    assert sc.group_of(p2, "https://x.example/page/90", 89, page) == ("ch00007", "Chapter 007")
+    # nothing found anywhere yet: fixed-size files until a marker turns up
+    bare = sc.parse_page("<html><body><div id='comic'><img src='/c.png'></div></body></html>",
+                         "https://x.example/page/3", p)
+    assert sc.group_of(dict(p, volume_size=50), "https://x.example/page/3", 2, bare) == ("v0000", "0001-0050")
 
 
 def test_generic_heuristics():
@@ -158,7 +187,7 @@ def test_next_link_learned_from_two_pages_without_the_word_next():
 
 def test_pattern_rollover_and_script_scan():
     nv = _mod("navigate")
-    u1 = "https://www.casualvillain.com/Unsounded/comic/ch01/ch01_01.html"
+    u1 = "https://comic.example/story/comic/ch01/ch01_01.html"
     pat = nv.learn_pattern(u1, u1.replace("_01.html", "_02.html"))
     assert pat and pat["chapter"] and pat["step"] == 1
     assert nv.pattern_next(u1.replace("_01.", "_09."), pat).endswith("/ch01/ch01_10.html")

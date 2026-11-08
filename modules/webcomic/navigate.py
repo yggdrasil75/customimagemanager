@@ -69,7 +69,7 @@ def learn_pattern(u1, u2):
     if step <= 0:
         return None
     # the chapter number(s): the nearest number before the page number, and any
-    # earlier copy of it (Unsounded writes the chapter twice: /ch01/ch01_05.html)
+    # earlier copy of it (some sites write the chapter twice: /ch01/ch01_05.html)
     chapter = []
     before = [j for j in range(1, i, 2)]
     if before:

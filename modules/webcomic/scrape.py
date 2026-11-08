@@ -5,15 +5,16 @@
 No library, DB or Flask here - pure "fetch a page and read it", so the site
 profiles can be tested offline against saved HTML.
 
-A *profile* says how to read one site:
-    match       hostname substring(s) the profile is picked for
+A *profile* (style) says how to read a kind of comic:
+    match       hostname substring(s) the style is picked for automatically
     images      CSS selector for the page's art (in page order)
     image_attrs attributes tried for the URL, first non-empty wins
     next        CSS selector(s) for the "next page / episode" link
     content     CSS selector for the whole page body kept by EPUB output
-    group       how pages group into archives: "chapter" (from the URL via
-                group_re), "episode" (one archive per page URL), "volume"
+    group       how pages group into archives: "chapter" / "episode" (see
+                group_of: URL, page title, headings, any length), "volume"
                 (every volume_size pages) or "single"
+    chapter_sel CSS selector for an element naming the chapter
     referer     Referer the image host wants (hot-link protection)
     cookies     cookies that skip consent / age gates
     output      the natural output kind: "cbz" or "epub"
@@ -36,49 +37,37 @@ UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/124.0 Safari/537.36")
 
 PROFILES = {
-    "webtoons": {
-        "label": "WEBTOON (vertical episodes)",
+    "webtoon": {
+        "label": "Webtoon (vertical episodes, one .cbz each)",
         "match": ["webtoons.com"],
-        "images": "#_imageList img, .viewer_img img",
-        "image_attrs": ["data-url", "data-src", "src"],
-        "next": ["a._nextEpisode", "a.pg_next", "a.paginate_next"],
+        "images": "#_imageList img, .viewer_img img, .webtoon img, #readerarea img, .reading-content img",
+        "image_attrs": ["data-url", "data-src", "data-lazy-src", "src"],
+        "next": ["a._nextEpisode", "a.pg_next", "a.paginate_next", "a.next_page", "a.ch-next-btn",
+                 "a[rel~=next]"],
         "title": ["h1.subj_episode", ".subj_episode", "meta[property='og:title']"],
-        "series": ["h2.subj", ".subj_info a.subj", "meta[property='og:title']"],
+        "series": ["h2.subj", ".subj_info a.subj", "meta[property='og:site_name']"],
         "strict_next": True,         # last episode: no next link; never guess one
         "group": "episode",
-        "group_re": r"[?&]episode_no=(\d+)",
-        "referer": "https://www.webtoons.com/",
+        "group_re": r"(?i)[?&/_-](?:episode_no=|ep(?:isode)?[-_]?|ch(?:apter)?[-_]?)(\d+)",
+        "referer_from_page": True,   # image hosts want the reader page as Referer
         "cookies": {"needCOPPA": "false", "needCCPA": "false", "needGDPR": "false",
                     "pagGDPR": "true", "atGDPR": "AD_CONSENT", "ageGatePass": "true"},
         "output": "cbz",
         "reading": "webtoon",
     },
-    "unsounded": {
-        "label": "Unsounded (whole page as EPUB)",
-        "match": ["casualvillain.com"],
-        "images": "#comic img, .comic img, #comicpage img",
-        "image_attrs": ["src"],
-        "next": ["a.forward", "a#next", "a[rel~=next]"],
-        "content": "#comic, .comic, #comicpage",
+    "fullpage": {
+        "label": "Full page (keeps the whole page as .epub, per chapter)",
+        "match": [],
+        "images": "#comic img, .comic img, #comicpage img, #comic-image img, main img",
+        "image_attrs": ["data-src", "src"],
+        "next": ["a.forward", "a#next", "a.next", "a[rel~=next]"],
+        "content": "#comic, .comic, #comicpage, #comic-wrap, main, article",
         "group": "chapter",
-        "group_re": r"/(ch\d+)/",
+        "group_re": r"(?i)[/_-](ch(?:apter)?[-_]?\d+)(?=[/_.-]|$)",
         "output": "epub",
     },
-    "sequentialart": {
-        "label": "Sequential Art (strips)",
-        "match": ["collectedcurios.com"],
-        "images": "img#strip, img.strip, #comic img",
-        "image_attrs": ["src"],
-        # the site numbers strips ?s=N; the "next" arrow is an image link
-        "next": ["a[href*='s=']:has(img[id*=next i])", "a[href*='s=']:has(img[alt*=next i])",
-                 "a[title*=next i]", "a#nextOne"],
-        "number_re": r"[?&]s=(\d+)",
-        "group": "volume",
-        "volume_size": 100,
-        "output": "cbz",
-    },
     "generic": {
-        "label": "Generic (heuristics / your selectors)",
+        "label": "Generic (page images as .cbz; heuristics or your selectors)",
         "match": [],
         "group": "single",
         "output": "cbz",
@@ -253,24 +242,89 @@ def _heuristic_next(soup, base, here):
     return None
 
 
-def group_of(profile, url, index):
+_CHAPTER_WORDS = re.compile(r"(?i)\b(chapter|chap|ch|episode|ep|part|book|issue|act)\.?\s*#?\s*(\d+)\b")
+
+
+def _chapter_from_page(page, profile):
+    """! @brief A chapter marker on the page itself: the user's selector, else the
+    title / headings / the selected entry of a chapter drop-down."""
+    soup = (page or {}).get("_soup")
+    if soup is None:
+        return None
+    sel = profile.get("chapter_sel")
+    if sel:
+        for t in _select(soup, sel):
+            txt = (t.get("content") if t.name == "meta" else
+                   (t.find("option", selected=True) or t).get_text(" ", strip=True) if t.name == "select"
+                   else t.get_text(" ", strip=True))
+            if txt:
+                m = _CHAPTER_WORDS.search(txt)
+                return (f"ch{int(m.group(2)):05d}", f"Chapter {int(m.group(2)):03d}") if m else \
+                    (safe_key(txt), txt[:80])
+    texts = [page.get("title") or ""]
+    texts += [h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2", "h3"])[:6]]
+    texts += [o.get_text(" ", strip=True) for o in soup.select("select option[selected]")[:3]]
+    for txt in texts:
+        m = _CHAPTER_WORDS.search(txt or "")
+        if m:
+            return f"ch{int(m.group(2)):05d}", f"Chapter {int(m.group(2)):03d}"
+    return None
+
+
+def safe_key(s):
+    return re.sub(r"[^\w]+", "_", str(s)).strip("_").lower()[:60] or "x"
+
+
+def _volume(profile, index):
+    size = max(1, int(profile.get("volume_size") or 100))
+    v = index // size
+    return f"v{v:04d}", f"{v * size + 1:04d}-{(v + 1) * size:04d}"
+
+
+def group_of(profile, url, index, page=None, learned=None, prev=None):
     """! @brief (key, title) of the archive a page belongs to.
-    index = 0-based page count of the subscription (for volume grouping)."""
+    @param index    0-based page count of the subscription (volume grouping)
+    @param page     parse_page() result: chapter markers on the page itself
+    @param learned  navigate's learned rules: the chapter number in the URL pattern
+    @param prev     (key, title) of the previous page's group
+
+    Chapters are found from, in order: your chapter selector, the URL, the URL
+    pattern's chapter number, the page's title / headings / chapter drop-down.
+    Chapter lengths never matter: a page with no marker stays in the chapter
+    before it, and only when no chapter was ever found does it fall back to
+    volumes of `volume_size` pages."""
     g = profile.get("group") or "single"
-    if g in ("chapter", "episode") and profile.get("group_re"):
+    if g == "volume":
+        return _volume(profile, index)
+    if g not in ("chapter", "episode"):
+        return "all", ""
+    label = "Episode" if g == "episode" else "Chapter"
+    if profile.get("chapter_sel"):
+        hit = _chapter_from_page(page, profile)
+        if hit:
+            return hit[0], hit[1].replace("Chapter", label, 1)
+    if profile.get("group_re"):
         m = re.search(profile["group_re"], url)
         if m:
             k = m.group(1)
             n = _num(k)
-            label = "Episode" if g == "episode" else "Chapter"
-            return k, (f"{label} {n:03d}" if n or k.isdigit() else k)
+            return (f"ch{n:05d}", f"{label} {n:03d}") if (n or k.isdigit()) else (safe_key(k), k)
+    pat = (learned or {}).get("pattern")
+    if pat and pat.get("chapter"):
+        from .navigate import _tokens
+        t = _tokens(url)
+        j = pat["chapter"][-1]
+        if j < len(t) and t[j].isdigit():
+            n = int(t[j])
+            return f"ch{n:05d}", f"{label} {n:03d}"
+    hit = _chapter_from_page(page, profile)
+    if hit:
+        return hit[0], hit[1].replace("Chapter", label, 1)
+    if prev and prev[0]:
+        return tuple(prev)                       # no marker here: still the same chapter
     if g == "episode":
-        return url, "Episode"
-    if g == "volume":
-        size = max(1, int(profile.get("volume_size") or 100))
-        v = index // size
-        return f"v{v:04d}", f"{v * size + 1:04d}-{(v + 1) * size:04d}"
-    return "all", ""
+        return safe_key(url), label
+    return _volume(profile, index)               # no chapter found anywhere (yet)
 
 
 def parse_page(html, url, profile):
