@@ -30,6 +30,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -45,6 +46,9 @@ import app.cim.family.Api
 import app.cim.family.CapsStore
 import app.cim.family.Crypto
 import app.cim.family.Db
+import app.cim.family.EmbedWorker
+import app.cim.family.LocalIndex
+import app.cim.family.OnDevice
 import app.cim.family.Images
 import app.cim.family.Prefs
 import app.cim.family.Remote
@@ -152,12 +156,80 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
             runCatching { Remote.test(prefs) }.getOrElse { "Failed: ${it.message}" } } } }, enabled = remote) { Text("Test remote link") }
 
         HorizontalDivider()
+        OnDeviceSearchSettings(prefs)
+
+        HorizontalDivider()
         Text("This phone's pairing code", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Text("Paste on the server if you ever need to re-pair (rotating the server's key, a restored server).", color = Color.Gray, fontSize = 12.sp)
         QrImage(prefs.myPairingCode())
         SelectionContainer { Text(prefs.myPairingCode(), fontFamily = FontFamily.Monospace, fontSize = 9.sp) }
         OutlinedButton(onClick = { ThumbCache.clear(ctx); Images.clear(ctx) }) { Text("Clear cached thumbnails / covers / media") }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+/** @brief On-device semantic search: download the small model, index, delete. */
+@Composable
+private fun OnDeviceSearchSettings(prefs: Prefs) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var on by remember { mutableStateOf(prefs.onDeviceSearch) }
+    var charging by remember { mutableStateOf(prefs.embedChargingOnly) }
+    var url by remember { mutableStateOf(prefs.embedModelUrl) }
+    var msg by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var tick by remember { mutableStateOf(0) }
+    val installed = remember(tick) { OnDevice.installed(ctx) }
+    // the first size() reads the whole index file: not on the main thread
+    val indexed by produceState(0, tick) { value = if (installed) withContext(Dispatchers.IO) { LocalIndex.size(ctx) } else 0 }
+    Text("On-device search", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+    Text("Optional. Searches photos by what's in them (\"red car at the beach\") with a small model on the phone, " +
+         "so it works offline: the photos on this phone and the library thumbnails cached here. " +
+         "When the server answers, Photos search asks the server instead (its model, the whole library). " +
+         "Downloads the model once (tens of MB).", color = Color.Gray, fontSize = 12.sp)
+    ToggleRow("Search on this phone when the server can't be reached", on) {
+        on = it; prefs.onDeviceSearch = it; EmbedWorker.schedule(ctx, prefs)
+    }
+    if (on) {
+        ToggleRow("Index only while charging", charging) { charging = it; prefs.embedChargingOnly = it; EmbedWorker.schedule(ctx, prefs) }
+        androidx.compose.material3.OutlinedTextField(url, { url = it; prefs.embedModelUrl = it.trim() },
+            label = { Text("Model (Hugging Face repo URL, MobileCLIP-style ONNX)") }, singleLine = true,
+            modifier = Modifier.fillMaxWidth())
+        Text(if (installed) "Model on the phone (${OnDevice.sizeOnDisk(ctx) / 1048576} MB); $indexed images indexed."
+             else "Model not downloaded yet.", color = Color.LightGray, fontSize = 12.sp)
+        if (msg.isNotEmpty()) Text(msg, color = if (msg.startsWith("Failed")) MaterialTheme.colorScheme.error else Color.LightGray, fontSize = 12.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!installed) Button(onClick = {
+                busy = true
+                scope.launch {
+                    msg = withContext(Dispatchers.IO) {
+                        runCatching {
+                            OnDevice.download(ctx, prefs.embedModelUrl) { f, n -> msg = "Downloading $f: ${n / 1048576} MB" }
+                            "Downloaded. Indexing runs in the background."
+                        }.getOrElse { "Failed: ${it.message}" }
+                    }
+                    busy = false; tick++
+                    if (OnDevice.installed(ctx)) EmbedWorker.runNow(ctx)
+                }
+            }, enabled = !busy) { Text("Download model") }
+            else OutlinedButton(onClick = {
+                busy = true
+                scope.launch {
+                    msg = withContext(Dispatchers.IO) {
+                        runCatching { "Indexed ${LocalIndex.update(ctx) { d, t -> msg = "Indexing $d / $t" }} new images." }
+                            .getOrElse { "Failed: ${it.message}" }
+                    }
+                    busy = false; tick++
+                }
+            }, enabled = !busy) { Text("Index now") }
+            if (installed) OutlinedButton(onClick = {
+                busy = true
+                scope.launch {
+                    withContext(Dispatchers.IO) { OnDevice.delete(ctx) }
+                    msg = "Model and index deleted."; busy = false; tick++
+                }
+            }, enabled = !busy) { Text("Delete model") }
+        }
     }
 }
 

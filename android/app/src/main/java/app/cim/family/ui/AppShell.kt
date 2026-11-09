@@ -76,6 +76,7 @@ fun App(prefs: Prefs) {
 
     LaunchedEffect(Unit) {
         UploadWorker.schedule(ctx, prefs)
+        app.cim.family.EmbedWorker.schedule(ctx, prefs)
         withContext(Dispatchers.IO) { try { CapsStore.refresh(ctx) } catch (e: Exception) { } }
     }
     LaunchedEffect(caps.v2) {

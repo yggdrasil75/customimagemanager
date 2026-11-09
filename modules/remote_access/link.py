@@ -93,7 +93,9 @@ GATE_PREFIXES = ("/api/family_share/inbound/", "/api/remote_access/pub/")
 UPLOAD_PATHS = ("/api/auth/config", "/api/auth/login", "/api/auth/logout", "/api/auth/me",
                 "/api/upload", "/api/upload/config", "/api/upload/session", "/api/upload/session/",
                 "/api/sections")
-DEVICE_PREFIXES = GATE_PREFIXES + UPLOAD_PATHS
+# detection models for devices that box things themselves (modules/model_share)
+MODEL_PATHS = ("/api/model_share/",)
+DEVICE_PREFIXES = GATE_PREFIXES + UPLOAD_PATHS + MODEL_PATHS
 GATE_HEAD_MAX = 64 * 1024
 REFUSED = (b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 30\r\n"
            b"Connection: close\r\n\r\nnot reachable through the link")

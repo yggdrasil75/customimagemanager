@@ -81,6 +81,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     implementation("com.google.zxing:core:3.5.3")
+    // on-device semantic search (ondevice.kt): runs the small MobileCLIP-style ONNX model
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Playback: one Media3 version for every artifact (1.4.x targets compileSdk 34).

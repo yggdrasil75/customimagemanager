@@ -351,8 +351,10 @@ def test_a_paired_phone_reaches_the_inbound_api_through_the_running_link(app, cl
         client.post("/api/family_share/devices/delete", json={"id": j["id"]})
 
 
-def test_module_and_dht_are_off_by_default_and_settings_live_on_the_module_row(host):
-    assert ra.MANIFEST["default_enabled"] is False and ra.DEFAULTS["remote_access_dht"] is False
+def test_module_off_and_dht_on_by_default_and_settings_live_on_the_module_row(host):
+    # the module opens a UDP port: opt-in. Once on, the DHT is on too - it is how a
+    # remote pairing code finds the server when no gateway is configured.
+    assert ra.MANIFEST["default_enabled"] is False and ra.DEFAULTS["remote_access_dht"] is True
     mine = [f for f in host.settings_fields if f["module_id"] == "remote_access"]
     assert mine and all(f["pane"] == "module" for f in mine)
     assert not [t for t in host.settings_tabs if t.get("module_id") == "remote_access"]

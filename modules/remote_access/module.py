@@ -72,7 +72,9 @@ DEVICE_REFRESH = 60.0
 DEFAULTS = {
     "remote_access_builtin_gateways": True,
     "remote_access_gateways": "",
-    "remote_access_dht": False,
+    # on by default: with no gateway in this build, the DHT is the only way a device
+    # paired for remote access finds the server (turn off where BitTorrent is blocked)
+    "remote_access_dht": True,
     "remote_access_stun": "\n".join(DEFAULT_STUN),
     "remote_access_port": 47100,
     "remote_access_target": "127.0.0.1:8000",
@@ -250,8 +252,9 @@ def register(host):
                   "(a small VPS is plenty). Any one gateway that answers is enough."}),
         ("remote_access_dht", "Also use the BitTorrent DHT", "toggle",
          {"help": "Works with no gateway at all (connecting takes up to a minute). The records are sealed: "
-                  "nobody else can read them or tell they belong to this server. Off by default: some "
-                  "firewalls block or flag BitTorrent traffic."}),
+                  "nobody else can read them or tell they belong to this server. On by default (it is what "
+                  "remote pairing codes rely on when there's no gateway); turn it off where firewalls block "
+                  "or flag BitTorrent traffic."}),
         ("remote_access_stun", "STUN servers", "textarea",
          {"help": "Used to learn this server's public address. One host:port per line."}),
         ("remote_access_port", "UDP port", "number",
@@ -405,6 +408,13 @@ def register(host):
         port = runner.call_async(lambda srv: srv.peer_port(name, pub, timeout=timeout), timeout + 5)
         return "http://127.0.0.1:%d" % port
 
+    def client_info():
+        """! @brief What a device needs to find this server from outside (no secrets), for
+        a pairing code: {gateways, stun, dht, running}."""
+        c = cfg()
+        return {"gateways": list(c["gateways"]), "stun": list(c["stun"]),
+                "dht": bool(c["remote_access_dht"]), "running": bool(runner.running())}
+
     host.provide_service("remote_access", {"apply": apply, "running": runner.running, "stop": runner.stop,
-                                           "peer_url": peer_url})
+                                           "peer_url": peer_url, "client_info": client_info})
     log.info("remote_access registered")

@@ -325,12 +325,18 @@ def check_freshness(meta, my_id, max_age=MAX_SKEW):
 
 
 # -- pairing code ------------------------------------------------------------
-def make_pairing_code(name, url, pub_b64, key_in, instance_id="", peer_name=""):
+def make_pairing_code(name, url, pub_b64, key_in, instance_id="", peer_name="", reach=None):
     """! @brief One string to hand the other side: who I am, where I am, my public key,
     the secret they must send me, and the name I have them under (they must
-    present exactly that name, so it travels with the code)."""
-    body = json.dumps({"v": VERSION, "name": name, "url": url, "pub": pub_b64, "key": key_in,
-                       "id": instance_id, "peer_name": peer_name}, separators=(",", ":")).encode()
+    present exactly that name, so it travels with the code).
+    @param reach  optional {"mode": "remote"|"lan", "gw": [...], "stun": [...], "dht": bool}:
+                  how a device should find me (remote access, or this address only).
+                  Older apps ignore it."""
+    d = {"v": VERSION, "name": name, "url": url, "pub": pub_b64, "key": key_in,
+         "id": instance_id, "peer_name": peer_name}
+    if reach:
+        d["ra"] = reach
+    body = json.dumps(d, separators=(",", ":")).encode()
     return "fs1." + b64e(body)
 
 
@@ -345,7 +351,10 @@ def parse_pairing_code(code):
     if not isinstance(d, dict) or not d.get("name") or not d.get("pub") or not d.get("key"):
         raise ValueError("pairing code is missing fields")
     _pub(d["pub"])       # validates
-    return {"name": str(d["name"])[:64], "url": str(d.get("url") or "")[:512],
-            "pub_key": str(d["pub"]), "key_out": str(d["key"]),
-            "instance_id": str(d.get("id") or "")[:64],
-            "my_name": str(d.get("peer_name") or "")[:64]}
+    out = {"name": str(d["name"])[:64], "url": str(d.get("url") or "")[:512],
+           "pub_key": str(d["pub"]), "key_out": str(d["key"]),
+           "instance_id": str(d.get("id") or "")[:64],
+           "my_name": str(d.get("peer_name") or "")[:64]}
+    if isinstance(d.get("ra"), dict):          # how a device should reach us (newer codes)
+        out["reach"] = d["ra"]
+    return out

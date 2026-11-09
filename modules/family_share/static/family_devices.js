@@ -1,4 +1,4 @@
-/* Family share - Settings -> My devices.
+/* Peer share - Settings -> My devices.
  *
  * Any signed-in user pairs their own phones (the CIM Family app) here. A phone
  * acts as the account that paired it: it sees that account's personal folder
@@ -31,7 +31,7 @@
 
   /** @brief Scope picker for a device row. */
   function scopeSel(cur) {
-    return `<select class="fd-scope" title="What the phone sees of the library">${["personal", "all"].map((s) =>
+    return `<select class="fd-scope" title="What the device sees of the library">${["personal", "all"].map((s) =>
       `<option value="${s}" ${cur === s ? "selected" : ""}>${esc(SCOPE_LABEL[s])}</option>`).join("")}</select>`;
   }
 
@@ -54,22 +54,35 @@
         <button class="fs-btn fs-btn-sm fs-btn-danger fd-del">Remove</button></td></tr>`;
   }
 
-  /** @brief Show the server's pairing code for a device under the table. */
+  /** @brief Show the server's pairing code for a device under the table. The code
+   *  says how the app reaches this server: remote access (default: the public URL when
+   *  set, else / and when it doesn't answer the gateways / DHT) or the local address only. */
   async function showCode(id, name, after) {
-    const d = await post("/key", { id });
     const box = document.createElement("div"); box.className = "fs-keybox";
-    box.innerHTML = `<div>Paste this into the app on <b>${esc(name)}</b> (Pair with server). It names this server
-      <b>${esc(d.name)}</b>, carries its URL and public key (fingerprint <code>${esc(d.fingerprint)}</code>) and the
-      secret the phone uses to reach it, so send it only to yourself.</div>
-      <input readonly value="${esc(d.pairing_code)}"><button class="fs-btn fs-btn-sm">Copy</button>
-      <button class="fs-btn fs-btn-sm fs-btn-ghost">Close</button>`;
-    box.querySelector("input").addEventListener("focus", (e) => e.target.select());
-    const [copy, close] = box.querySelectorAll("button");
-    copy.addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(d.pairing_code); toast("Copied"); } catch (_) { box.querySelector("input").select(); }
-    });
-    close.addEventListener("click", () => box.remove());
     after.after(box);
+    async function fill(mode) {
+      const d = await post("/key", { id, mode });
+      box.innerHTML = `<div>Paste this into the app on <b>${esc(name)}</b> (Pair with server). It names this server
+        <b>${esc(d.name)}</b>, carries how to reach it and its public key (fingerprint <code>${esc(d.fingerprint)}</code>)
+        and the secret the device uses, so send it only to yourself.</div>
+        <div><label>Reach this server by
+          <select class="fd-mode">
+            <option value="remote" ${mode !== "lan" ? "selected" : ""}>remote access (works away from home)${d.url ? " + " + esc(d.url) : ""}</option>
+            <option value="lan" ${mode === "lan" ? "selected" : ""}>local address only, no DHT / gateways</option>
+          </select></label>
+          ${d.url ? ` <span class="fs-why">URL in the code: ${esc(d.url)}</span>` : ` <span class="fs-why">no URL in the code: the app finds the server through remote access</span>`}
+          ${d.note ? `<div class="fs-err">${esc(d.note)}</div>` : ""}</div>
+        <input readonly value="${esc(d.pairing_code)}"><button class="fs-btn fs-btn-sm fd-copy">Copy</button>
+        <button class="fs-btn fs-btn-sm fs-btn-ghost fd-close">Close</button>`;
+      const input = box.querySelector("input");
+      input.addEventListener("focus", (e) => e.target.select());
+      box.querySelector(".fd-copy").addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(d.pairing_code); toast("Copied"); } catch (_) { input.select(); }
+      });
+      box.querySelector(".fd-close").addEventListener("click", () => box.remove());
+      box.querySelector(".fd-mode").addEventListener("change", (e) => fill(e.target.value).catch((er) => toast(er.message)));
+    }
+    try { await fill("remote"); } catch (e) { box.remove(); throw e; }
   }
 
   function render() {
@@ -78,25 +91,26 @@
     const devs = data.devices;
     p.innerHTML = `<div class="fs-root">
       <section class="fs-card">
-        <h3>My devices <small>phones running the CIM Family app, paired as <b>${esc(me)}</b></small></h3>
-        ${data.inbound ? "" : `<p class="fs-err">Receiving from phones is switched off on this server (Family share options).</p>`}
-        <table class="fs-table"><thead><tr><th>Name</th><th>Uploads land in</th><th>The phone sees</th><th>On</th>
+        <h3>My devices <small>devices that act as <b>${esc(me)}</b> (phones running the app, other clients)</small></h3>
+        ${data.inbound ? "" : `<p class="fs-err">Receiving from devices is switched off on this server (Peer share options).</p>`}
+        <table class="fs-table"><thead><tr><th>Name</th><th>Uploads land in</th><th>The device sees</th><th>On</th>
           <th>Pairing</th><th></th></tr></thead>
           <tbody>${devs.map(row).join("")}
-          <tr class="fs-new"><td><input class="fd-name" placeholder="${esc((data.me.username || "my") + "-phone")}"></td>
+          <tr class="fs-new"><td><input class="fd-name" placeholder="${esc((data.me.username || "my") + "-device")}"></td>
             <td><input class="fd-folder" placeholder="(my phone/&lt;name&gt;)"></td><td>${scopeSel("personal")}</td>
             <td><input class="fd-en" type="checkbox" checked></td><td></td>
             <td class="fs-actions"><button class="fs-btn fs-btn-sm fd-add">Add</button></td></tr></tbody></table>
-        <p class="fs-help">A phone acts as your account: it can only see and fetch what you may see (<i>my personal folder
+        <p class="fs-help">A device acts as your account: it can only see and fetch what you may see (<i>my personal folder
         only</i> confines it to your own folder), its photos are stored in your personal folder (or the folder you name,
         when you may write there) and count against your storage quota. If your account is disabled the phone stops
-        working; if it is deleted, its phones are removed.</p>
-        <p class="fs-help">Pairing: 1. add the phone here and click <b>Code for the app</b>; paste that code into the app
+        working; if it is deleted, its devices are removed.</p>
+        <p class="fs-help">Pairing: 1. add the device here and click <b>Code for the app</b>; paste that code into the app
         (<a href="/static/app/cim-family.apk" download>download APK</a>). 2. The app then shows <i>its</i> code: paste it
-        into the phone's row here and click Save. Compare the fingerprints the two sides show.</p>
+        into the device's row here and click Save. Compare the fingerprints the two sides show.</p>
         <p class="fs-help">This server: <b>${esc(data.server.name)}</b>, key <code>${esc(data.server.fingerprint)}</code>${
-          data.server.my_url ? "" : `. <span class="fs-err">No public URL is set (an admin sets it in Family share), so the
-          code carries none: type the server's address into the app.</span>`}</p>
+          data.server.my_url ? "" : `. No public URL is set (an admin sets it in Peer share): a remote-access code
+          lets the app find the server through the DHT / gateways instead; <i>local address only</i> uses this
+          server's address on your network.`}</p>
       </section></div>`;
     p.querySelectorAll("tbody tr").forEach((tr) => {
       const id = Number(tr.dataset.id || 0);
@@ -123,7 +137,7 @@
         try { await showCode(id, q(".fd-name").value, tr.closest("table")); } catch (e) { toast(e.message); }
       });
       const rot = q(".fd-rotate"); if (rot) rot.addEventListener("click", async () => {
-        if (!confirm("Rotate the key this phone uses? Paste the new code into the app afterwards.")) return;
+        if (!confirm("Rotate the key this device uses? Paste the new code into the app afterwards.")) return;
         try { await post("/save", { ...body(), rotate_key_in: true }); toast("Rotated"); await load(); } catch (e) { toast(e.message); }
       });
       const del = q(".fd-del"); if (del) del.addEventListener("click", async () => {

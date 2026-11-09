@@ -76,7 +76,7 @@ def test_caps_lists_loaded_modules(client, phone, monkeypatch):
     r = client.get(IN + "caps", headers=phone["headers"])
     code, caps = _open_json(phone, r)
     assert code == 200 and caps["ok"] and caps["api"] == 2 and caps["chunk"] == fc.CHUNK
-    assert set(caps["modules"]) == {"gallery", "music", "radio", "playlists", "tv", "movies", "books"}
+    assert set(caps["modules"]) == {"gallery", "music", "radio", "playlists", "tv", "movies", "books", "models"}
     assert caps["modules"]["gallery"] is True
     for k, mid in (("music", "music"), ("radio", "music"), ("tv", "tv"), ("movies", "movies"), ("books", "books")):
         assert caps["modules"][k] is fsm._module_loaded(mid)
@@ -434,3 +434,57 @@ def test_proxy_and_frames_run_as_the_account(app, client, accounts, media_file):
         assert r.status_code == 200 and _opener(music, r).open_bytes(r.get_data()) == b"hello"
     finally:
         shutil.rmtree(os.path.dirname(ap), ignore_errors=True)
+
+
+# -- pairing codes say how a device reaches the server ------------------------------
+
+def test_device_code_remote_by_default_lan_on_request(client, app, phone, monkeypatch):
+    """! @brief A device's code carries remote access (gateways / DHT) unless "lan" is
+    asked for; with remote access off it says so and carries just the URL."""
+    h = app.module_host
+    info = {"gateways": ["gw.example:4710"], "stun": ["stun.example:3478"], "dht": True, "running": True}
+    svc = dict(h.get_service("remote_access") or {}, client_info=lambda: dict(info), running=lambda: True)
+    real = h.get_service
+    monkeypatch.setattr(h, "get_service", lambda n, d=None: svc if n == "remote_access" else real(n, d))
+    j = _j(client, "/api/family_share/peers/key", {"id": phone["id"]})
+    reach = fc.parse_pairing_code(j["pairing_code"]).get("reach")
+    assert j["mode"] == "remote" and reach == {"mode": "remote", "gw": ["gw.example:4710"],
+                                                "stun": ["stun.example:3478"], "dht": True}
+    lan = _j(client, "/api/family_share/peers/key", {"id": phone["id"], "mode": "lan"})
+    p = fc.parse_pairing_code(lan["pairing_code"])
+    assert lan["mode"] == "lan" and p.get("reach") == {"mode": "lan"} and p["url"].startswith("http")
+    info["running"] = False
+    off = _j(client, "/api/family_share/peers/key", {"id": phone["id"]})
+    assert off["mode"] == "url" and "not running" in off["note"]
+    assert fc.parse_pairing_code(off["pairing_code"]).get("reach") is None
+
+
+def test_device_fetches_a_model_by_class_sealed(client, app, phone, monkeypatch):
+    """! @brief inbound/model: the weights a Pi asked for, sealed to it."""
+    ms = app.module_host.get_service("model_share")
+    if ms is None:
+        pytest.skip("model_share not enabled")
+    monkeypatch.setitem(ms, "fetch", None)
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".pt")
+    os.write(fd, b"WEIGHTS" * 100)
+    os.close(fd)
+    seen = {}
+
+    def fetch(name, cls, fmt):
+        seen.update(name=name, cls=cls, fmt=fmt)
+        if cls == "nothing":
+            raise LookupError("no model boxes 'nothing'")
+        return path, "tube.onnx", {"name": "set_tube_train_1", "classes": ["blue tube"]}
+    ms["fetch"] = fetch
+    try:
+        r = client.get(IN + "model", query_string={"class": "blue tube", "format": "onnx"}, headers=phone["headers"])
+        assert r.status_code == 200, r.get_data(as_text=True)[:300]
+        assert _opener(phone, r).open_bytes(r.get_data()) == b"WEIGHTS" * 100
+        assert json.loads(r.headers["X-Family-Model"])["classes"] == ["blue tube"]
+        assert seen == {"name": None, "cls": "blue tube", "fmt": "onnx"}
+        assert client.get(IN + "model", query_string={"class": "nothing"}, headers=phone["headers"]).status_code == 404
+        assert client.get(IN + "model", headers=phone["headers"]).status_code == 400
+        assert client.get(IN + "model", query_string={"class": "x"}).status_code in (401, 403)
+    finally:
+        os.remove(path)

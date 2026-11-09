@@ -55,7 +55,10 @@ class Prefs(ctx: Context) {
     // the server account this phone acts as (from /ping; empty on servers without accounts)
     var accountName: String get() = p.getString("srv_account", "") ?: ""; set(v) = p.edit().putString("srv_account", v).apply()
     var accountScope: String get() = p.getString("srv_scope", "") ?: ""; set(v) = p.edit().putString("srv_scope", v).apply()
-    val paired: Boolean get() = serverUrl.isNotEmpty() && serverPub != null && serverKey.isNotEmpty()
+    // a remote-access code may carry no URL at all: the link finds the server
+    val paired: Boolean get() = (serverUrl.isNotEmpty() || remotePaired) && serverPub != null && serverKey.isNotEmpty()
+    /** The last pairing code was a remote-access one (it may carry no URL). */
+    var remotePaired: Boolean get() = p.getBoolean("remote_paired", false); set(v) = p.edit().putBoolean("remote_paired", v).apply()
 
     var wifiOnly: Boolean get() = p.getBoolean("wifi_only", true); set(v) = p.edit().putBoolean("wifi_only", v).apply()
     var chargingOnly: Boolean get() = p.getBoolean("charging_only", false); set(v) = p.edit().putBoolean("charging_only", v).apply()
@@ -75,10 +78,30 @@ class Prefs(ctx: Context) {
     var remoteConfigAt: Long get() = p.getLong("remote_cfg_at", 0); set(v) = p.edit().putLong("remote_cfg_at", v).apply()
     var linkStatus: String get() = p.getString("link_status", "") ?: ""; set(v) = p.edit().putString("link_status", v).apply()
 
+    // on-device semantic search (ondevice.kt): off until the user turns it on
+    var onDeviceSearch: Boolean get() = p.getBoolean("od_search", false); set(v) = p.edit().putBoolean("od_search", v).apply()
+    var embedModelUrl: String get() = p.getString("od_model_url", null)?.takeIf { it.isNotBlank() } ?: OnDevice.DEFAULT_URL
+        set(v) = p.edit().putString("od_model_url", v).apply()
+    /** Index in the background only while charging. */
+    var embedChargingOnly: Boolean get() = p.getBoolean("od_charging", true); set(v) = p.edit().putBoolean("od_charging", v).apply()
+
     fun applyPairing(code: String) {
         val d = Crypto.parsePairingCode(code)
         if (d.pub.contentEquals(publicKey)) throw IllegalArgumentException("that is this phone's own pairing code")
         serverName = d.name; serverUrl = d.url; serverPub = d.pub; serverKey = d.key; serverId = d.id
+        // How the server asked to be reached. "remote": its gateways / the DHT when the
+        // URL doesn't answer (or there is no URL); "lan": this address only, no link.
+        if (d.reach == null) remotePaired = false
+        d.reach?.let { ra ->
+            val mode = ra.optString("mode")
+            remoteEnabled = mode != "lan"
+            remotePaired = mode != "lan"
+            remoteDht = mode != "lan" && ra.optBoolean("dht", false)
+            ra.optJSONArray("gw")?.let { a -> remoteGateways = (0 until a.length()).joinToString("\n") { a.getString(it) } }
+            ra.optJSONArray("stun")?.let { a -> if (a.length() > 0) remoteStun = (0 until a.length()).joinToString("\n") { a.getString(it) } }
+            if (mode != "lan") remoteServerOn = true
+            remoteConfigAt = System.currentTimeMillis()
+        }
         // The server authenticates us by the name ITS peer row carries; adopt it.
         if (d.peerName.isNotEmpty()) deviceName = d.peerName
     }
@@ -90,7 +113,7 @@ class Prefs(ctx: Context) {
         "Paired as $accountName" + (if (accountScope == "all") " (sees everything that account can see)" else " (sees that account's personal folder only)")
 
     fun unpair() { p.edit().remove("srv_name").remove("srv_url").remove("srv_pub").remove("srv_key").remove("srv_id")
-        .remove("srv_account").remove("srv_scope").remove("caps").apply() }
+        .remove("srv_account").remove("srv_scope").remove("caps").remove("remote_paired").apply() }
 
     // -- v2: server capabilities, media cache and downloads ---------------------
     /** Last inbound/caps answer as JSON ("" = never fetched; a v1 server stores Caps.V1). */

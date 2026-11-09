@@ -64,10 +64,11 @@ from . import crypto
 
 MANIFEST = {
     "id":          "family_share",
-    "name":        "Family share",
+    "name":        "Peer share",
     "version":     "1.0.0",
-    "description": "Push chosen folders / albums / tags to family members' own "
-                   "instances, per peer, with block rules, preview and revoke.",
+    "description": "Share chosen folders / albums / tags with other instances (other people's "
+                   "servers, your own boxes, Raspberry Pis at a site) and pair devices that browse "
+                   "and upload as an account. End-to-end encrypted, with block rules, preview and revoke.",
     "core":        False,
     "requires":    [],
     "pip":         ["requests", "cryptography"],
@@ -91,7 +92,8 @@ PROXY_MAX_BYTES = 20 << 20      # a proxied non-JSON body bigger than this must 
 ## @brief What the phone sees as tabs: caps key -> (module id or None for core, feature).
 CAPS_MODULES = (("gallery", None, "tab.gallery"), ("music", "music", "tab.music"),
                 ("radio", "music", "tab.music"), ("playlists", "music", "tab.music"),
-                ("tv", "tv", "tab.tv"), ("movies", "movies", "tab.movies"), ("books", "books", "tab.books"))
+                ("tv", "tv", "tab.tv"), ("movies", "movies", "tab.movies"), ("books", "books", "tab.books"),
+                ("models", "model_share", "model_share"))
 ## @brief Features of the modules whose files `inbound/frames` serves (any one suffices).
 FRAMES_FEATURES = ("tab.gallery", "tab.music", "tab.tv", "tab.movies", "tab.books")
 ## @brief The web API a phone reaches through `inbound/api/<path>` (relative to /api/).
@@ -103,6 +105,10 @@ PROXY_GET = (
     "tv/status", "tv/shows", "tv/seasons", "tv/episodes", "tv/episode", "tv/subtitle/<path>",
     "movies", "movies/item", "movies/genres", "movies/status", "movies/subtitle/<path>",
     "books/status", "books/list", "books/authors", "books/series", "books/detail", "books/cover/<path>",
+    # the gallery list: the app's Photos search ("sem:<text>" = semantic, as the account)
+    "list",
+    # detection models for devices that box things themselves (modules/model_share)
+    "model_share/yolo", "model_share/yolo/find", "model_share/yolo/download",
 )
 PROXY_POST = (
     "music/radio/next", "music/radio/played", "music/shuffle", "music/similar",
@@ -179,7 +185,7 @@ def register(host):
         n = _assign_unowned(db)
         if n:
             log.warning(f"family_share: {n} phone(s) without an owner were assigned to the first admin; "
-                        "confirm or change the owner in Settings -> Family share")
+                        "confirm or change the owner in Settings -> Peer share")
         _purge_orphans(db)
     host.add_table(sc.DDL, kind="state", check=_migrate)  # peers, rules and transfer ledgers
 
@@ -263,14 +269,14 @@ def register(host):
     host.add_config_key("family_share_interval_min", default=10,
                         validate=lambda v: max(1, min(1440, int(float(v or 10)))))
 
-    host.add_settings_tab("family_share", "Family share", icon="\U0001f46a", admin_only=True)
-    host.register_feature(FEATURE, "Family share (peers, rules, preview, outbox)",
-                          section="family_share", section_label="Family share",
+    host.add_settings_tab("family_share", "Peer share", icon="\U0001f517", admin_only=True)
+    host.register_feature(FEATURE, "Peer share (peers, rules, preview, outbox)",
+                          section="family_share", section_label="Peer share",
                           default="block", role_defaults=_ADMIN_ONLY)
     # Every role may pair its own phones (an admin can block it per user / group);
     # the tab's feature gates the /api/family_share/devices routes.
     host.add_settings_tab(DEVICES_TAB, "My devices", icon="\U0001f4f1", group="you")
-    host.register_feature(DEVICES_FEATURE, "Settings: My devices tab (pair your own phones)",
+    host.register_feature(DEVICES_FEATURE, "Settings: My devices tab (pair your own devices)",
                           section="settings", section_label="Settings", default="write",
                           role_defaults=_EVERYONE)
     host.add_asset("family_share.js")
@@ -800,16 +806,16 @@ def register(host):
             uid = int((_peer(peer["id"]) or {}).get("user_id") or 0)
             peer["user_id"] = uid
         if not uid:
-            return None, _refusal("no_owner", f"this phone has no owner account on {_my_name()}; an admin must "
-                                              "assign one (Settings -> Family share)")
+            return None, _refusal("no_owner", f"this device has no owner account on {_my_name()}; an admin must "
+                                              "assign one (Settings -> Peer share)")
         row = host.db().execute("SELECT * FROM auth_users WHERE id=?", (uid,)).fetchone()
         if row is None:
             _delete_peer(peer["id"])
             core.audit("family_share_peer_delete", f"id={peer['id']} name={peer['name']!r} why=owner account deleted")
-            return None, _refusal("account_deleted", f"the account this phone was paired as no longer exists on "
+            return None, _refusal("account_deleted", f"the account this device was paired as no longer exists on "
                                                      f"{_my_name()}; pair it again from your account")
         if row["disabled"]:
-            return None, _refusal("account_disabled", f"the account '{row['username']}' this phone is paired as is "
+            return None, _refusal("account_disabled", f"the account '{row['username']}' this device is paired as is "
                                                       f"disabled on {_my_name()}; ask an admin to re-enable it")
         user = core.authmgr._row_to_user(row)
         user["is_admin"] = bool(user.get("is_admin")) and _scope_of(peer) == "all"
@@ -1458,6 +1464,47 @@ def register(host):
         return resp
     host.add_route(INBOUND_PREFIX + "media", inbound_media, methods=["GET"])
 
+    def inbound_model():
+        """! @brief A detection model for a device that boxes things itself (a Pi on a line):
+        ?name= (run / file name) and/or ?class= (something it must box), &format=pt|onnx|
+        ncnn|... -> the weights, sealed like inbound/media; X-Family-Model says which model
+        and its classes. Needs Model share on the server and its feature for the account."""
+        peer = _auth_peer()
+        if not peer:
+            return _denied()
+        if _phones_only(peer):
+            return _phones_only(peer)
+        ms = host.get_service("model_share")
+        if ms is None:
+            return jsonify({"ok": False, "error": "Model share is not enabled on this server"}), 404
+        if not _may(ms["feature"]):
+            return _forbidden("download detection models")
+        name = (request.args.get("name") or "").strip() or None
+        cls = (request.args.get("class") or "").strip() or None
+        if not name and not cls:
+            return jsonify({"ok": False, "error": "give name= or class="}), 400
+        try:
+            fp, dl, row = ms["fetch"](name, cls, (request.args.get("format") or "pt").strip().lower())
+        except LookupError as e:
+            return jsonify({"ok": False, "error": str(e)}), 404
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        sealer = _sealer_for(peer)
+        if sealer is None:
+            return jsonify({"ok": False, "error": "no public key pinned for this peer"}), 400
+        size = os.path.getsize(fp)
+        resp = host.app.response_class(sealer.iter_frames(fp, size), mimetype="application/octet-stream")
+        resp.headers["X-Family-Env"] = json.dumps(sealer.header)
+        resp.headers["X-Family-Mime"] = "application/octet-stream"
+        resp.headers["X-Family-Size"] = str(size)
+        resp.headers["X-Family-Model"] = json.dumps({"name": row.get("name"), "file": dl,
+                                                     "classes": row.get("classes") or []})[:7000]
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    host.add_route(INBOUND_PREFIX + "model", inbound_model, methods=["GET"])
+
     def inbound_have():
         """! @brief Sealed {shas:[...]} -> sealed {have:[...]}: which of the phone's
         originals this instance already holds, so a first sync of thousands of
@@ -1849,13 +1896,64 @@ def register(host):
     host.add_route("/api/family_share/peers/save", api_peer_save, methods=["POST"],
                    feature=FEATURE, level="write")
 
-    def _pairing_code(p, my_url=""):
+    def _lan_url():
+        """! @brief This server as the browser reached it, or (from localhost) its LAN
+        address on the same port: what a device on the same network dials."""
+        import socket
+        if not has_request_context():
+            return ""
+        scheme = request.scheme or "http"
+        hostport = request.host or ""
+        h, _, port = hostport.rpartition(":") if hostport.count(":") == 1 else (hostport, "", "")
+        h = h or hostport
+        if h in ("localhost", "127.0.0.1", "::1", "[::1]", ""):
+            try:
+                s_ = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s_.connect(("10.255.255.255", 1))          # no packet is sent: picks the LAN route
+                h = s_.getsockname()[0]
+                s_.close()
+            except OSError:
+                return ""
+        return f"{scheme}://{h}" + (f":{port}" if port else "")
+
+    def _reach(mode):
+        """! @brief The "ra" block of a device code and a note for the UI.
+        remote: public URL (if set) + this server's gateways / DHT;  lan: this address,
+        no remote link on the device."""
+        if mode == "lan":
+            return {"mode": "lan"}, ""
+        ra = host.get_service("remote_access")
+        info = ra["client_info"]() if ra is not None and "client_info" in ra else None
+        if not info or not info.get("running"):
+            return None, ("Remote access is not running on this server (Settings -> Modules -> Remote access), "
+                          "so the code only carries the URL.")
+        if not info.get("dht") and not info.get("gateways"):
+            return None, ("Remote access has no gateway and the DHT is off, so a device can't find this server "
+                          "from outside; the code only carries the URL.")
+        return {"mode": "remote", "gw": info["gateways"], "stun": info["stun"], "dht": bool(info["dht"])}, ""
+
+    def _pairing_code(p, my_url="", mode=None):
         """! @brief My pairing code for peer row p: my name, my URL, my public key and the
-        secret they must send me."""
+        secret they must send me. For a device, `mode` picks how it reaches me:
+        "remote" (default) = the public URL when set, plus remote access (gateways /
+        DHT) when the URL doesn't answer; "lan" = this server's local address only."""
         my_url = str(my_url or host.config.get("family_share_my_url") or "").strip()
-        code = crypto.make_pairing_code(_my_name(), my_url, _my_pub(), p["key_in"], _my_id(), peer_name=p["name"])
-        return {"ok": True, "key_in": p["key_in"], "name": _my_name(), "pairing_code": code,
-                "peer_name": p["name"], "fingerprint": crypto.fingerprint(_my_pub())}
+        reach, note = None, ""
+        if _kind(p) == "device":
+            mode = mode if mode in ("remote", "lan") else "remote"
+            reach, note = _reach(mode)
+            if mode == "lan":
+                my_url = _lan_url() or my_url
+            elif not my_url and reach is None:
+                my_url = _lan_url()                     # nothing better: at least the LAN address
+        code = crypto.make_pairing_code(_my_name(), my_url, _my_pub(), p["key_in"], _my_id(),
+                                        peer_name=p["name"], reach=reach)
+        out = {"ok": True, "key_in": p["key_in"], "name": _my_name(), "pairing_code": code,
+               "peer_name": p["name"], "fingerprint": crypto.fingerprint(_my_pub()), "url": my_url}
+        if _kind(p) == "device":
+            out["mode"] = (reach or {}).get("mode") or "url"
+            out["note"] = note
+        return out
 
     def api_peer_key():
         """! @brief The pairing code for this peer: my name, my URL, my public key and
@@ -1864,7 +1962,7 @@ def register(host):
         p = _peer(int(d.get("id") or 0))
         if not p:
             return jsonify({"ok": False, "error": "no such peer"}), 404
-        return jsonify(_pairing_code(p, d.get("my_url")))
+        return jsonify(_pairing_code(p, d.get("my_url"), d.get("mode")))
     host.add_route("/api/family_share/peers/key", api_peer_key, methods=["POST"],
                    feature=FEATURE, level="write")
 
@@ -1942,10 +2040,11 @@ def register(host):
     def api_device_key():
         if _no_keys():
             return _no_keys()
-        p = _own_device(int((request.get_json(silent=True) or {}).get("id") or 0))
+        d = request.get_json(silent=True) or {}
+        p = _own_device(int(d.get("id") or 0))
         if p is None:
             return jsonify({"ok": False, "error": "no such device of yours"}), 404
-        return jsonify(_pairing_code(p))
+        return jsonify(_pairing_code(p, mode=d.get("mode")))
     host.add_route("/api/family_share/devices/key", api_device_key, methods=["POST"],
                    feature=DEVICES_FEATURE, level="write")
 

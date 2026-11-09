@@ -1,4 +1,4 @@
-/* Family share - front-end.
+/* Peer share - front-end.
  *
  * Renders the Settings -> Family share tab (identity, peers, rules, options,
  * preview, outbox, received) into the pane the core created for this
@@ -47,10 +47,10 @@
     const keys = Object.keys(pending);
     if (!keys.length) return { ok: true };
     const res = await window.postSettings(Object.assign({}, pending));
-    if (!res.ok) return { ok: false, error: "Family share settings failed to save" };
+    if (!res.ok) return { ok: false, error: "Peer share settings failed to save" };
     pending = {};
     markUnsaved();
-    if (window.showToast) showToast(`Family share: ${keys.length} setting${keys.length === 1 ? "" : "s"} saved`);
+    if (window.showToast) showToast(`Peer share: ${keys.length} setting${keys.length === 1 ? "" : "s"} saved`);
     return { ok: true };
   };
   if (window.registerSettingsPersist) window.registerSettingsPersist(window.persistFamilyShare);
@@ -104,7 +104,7 @@
       <div class="fs-row"><span>Instance id</span><code>${esc(state.instance.id)}</code></div>
       <div class="fs-row" title="Compare this with what the other side sees after pairing"><span>My key fingerprint</span>
         <code>${esc(state.instance.fingerprint)}</code></div>
-      <p class="fs-help">🔒 Every photo and its metadata is end-to-end encrypted to the peer's pinned public key
+      <p class="fs-help">🔒 Every file and its metadata is end-to-end encrypted to the peer's pinned public key
       (X25519 + AES-256-GCM). Routers, ISPs and anyone on the wifi only ever see ciphertext.</p>
       <div class="fs-row"><span>Outbox</span><span>${
         ["pending", "sent", "revoke", "error"].map((k) => `${k}: ${state.outbox[k] || 0}`).join(" | ")
@@ -126,12 +126,12 @@
   const OPTS = [
     ["family_share_outbound", "toggle", "Send to peers", "Master switch for everything leaving this instance."],
     ["family_share_inbound", "toggle", "Accept from peers", "Master switch for everything peers push here."],
-    ["family_share_incoming_folder", "text", "Incoming folder", "Received photos land in <folder>/<peer name>/<their folder>."],
-    ["family_share_tag_received", "text", "Tag received photos", "{peer} becomes the peer's name. Empty = no tag."],
+    ["family_share_incoming_folder", "text", "Incoming folder", "Received files land in <folder>/<peer name>/<their folder>."],
+    ["family_share_tag_received", "text", "Tag received files", "{peer} becomes the peer's name. Empty = no tag."],
     ["revoke_on_unshare", "toggle", "Revoke when a photo stops matching", "Rule edited, tag removed, moved out of a shared folder → peers are told to remove it."],
     ["revoke_on_delete", "toggle", "Revoke when I delete a photo", "Deleting here also removes the copies you shared."],
     ["honor_revoke", "toggle", "Honour revokes from peers", "When a peer revokes, delete the copy they gave me."],
-    ["reshare_received", "toggle", "Re-share photos I received", "OFF keeps a cousin's photo from travelling on through my rules."],
+    ["reshare_received", "toggle", "Re-share files I received", "OFF keeps a file from one peer from travelling on to others through my rules."],
     ["match_unconfirmed_tags", "toggle", "Tag rules match unconfirmed (AI) tags", "OFF: only tags you confirmed can trigger a share."],
     ["share_all_albums", "toggle", "Send all album names", "OFF: only the album a share rule names is sent along."],
     ["share_regions", "toggle", "Send regions (people boxes / names)", ""],
@@ -184,12 +184,12 @@
     const none = !uid || !users.some((u) => u.id === uid);
     const sc = p.scope || "personal";
     const warn = [];
-    if (p.owner_auto) warn.push(`assigned to <b>${esc(p.owner_display || p.owner)}</b> automatically when phones got owners - pick the owner and Save to confirm`);
-    if (p.owner_disabled) warn.push("owner account is disabled: this phone is refused until it is re-enabled");
+    if (p.owner_auto) warn.push(`assigned to <b>${esc(p.owner_display || p.owner)}</b> automatically when devices got owners - pick the owner and Save to confirm`);
+    if (p.owner_disabled) warn.push("owner account is disabled: this device is refused until it is re-enabled");
     if (p.owner_missing) warn.push("owner account no longer exists");
     return `<div class="fs-p-ownerbox" ${p.kind === "device" ? "" : "hidden"}>
-      <select class="fs-p-owner" title="The account this phone acts as">${none ? `<option value="" selected>${users.length ? "owner: me" : "(sign-in off)"}</option>` : ""}${opts}</select>
-      <select class="fs-p-scope" title="What the phone sees and where its uploads may land">
+      <select class="fs-p-owner" title="The account this device acts as">${none ? `<option value="" selected>${users.length ? "owner: me" : "(sign-in off)"}</option>` : ""}${opts}</select>
+      <select class="fs-p-scope" title="What the device sees and where its uploads may land">
         <option value="personal" ${sc === "personal" ? "selected" : ""}>personal folder only</option>
         <option value="all" ${sc === "all" ? "selected" : ""}>everything the owner sees</option></select>
       ${warn.map((w) => `<div class="fs-err">${w}</div>`).join("")}</div>`;
@@ -207,15 +207,15 @@
 
   function renderPeers() {
     const el = document.getElementById("fs_peers");
-    const kindSel = (k) => `<select class="fs-p-kind"><option value="peer" ${k !== "device" ? "selected" : ""}>family</option>
-        <option value="device" ${k === "device" ? "selected" : ""}>my phone</option></select>`;
+    const kindSel = (k) => `<select class="fs-p-kind"><option value="peer" ${k !== "device" ? "selected" : ""}>instance</option>
+        <option value="device" ${k === "device" ? "selected" : ""}>device</option></select>`;
     const rows = state.peers.map((p) => `
       <tr data-id="${p.id}">
         <td>${kindSel(p.kind)}</td>
         <td><input class="fs-p-name" value="${esc(p.name)}">
-            <input class="fs-p-folder" value="${esc(p.folder || "")}" placeholder="uploads land in (owner's phone/${esc(p.name)})" ${p.kind === "device" ? "" : "hidden"}>
+            <input class="fs-p-folder" value="${esc(p.folder || "")}" placeholder="uploads land in (owner's phone/${esc(p.name)} folder)" ${p.kind === "device" ? "" : "hidden"}>
             ${ownerBox(p)}</td>
-        <td><input class="fs-p-url" value="${esc(p.url)}" placeholder="${p.kind === "device" ? "(phones call in; no URL)" : "https://their-box:5000 (empty = no domain)"}" ${p.kind === "device" ? "disabled" : ""}>
+        <td><input class="fs-p-url" value="${esc(p.url)}" placeholder="${p.kind === "device" ? "(devices call in; no URL)" : "https://their-box:5000 (empty = no domain)"}" ${p.kind === "device" ? "disabled" : ""}>
             ${routeSel(p)}
             ${p.mailbox_items ? `<div class="fs-why">${p.mailbox_items} item(s), ${(p.mailbox_bytes / 1048576).toFixed(1)} MB waiting for them</div>` : ""}</td>
         <td><input class="fs-p-key" placeholder="${p.has_key_out && p.pub_key ? "paired" : "paste their pairing code"}">
@@ -235,19 +235,20 @@
       <table class="fs-table"><thead><tr><th>Kind</th><th>Name</th><th>URL</th><th>Their pairing code / key</th><th>On</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}
         <tr class="fs-new"><td>${kindSel("peer")}</td>
-          <td><input class="fs-p-name" placeholder="mom / my-phone"><input class="fs-p-folder" placeholder="uploads land in" hidden>
+          <td><input class="fs-p-name" placeholder="site-b-pi / office-nas / my-phone"><input class="fs-p-folder" placeholder="uploads land in" hidden>
             ${ownerBox({ kind: "peer", user_id: 0, scope: "personal" })}</td>
           <td><input class="fs-p-url" placeholder="https://their-box:5000 (empty = no domain)">${routeSel({ kind: "peer", route: "", id: 0 })}</td>
           <td><input class="fs-p-key" placeholder="paste their pairing code (or add now, pair later)"></td>
           <td><input class="fs-p-en" type="checkbox" checked></td><td></td>
           <td class="fs-actions"><button class="fs-btn fs-btn-sm fs-p-save">Add</button></td></tr>
       </tbody></table>
-      <p class="fs-help"><b>My phone</b> peers are your own devices running the CIM Family app
-      (<a href="/static/app/cim-family.apk" download>download APK</a>, built with the docker image). A phone belongs to an
-      account and acts as it: it sees that account's personal folder only (or everything the account may see), its uploads
-      land in the account's personal folder (or the folder above, when the account may write there) and count against its
-      quota. Users pair their own phones in Settings -&gt; My devices; here you can pair one for anyone. Uploads get no
-      "from:" tag and flow to family through the rules like anything else. Pair the same way - the app shows its pairing
+      <p class="fs-help"><b>Instance</b> peers are other servers running this app: someone else's, your own
+      boxes, a Raspberry Pi at another site. <b>Device</b> peers are clients that call in as an account, such as the
+      Android app (<a href="/static/app/cim-family.apk" download>download APK</a>, built with the docker image). A device
+      belongs to an account and acts as it: it sees that account's personal folder only (or everything the account may
+      see), its uploads land in the account's personal folder (or the folder above, when the account may write there) and
+      count against its quota. Users pair their own devices in Settings -&gt; My devices; here you can pair one for anyone.
+      Uploads get no "from:" tag and flow on to peers through the rules like anything else. Pair the same way - the app shows its pairing
       code, and you paste this instance's code into the app.</p>
       <p class="fs-help"><b>No domain?</b> Only one instance needs a public URL. Turn on <i>Act as a gateway</i> there;
       everyone else leaves their URL empty and pairs with it. Instances without a URL poll the gateway for waiting items.
@@ -258,7 +259,7 @@
       <p class="fs-help">Set-up: add the peer here (name only is fine), click <b>Pairing code for them</b> and send them
       the string. They paste it in this box on their instance, which creates/pairs the peer entry for you, then they send
       you <i>their</i> pairing code, which you paste here. <b>Test</b> checks the connection and that the pinned key
-      matches the instance at that URL. Compare fingerprints out-of-band (a phone call) if you want to be sure nobody
+      matches the instance at that URL. Compare fingerprints out-of-band (a call, a message) if you want to be sure nobody
       swapped a code in transit.</p>`;
 
     el.querySelectorAll("tr").forEach((tr) => {
@@ -322,7 +323,7 @@
   function valueInput(kind, value) {
     const list = kind === "folder" ? "fs_dl_folders" : (kind === "album" ? "fs_dl_albums" : "");
     return `<input class="fs-r-value" value="${esc(value)}" ${list ? `list="${list}"` : ""}
-      placeholder="${kind === "folder" ? "trips/2026 (empty = whole library)" : kind === "album" ? "Beach 2026" : "family"}">`;
+      placeholder="${kind === "folder" ? "trips/2026 (empty = whole library)" : kind === "album" ? "Line 23 runs" : "shared"}">`;
   }
   function ruleRow(r) {
     const isNew = !r.id;
@@ -349,8 +350,8 @@
       <datalist id="fs_dl_albums">${state.albums.map((a) => `<option value="${esc(a)}">`).join("")}</datalist>
       <table class="fs-table"><thead><tr><th>Mode</th><th>Kind</th><th>Value</th><th>Peers</th><th>Note</th><th>On</th><th></th></tr></thead>
       <tbody>${rules.map(ruleRow).join("")}${ruleRow({ mode: "share", kind: "album", value: "", recursive: 1, peers: [], name: "", enabled: 1 })}</tbody></table>
-      <p class="fs-help">Examples - <i>share album "Beach 2026" → sister, cousins</i>; <i>share tag "family" → mom</i>;
-      <i>block folder "work" → everyone</i>; <i>block tag "sister" → cousins</i>.</p>`;
+      <p class="fs-help">Examples - <i>share folder "admin/boxline23" → line-23-pi, office-nas</i>; <i>share tag "shared" → everyone</i>;
+      <i>block folder "private" → everyone</i>; <i>block tag "internal" → partner-site</i>.</p>`;
     el.querySelectorAll("tbody tr").forEach((tr) => {
       const id = Number(tr.dataset.id || 0);
       const q = (c) => tr.querySelector(c);
@@ -456,7 +457,7 @@
   // -- viewer badge: who sees the current photo --------------------------
   if (window.registerControlButton) {
     registerControlButton("viewer_toggles",
-      '<button id="fs_badge" class="fs-badge" title="Family share: who sees this photo" hidden>👪</button>');
+      '<button id="fs_badge" class="fs-badge" title="Peer share: who receives this file" hidden>🔗</button>');
   }
   let badgeFile = null;
   if (window.registerFileMetaHook) registerFileMetaHook(async (meta, filename) => {

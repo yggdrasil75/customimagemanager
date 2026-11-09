@@ -6,6 +6,15 @@ body {
   font-family: system-ui, sans-serif
 }
 
+select option,
+select optgroup {
+  background-color: var(--cim-gray-800, #1f2937);
+  color: var(--cim-gray-100, #f3f4f6);
+}
+select option:disabled {
+  color: var(--cim-gray-500, #6b7280);
+}
+
 .masonry {
   column-width: 130px;
   column-gap: 8px

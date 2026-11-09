@@ -37,6 +37,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Button
@@ -73,6 +74,8 @@ import app.cim.family.Api
 import app.cim.family.Bucket
 import app.cim.family.Crypto
 import app.cim.family.Db
+import app.cim.family.OfflinePhotos
+import app.cim.family.PhotoSearch
 import app.cim.family.Prefs
 import app.cim.family.Scanner
 import app.cim.family.UploadWorker
@@ -96,12 +99,24 @@ object ThumbCache {
         val h = MessageDigest.getInstance("SHA-1").digest(path.toByteArray()).joinToString("") { "%02x".format(it) }
         return File(ctx.cacheDir, "thumbs").also { it.mkdirs() }.resolve("$h.jpg")
     }
-    suspend fun get(ctx: Context, api: Api, path: String): Bitmap? = withContext(Dispatchers.IO) {
+    suspend fun get(ctx: Context, api: Api, path: String, offline: Boolean = false): Bitmap? = withContext(Dispatchers.IO) {
         mem.get(path)?.let { return@withContext it }
         val f = file(ctx, path)
-        val bytes = if (f.exists()) f.readBytes() else runCatching { api.thumb(path) }.getOrNull()?.also { f.writeBytes(it) } ?: return@withContext null
+        val bytes = if (f.exists()) f.readBytes()
+                    else if (offline) return@withContext null          // no server: only what is cached
+                    else runCatching { api.thumb(path) }.getOrNull()?.also { f.writeBytes(it) } ?: return@withContext null
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.also { mem.put(path, it) }
     }
+    /** @brief The cached thumbnail only, never the network (blocking; any thread but main). */
+    fun cachedBlocking(ctx: Context, path: String): Bitmap? {
+        mem.get(path)?.let { return it }
+        val f = file(ctx, path)
+        if (!f.exists()) return null
+        val b = runCatching { f.readBytes() }.getOrNull() ?: return null
+        return BitmapFactory.decodeByteArray(b, 0, b.size)
+    }
+    /** @brief True when this library path's thumbnail is on the phone (memory or disk). */
+    fun hasCached(ctx: Context, path: String): Boolean = mem.get(path) != null || file(ctx, path).exists()
     fun clear(ctx: Context) { mem.evictAll(); File(ctx.cacheDir, "thumbs").deleteRecursively(); File(ctx.cacheDir, "media").deleteRecursively() }
 }
 
@@ -155,49 +170,119 @@ fun QrImage(text: String) {
 @Composable
 fun PhotosTab(prefs: Prefs, db: Db, api: Api, galleryOn: Boolean, onOpen: (Api.Item) -> Unit) {
     var sub by remember { mutableStateOf(if (galleryOn) "library" else "backup") }
+    val ctx = LocalContext.current
+    // a phone item opens in the system viewer; library items in ours
+    val open: (Api.Item) -> Unit = { item ->
+        if (OfflinePhotos.isLocal(item)) {
+            runCatching { ctx.startActivity(UploadWorker.viewIntent(OfflinePhotos.localUri(item), if (item.video) "video/*" else "image/*")) }
+        } else onOpen(item)
+    }
     Column(Modifier.fillMaxSize()) {
         val opts = if (galleryOn) listOf("library" to "Library", "backup" to "Backup") else listOf("backup" to "Backup")
         ChipRow(opts, sub) { sub = it }
         Box(Modifier.weight(1f)) {
-            if (sub == "library" && galleryOn) TimelineScreen(api, onOpen) else FoldersScreen(prefs, db)
+            if (sub == "library" && galleryOn) TimelineScreen(api, open, prefs) else FoldersScreen(prefs, db)
         }
     }
 }
 
 // -- timeline: the server's library, newest first, grouped by day ------------
 @Composable
-fun TimelineScreen(api: Api, onOpen: (Api.Item) -> Unit) {
+fun TimelineScreen(api: Api, onOpen: (Api.Item) -> Unit, prefs: Prefs? = null) {
+    val ctx = LocalContext.current
+    // search: the server's semantic search, else the on-device index
+    var query by remember { mutableStateOf("") }
+    var results by remember { mutableStateOf<List<Api.Item>?>(null) }
+    var searchNote by remember { mutableStateOf("") }
+    var searching by remember { mutableStateOf(false) }
     var items by remember { mutableStateOf<List<Api.Item>>(emptyList()) }
     var total by remember { mutableStateOf(0) }
     var err by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
+    // offline: the server didn't answer; show cached thumbnails + the phone's own media
+    var offline by remember { mutableStateOf(false) }
+    var attempt by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
+    fun goOffline(why: String) {
+        offline = true; err = why
+        scope.launch {
+            items = withContext(Dispatchers.IO) { OfflinePhotos.offlineItems(ctx, hasMediaPermission(ctx)) }
+            total = items.size
+        }
+    }
     fun loadMore() {
-        if (loading || (items.isNotEmpty() && items.size >= total)) return
+        if (offline || loading || (items.isNotEmpty() && items.size >= total)) return
         loading = true
         scope.launch {
             try {
                 val (page, n) = withContext(Dispatchers.IO) { api.timeline(items.size, 300) }
                 items = items + page; total = n; err = ""
-            } catch (e: Exception) { err = e.message ?: e.toString() } finally { loading = false }
+                val snap = items
+                withContext(Dispatchers.IO) { OfflinePhotos.save(ctx, snap, n) }
+            } catch (e: Exception) {
+                val msg = e.message ?: e.toString()
+                if (items.isEmpty()) goOffline(msg) else err = msg
+            } finally { loading = false }
         }
     }
-    LaunchedEffect(Unit) { loadMore() }
+    LaunchedEffect(attempt) { loadMore() }
     val fmt = remember { SimpleDateFormat("EEEE, d MMMM yyyy", Locale.getDefault()) }
     val groups = remember(items) { items.groupBy { fmt.format(Date((it.t * 1000).toLong())) } }
+    val scopeS = rememberCoroutineScope()
+    fun runSearch() {
+        val p = prefs ?: return
+        val q = query.trim()
+        if (q.isEmpty()) { results = null; searchNote = ""; return }
+        searching = true
+        scopeS.launch {
+            try {
+                val r = withContext(Dispatchers.IO) { PhotoSearch.search(ctx, p, q, preferPhone = offline) }
+                results = r.items
+                searchNote = "${r.items.size} match${if (r.items.size == 1) "" else "es"} " +
+                             (if (r.source == "phone") "on this phone (offline search)" else "on the server")
+            } catch (e: Exception) { results = emptyList(); searchNote = e.message ?: e.toString() }
+            finally { searching = false }
+        }
+    }
     Column {
-        if (err.isNotEmpty()) Text(err, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp))
+        if (prefs != null) {
+            Row(Modifier.fillMaxWidth().padding(8.dp, 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(query, { query = it; if (it.isEmpty()) { results = null; searchNote = "" } },
+                    label = { Text("Search photos (what's in them)") }, singleLine = true, modifier = Modifier.weight(1f),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { runSearch() }))
+                if (searching) CircularProgressIndicator(Modifier.padding(start = 8.dp).size(20.dp))
+            }
+            if (searchNote.isNotEmpty()) Text(searchNote, Modifier.padding(horizontal = 10.dp), color = Color.Gray, fontSize = 12.sp)
+        }
+        val res = results
+        if (res != null) {
+            LazyVerticalGrid(GridCells.Adaptive(110.dp), Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                items(res, key = { "s:" + it.path }) { it -> Tile(api, it, offline) { onOpen(it) } }
+            }
+            return@Column
+        }
+        if (offline) {
+            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Offline - the server can't be reached", fontWeight = FontWeight.SemiBold)
+                    Text("Showing cached thumbnails and the photos on this phone. ($err)", color = Color.Gray, fontSize = 12.sp)
+                }
+                OutlinedButton(onClick = { offline = false; err = ""; items = emptyList(); total = 0; attempt++ }) { Text("Retry") }
+            }
+        } else if (err.isNotEmpty()) Text(err, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp))
         LazyVerticalGrid(GridCells.Adaptive(110.dp), Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             groups.forEach { (day, its) ->
                 item(span = { GridItemSpan(maxLineSpan) }) { Text(day, Modifier.padding(10.dp, 12.dp, 10.dp, 4.dp), fontWeight = FontWeight.SemiBold) }
                 items(its, key = { it.path }) { it ->
-                    Tile(api, it) { onOpen(it) }
+                    Tile(api, it, offline) { onOpen(it) }
                 }
             }
             item(span = { GridItemSpan(maxLineSpan) }) {
                 LaunchedEffect(items.size) { loadMore() }
                 Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
-                    if (loading) CircularProgressIndicator(Modifier.size(24.dp)) else if (items.isEmpty()) Text("Nothing on the server yet", color = Color.Gray)
+                    if (loading) CircularProgressIndicator(Modifier.size(24.dp))
+                    else if (items.isEmpty()) Text(if (offline) "Nothing cached and no photos on this phone" else "Nothing on the server yet", color = Color.Gray)
                 }
             }
         }
@@ -205,13 +290,17 @@ fun TimelineScreen(api: Api, onOpen: (Api.Item) -> Unit) {
 }
 
 @Composable
-fun Tile(api: Api, item: Api.Item, onClick: () -> Unit) {
+fun Tile(api: Api, item: Api.Item, offline: Boolean = false, onClick: () -> Unit) {
     val ctx = LocalContext.current
-    val bmp by produceState<Bitmap?>(null, item.path) { value = ThumbCache.get(ctx, api, item.path) }
+    val bmp by produceState<Bitmap?>(null, item.path) {
+        value = if (OfflinePhotos.isLocal(item)) withContext(Dispatchers.IO) { OfflinePhotos.localThumb(ctx, item) }
+                else ThumbCache.get(ctx, api, item.path, offline)
+    }
     Box(Modifier.aspectRatio(1f).background(TileBg).clickable(onClick = onClick)) {
         val b = bmp
         if (b != null) Image(b.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         if (item.video) Icon(Icons.Default.PlayCircle, null, Modifier.align(Alignment.TopEnd).padding(4.dp).size(20.dp), tint = Color.White)
+        if (OfflinePhotos.isLocal(item)) Icon(Icons.Default.PhoneAndroid, "on this phone", Modifier.align(Alignment.BottomEnd).padding(4.dp).size(16.dp), tint = Color.White)
     }
 }
 
@@ -235,7 +324,11 @@ fun ViewerScreen(api: Api, item: Api.Item, onBack: () -> Unit) {
                     bmp = BitmapFactory.decodeFile(f.path) ?: ThumbCache.get(ctx, api, item.path)
                     if (bmp == null) err = "This format can't be decoded on the phone; showing the thumbnail failed too."
                 }
-            } catch (e: Exception) { err = e.message ?: e.toString() }
+            } catch (e: Exception) {
+                // offline: show the cached thumbnail rather than an error
+                bmp = ThumbCache.get(ctx, api, item.path, offline = true)
+                if (bmp == null) err = e.message ?: e.toString()
+            }
         }
     }
     Box(Modifier.fillMaxSize().background(Color.Black)) {

@@ -44,6 +44,11 @@ object Remote {
     @Synchronized fun base(prefs: Prefs): String {
         val url = prefs.serverUrl.trimEnd('/')
         val now = System.currentTimeMillis()
+        // paired for remote access without a URL: there is nothing to try directly
+        if (url.isEmpty()) {
+            if (!prefs.remoteEnabled) throw ApiException("no server address: re-pair with a code that has a URL or remote access")
+            return "http://127.0.0.1:" + ensureLink(prefs).localPort
+        }
         if (!prefs.remoteEnabled) {
             // still learn, now and then, whether the server offers it (that turns it on here)
             if (now - prefs.remoteConfigAt > CONFIG_TTL_MS) fetchConfig(prefs, url)
@@ -73,7 +78,7 @@ object Remote {
         link = null
         if (lines(prefs.remoteGateways).isEmpty() && !prefs.remoteDht) {
             prefs.linkStatus = "No link: the server has no gateway and the DHT is off (Settings -> Remote access on the server)"
-            throw ApiException("can't reach the server: ${prefs.serverUrl} doesn't answer from here and no remote-access gateway is set up")
+            throw ApiException("can't reach the server: ${prefs.serverUrl.ifEmpty { "it" }} doesn't answer from here and no remote-access gateway is set up")
         }
         val cfg = LinkConfig(prefs.privateKey, prefs.serverPub ?: throw ApiException("not paired"),
             gateways = lines(prefs.remoteGateways), stun = lines(prefs.remoteStun), dht = prefs.remoteDht)
@@ -84,7 +89,7 @@ object Remote {
         } catch (e: Exception) {
             l.close()
             prefs.linkStatus = "No link: ${e.message}"
-            throw ApiException("can't reach the server: ${prefs.serverUrl} doesn't answer from here and the remote link failed (${e.message})")
+            throw ApiException("can't reach the server: ${prefs.serverUrl.ifEmpty { "it" }} doesn't answer from here and the remote link failed (${e.message})")
         }
         prefs.linkStatus = "Remote link: ${l.pathNote}"
         link = l
@@ -93,7 +98,7 @@ object Remote {
 
     private fun lines(s: String) = s.split('\n', ',').map { it.trim() }.filter { it.isNotEmpty() }
 
-    private fun reachable(url: String): Boolean = try {
+    private fun reachable(url: String): Boolean = if (url.isEmpty()) false else try {
         val u = URI(url)
         val port = if (u.port > 0) u.port else if (u.scheme == "https") 443 else 80
         Socket().use { it.connect(InetSocketAddress(u.host, port), 2500) }
@@ -110,7 +115,7 @@ object Remote {
                 val gw = j.optJSONArray("gateways"); val st = j.optJSONArray("stun")
                 if (gw != null) prefs.remoteGateways = (0 until gw.length()).joinToString("\n") { gw.getString(it) }
                 if (st != null && st.length() > 0) prefs.remoteStun = (0 until st.length()).joinToString("\n") { st.getString(it) }
-                prefs.remoteDht = j.optBoolean("dht", false)
+                if (j.has("dht")) prefs.remoteDht = j.optBoolean("dht", false)
                 prefs.remoteServerOn = j.optBoolean("enabled", false)
                 prefs.remoteConfigAt = System.currentTimeMillis()
             }

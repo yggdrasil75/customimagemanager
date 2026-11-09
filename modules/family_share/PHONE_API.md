@@ -106,6 +106,31 @@ sealed 413 - fetch such files through `frames`.
 Streaming routes (`music/stream/...`) are NOT proxied - use `frames`.
 Anything off the list -> 404 `{"ok": false, "error": "not available to phones"}`.
 
+## 3b. `GET inbound/model?name=<run|file>&class=<class>&format=<pt|onnx|ncnn|...>` - detection models
+
+For a device that boxes things itself (a Raspberry Pi on a line). Give `name`
+(a trained run such as `set_line23_train_4`, or a weights file such as
+`widgets.pt`), `class` (something the model must box: `blue tube`; spaces,
+`_` and `-` are equivalent), or both. With only a class, the server picks a
+trained run before a loose file, then the model with the fewest classes, then
+the newest. `format` exports on first request (needs ultralytics on the server)
+and is cached; `ncnn` / `openvino` / `coreml` come zipped.
+
+The body is the file sealed like `inbound/media`; `X-Family-Model` is
+`{"name", "file", "classes"}`. 404 = no such model / nothing boxes that class
+(the error lists the known classes); 400 = no name or class, or a bad format.
+Needs the Model share module and its feature for the account. The same models
+are listed through the proxy: `inbound/api/model_share/yolo[?class=]`,
+`inbound/api/model_share/yolo/find?class=`.
+
+## Pairing codes: how a device reaches the server
+
+A device's code (`fs1.`...) may carry `"ra"`: `{"mode": "remote", "gw": [host:port...],
+"stun": [...], "dht": true}` (default: use the URL when it answers, else find
+the server through its gateways / the DHT; the URL may be empty) or
+`{"mode": "lan"}` (the URL is the server's local address; no remote link).
+Codes without `"ra"` behave as before.
+
 ## 4. Playlists (new, music module)
 
 Per account (owner = signed-in username, `""` with sign-in off).
