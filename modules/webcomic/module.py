@@ -281,8 +281,11 @@ def register(host):
 
         def download(page, url):
             imgs, assets = [], {}
-            urls = page["images"] + ([f for f in page.get("frames", []) if f not in page["images"]]
-                                     if out_kind == "epub" else [])
+            urls = list(page["images"])
+            if out_kind == "epub":                    # the whole page body: frames, insets, backgrounds
+                for f in page.get("frames", []) + page.get("extras", []):
+                    if f not in urls:
+                        urls.append(f)
             for iu in urls:
                 ir = fetcher.get(iu, referer=prof.get("referer") or url)
                 ct = ir.headers.get("Content-Type", "")
@@ -290,7 +293,7 @@ def register(host):
                     ir.content[:15].lstrip().lower().startswith((b"<!doctype", b"<html"))
                 if bad:
                     if iu not in page["images"]:
-                        continue                      # an animation frame that isn't there: fine
+                        continue                      # a frame / inset that isn't there: drop it, not the page
                     raise RuntimeError(f"image {iu}: HTTP {ir.status_code} {ct} "
                                        "(hot-link protection? the site may need a Referer)")
                 e = ext_for(iu, ct)

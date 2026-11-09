@@ -348,3 +348,28 @@ def test_hand_fix_forces_a_jump(app, client, ungated, site):
     assert _run(app, sid)["status"] == "done"
     pages = _pages(app)
     assert pages[:2] == [_art(1), _art(2)] and pages[-1] == _art(4)
+
+
+def test_epub_page_with_unfetched_nested_images_and_extras(tmp_path):
+    """! @brief An image that wasn't fetched inside an element that is itself dropped
+    (crashed: decomposed tag); insets / backgrounds / srcset in the body are kept."""
+    sc, wr = _mod("scrape"), _mod("writers")
+    url = "https://comic.example/c/ch02/ch02_10.html"
+    html = """<html><body><div id="comic">
+      <picture><source srcset="art-2x.webp 2x, art.webp 1x"><img src="art.jpg"></picture>
+      <div class="inset" style="background:url(bg.png)"><img src="inset.png"><img src="gone.png"></div>
+      <a href="ch02_11.html"><img src="arrow.png"></a></div></body></html>"""
+    p = sc.profile_for(url, "fullpage")
+    pg = sc.parse_page(html, url, p)
+    base = "https://comic.example/c/ch02/"
+    assert {base + n for n in ("art-2x.webp", "art.webp", "bg.png", "inset.png")} <= set(pg["images"] + pg["extras"])
+    have = {base + n: (png_bytes(seed=i), ".png") for i, n in enumerate(["art.jpg", "art.webp", "bg.png", "inset.png"])}
+    w = wr.EpubWriter(str(tmp_path / "out"), str(tmp_path / "stage"), "Story")
+    w.add("ch02", "Chapter 002", url, pg["content_html"], have, page_title="10")
+    path = w.build("ch02")
+    with zipfile.ZipFile(path) as z:
+        page = z.read("OEBPS/text/page0001.xhtml").decode()
+    assert "gone.png" not in page and "arrow.png" not in page and "srcset" not in page
+    assert page.count("../img/") >= 4
+    import xml.dom.minidom
+    xml.dom.minidom.parseString(page)

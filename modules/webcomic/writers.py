@@ -233,16 +233,32 @@ class EpubWriter:
             local[u] = f"img/{name}"
         soup = BeautifulSoup(content_html or "", "html.parser")
         for t in soup.find_all(True):
-            for a in ("src", "data-url", "data-src"):
+            if t.attrs is None or getattr(t, "decomposed", False):
+                continue                         # inside an element dropped below
+            dropped = False
+            for a in ("src", "data-url", "data-src", "poster"):
                 if t.get(a):
                     absu = urljoin(page_url, t[a])
                     if absu in local:
-                        t["src"] = "../" + local[absu]
-                        if a != "src":
+                        t["poster" if a == "poster" else "src"] = "../" + local[absu]
+                        if a not in ("src", "poster"):
                             del t[a]
-                    elif a == "src" and t.name == "img":
-                        t.decompose()            # art we couldn't fetch: drop, don't hot-link
+                    elif a == "src" and t.name in ("img", "source"):
+                        t.decompose()            # an image we couldn't fetch: drop, don't hot-link
+                        dropped = True
                         break
+            if dropped:
+                continue
+            for a in ("srcset", "data-srcset"):      # the local src stands in for the variants
+                if t.get(a):
+                    best = None
+                    for part in t[a].split(","):
+                        u = part.strip().split()[0] if part.strip() else ""
+                        if u and urljoin(page_url, u) in local:
+                            best = local[urljoin(page_url, u)]
+                    if best and not t.get("src"):
+                        t["src"] = "../" + best
+                    del t[a]
             st = t.get("style")
             if st and "url(" in st:
                 def rep(m):

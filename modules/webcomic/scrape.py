@@ -371,7 +371,7 @@ def parse_page(html, url, profile):
     title = text_of(profile.get("title")) or (soup.title.get_text(strip=True) if soup.title else "")
     series = text_of(profile.get("series"))
 
-    content, frames = None, []
+    content, frames, extras = None, [], []
     if profile.get("output") == "epub" or profile.get("content"):
         box = (_select(soup, profile.get("content")) or [None])[0]
         if box is None and tags:
@@ -391,11 +391,27 @@ def parse_page(html, url, profile):
                     if fu not in seen:
                         seen.add(fu)
                         frames.append(fu)
+            # everything else the page body shows: insets, backgrounds, picture
+            # sources, posters - the book keeps them, not only the main art
+            for t in box.find_all(True):
+                cands = [t.get(a) for a in ("src", "data-src", "data-url", "poster")
+                         if t.name in ("img", "source", "video", "input") or a == "poster"]
+                for ss in (t.get("srcset"), t.get("data-srcset")):
+                    if ss:
+                        cands += [part.strip().split()[0] for part in ss.split(",") if part.strip()]
+                st_ = t.get("style") or ""
+                cands += [m.group(2) for m in re.finditer(r"url\((['\"]?)([^'\")]+)\1\)", st_)]
+                for c in cands:
+                    if c and not c.startswith(("data:", "#", "javascript:")):
+                        fu = urljoin(base, c.strip())
+                        if fu not in seen:
+                            seen.add(fu)
+                            extras.append(fu)
             for bad in box.find_all(["script", "noscript", "iframe", "form", "ins"]):
                 bad.decompose()
             content = str(box)
     return {"url": url, "images": images, "next": nxt, "title": title, "series": series,
-            "content_html": content, "frames": frames, "_base": base, "_soup": soup, "_html": html}
+            "content_html": content, "frames": frames, "extras": extras, "_base": base, "_soup": soup, "_html": html}
 
 
 def sha1(b):
