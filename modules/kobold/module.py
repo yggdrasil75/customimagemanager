@@ -16,8 +16,8 @@ Once the server answers, the module writes oai_endpoint / oai_model into
 the vlm settings (from koboldcpp's own /v1/models list), so every VLM
 capability runs against it with no further setup.
 
-No koboldcpp installed? The tab downloads the official Linux build for the
-selected GPU flavour (koboldai.org short links) into models/kobold/bin/ and
+No koboldcpp installed? The tab downloads the official build for this OS
+(Linux or Windows) and the selected GPU flavour into models/kobold/bin/ and
 points the executable setting at it.
 
 Routes (Settings -> Kobold tab, a declared section): /api/kobold/status, /start,
@@ -55,14 +55,34 @@ _LOG = collections.deque(maxlen=300)
 _LOCK = threading.Lock()
 _DL = {"busy": False}
 
-# Official builds (koboldai.org short links, always the latest release).
-_BUILDS = {
+# Official builds, always the latest release, per host OS.
+_WIN = os.name == "nt"
+_GH = "https://github.com/LostRuins/koboldcpp/releases/latest/download/"
+_LINUX_BUILDS = {
     "cu12":  ("https://koboldai.org/cpplinuxcu12", "Linux | Nvidia (CUDA 12)"),
     "cu11":  ("https://koboldai.org/cpplinux",     "Linux | Nvidia legacy (CUDA 9-11)"),
     "nocu":  ("https://koboldai.org/cpplinuxnocu", "Linux | no Nvidia (Vulkan/CPU)"),
     "rocm":  ("https://koboldai.org/cpplinuxrocm", "Linux | AMD (ROCm)"),
 }
+_WINDOWS_BUILDS = {
+    "cu12":  (_GH + "koboldcpp.exe",        "Windows | Nvidia (CUDA 12)"),
+    "oldpc": (_GH + "koboldcpp-oldpc.exe",  "Windows | old PC (CUDA 11, no AVX2)"),
+    "nocu":  (_GH + "koboldcpp-nocuda.exe", "Windows | no Nvidia (Vulkan/CPU)"),
+}
+_BUILDS = _WINDOWS_BUILDS if _WIN else _LINUX_BUILDS
 RELEASES_URL = "https://koboldai.org/cpp"
+
+
+def _split_args(s):
+    """! @brief Extra arguments -> argv; Windows paths keep their backslashes."""
+    if not _WIN:
+        return shlex.split(s)
+    return [a[1:-1] if len(a) > 1 and a[0] == a[-1] and a[0] in "\"'" else a
+            for a in shlex.split(s, posix=False)]
+
+
+def _cmdline(cmd):
+    return subprocess.list2cmdline(cmd) if _WIN else " ".join(shlex.quote(c) for c in cmd)
 
 
 def _bin_dir():
@@ -73,7 +93,7 @@ def download(variant, cfg, save):
     """! @brief Fetch the chosen build to models/kobold/bin/koboldcpp-<variant>, make it
     executable and set it as the executable. Runs on a thread; logs progress."""
     url, label = _BUILDS[variant]
-    dest = os.path.join(_bin_dir(), f"koboldcpp-{variant}")
+    dest = os.path.join(_bin_dir(), f"koboldcpp-{variant}" + (".exe" if _WIN else ""))
     tmp = dest + ".part"
     _DL["busy"] = True
     try:
@@ -92,7 +112,8 @@ def download(variant, cfg, save):
         if os.path.getsize(tmp) < 10 << 20:
             raise RuntimeError("download too small to be koboldcpp (bad link?)")
         os.replace(tmp, dest)
-        os.chmod(dest, 0o755)
+        if not _WIN:
+            os.chmod(dest, 0o755)
         cfg["kobold_exe"] = dest
         save()
         _LOG.append(f"[download] done → {dest} (set as executable)")
@@ -156,7 +177,7 @@ def register(host):
     cfg = host.config
     keys = [
         ("kobold_exe", "koboldcpp", "text", "koboldcpp executable",
-         "Binary on PATH, a full path, or koboldcpp.py (run with this Python)."),
+         "Binary on PATH (koboldcpp / koboldcpp.exe), a full path, or koboldcpp.py (run with this Python)."),
         ("kobold_model", "", "text", "Model (GGUF)",
          "Local .gguf, https URL, or HuggingFace path owner/repo/file.gguf (auto-downloaded)."),
         ("kobold_mmproj", "", "text", "Vision projector (mmproj)",
@@ -193,7 +214,7 @@ def register(host):
             cmd += ["--mmproj", _hf(cfg.get("kobold_mmproj"))]
         cmd += {"cublas": ["--usecublas"], "vulkan": ["--usevulkan"],
                 "clblast": ["--useclblast", "0", "0"], "cpu": ["--usecpu"]}.get(cfg.get("kobold_backend"), [])
-        cmd += shlex.split(str(cfg.get("kobold_extra_args") or ""))
+        cmd += _split_args(str(cfg.get("kobold_extra_args") or ""))
         return cmd
 
     def _apply():
@@ -214,9 +235,11 @@ def register(host):
                 return "already running"
             cmd = _cmd()
             _LOG.clear()
-            _LOG.append("$ " + " ".join(shlex.quote(c) for c in cmd))
+            _LOG.append("$ " + _cmdline(cmd))
             _PROC = subprocess.Popen(cmd, cwd=model_registry.model_dir("kobold", "gguf"),
-                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     # no console window popping up on a Windows server
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             threading.Thread(target=_pump, args=(_PROC,), daemon=True).start()
 
         def _wait():   # downloads can take a while; apply the endpoint once it answers
@@ -266,7 +289,7 @@ def register(host):
 
     def api_download():
         from flask import request
-        variant = (request.json or {}).get("variant") or (request.json or {}).get("option") or "cu12"
+        variant = (request.json or {}).get("variant") or (request.json or {}).get("option") or next(iter(_BUILDS))
         if variant not in _BUILDS:
             return jsonify({"success": False, "error": "unknown build"})
         if _DL["busy"]:
