@@ -23,6 +23,7 @@ from . import training_select as ts
 from . import training_validate as tv
 from . import training_augment as ta
 import common
+import media_types
 
 HOST = None
 _db = state = MEDIA_DIR = MODELS_DIR = get_safe_path = read_jxl = read_metadata = None
@@ -267,6 +268,21 @@ def trainer_runs():
 
 def _set_work_reldir(set_name):
     return f"{TRAIN_SETS_DIR}/{_set_safe(set_name)}/input"
+
+
+def _to_jpg(src, jpg):
+    """! @brief A training copy of one member as .jpg: djxl for .jxl (fast, exact),
+    else decode whatever the still is (members kept as uploaded: png, webp, ...)."""
+    if src.lower().endswith(".jxl"):
+        subprocess.run(['djxl', src, jpg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(jpg):
+            return True
+    img = read_jxl(src)
+    if img is None:
+        return False
+    if img.ndim == 3 and img.shape[2] >= 3:
+        img = img[:, :, 2::-1]                    # read_image is RGB(A); cv2 writes BGR
+    return bool(cv2.imwrite(jpg, img))
 
 
 def _copy_into_set(set_name, src_rel):
@@ -968,8 +984,7 @@ def trainer_validate():
         fp = get_safe_path(MEDIA_DIR, rp)
         if not fp or not os.path.exists(fp):
             continue
-        base = os.path.splitext(fp)[0]
-        if not os.path.exists(base + ".jxl"):     # stills only; skip video members
+        if not media_types.is_image(fp):           # stills only (any format); skip video members
             continue
         img = read_jxl(fp)
         if img is None:
@@ -1158,8 +1173,8 @@ def train():
         if not abs_path:
             continue
         base = os.path.splitext(abs_path)[0]
-        if not os.path.exists(base + ".jxl"):
-            skipped_video += 1
+        if not os.path.exists(abs_path) or not media_types.is_image(abs_path):
+            skipped_video += 1                     # stills in any format; video members skipped
             continue
         regions = (read_metadata(abs_path) or {}).get("regions", []) or []
         keep = []
@@ -1176,7 +1191,7 @@ def train():
         keep, dups = tv.split_dups(keep)   # double-tagged object -> train on it once
         n_dup_skipped += len(dups)
         if keep:
-            labelled.append((base, os.path.basename(base), keep))
+            labelled.append((abs_path, os.path.basename(base), keep))   # (source image, name, boxes)
 
     if not labelled:
         HOST.set_status("No matching labelled images in this set!")
@@ -1258,8 +1273,7 @@ def train():
             out = []
             for base, bn, regions in pairs:
                 jpg = os.path.join(img_dst, bn + ".jpg")
-                subprocess.run(['djxl', base + ".jxl", jpg],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _to_jpg(base, jpg)
                 if crop_to_boxes:
                     regions = _crop_jpg_to_boxes(jpg, regions)
                 out.append((bn, regions))
@@ -1314,8 +1328,7 @@ def train():
     aug_made = 0
     for base, bn, regions in tr_set:
         jpg = os.path.join(dset_dir, "images/train", bn + ".jpg")
-        subprocess.run(['djxl', base + ".jxl", jpg],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _to_jpg(base, jpg)
         if crop_to_boxes:
             regions = _crop_jpg_to_boxes(jpg, regions)
         _write_label(os.path.join(dset_dir, "labels/train"), bn, regions)
@@ -1323,8 +1336,7 @@ def train():
             aug_made += (_augment_into(dset_dir, "images/train", "labels/train", bn, regions) or 0)
     for base, bn, regions in val_set:
         jpg = os.path.join(dset_dir, "images/val", bn + ".jpg")
-        subprocess.run(['djxl', base + ".jxl", jpg],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _to_jpg(base, jpg)
         if crop_to_boxes:
             regions = _crop_jpg_to_boxes(jpg, regions)
         _write_label(os.path.join(dset_dir, "labels/val"), bn, regions)

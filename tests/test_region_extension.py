@@ -35,7 +35,8 @@ def test_extension_fields_round_trip(client, host, upload):
     assert person["conf"] == pytest.approx(.77)
     p = person["pose"]
     assert p["kind"] == "body" and p["model"] == "rtmpose" and p["conf"] == pytest.approx(.66)
-    assert [(k["x"], k["y"]) for k in p["keypoints"]] == pytest.approx([(k["x"], k["y"]) for k in _kps()])
+    # approx() can't compare nested pairs: flatten like obb / polygon above
+    assert flat([(k["x"], k["y"]) for k in p["keypoints"]]) == pytest.approx(flat([(k["x"], k["y"]) for k in _kps()]))
     for k in ("conf", "obb", "polygon", "pose", "needs_review", "is_animal"):
         assert k not in plain
     # the API serves them too
