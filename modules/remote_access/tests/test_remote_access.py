@@ -270,6 +270,56 @@ def test_found_through_the_dht_alone():
     run(go(), timeout=90)
 
 
+def test_dht_is_a_light_client_cached_nearest_rate_limit_and_warm_restart(tmp_path):
+    """! @brief A repeat get asks only the cached nearest nodes (not a full walk), the
+    query budget holds, and a restart reuses the saved id and nodes."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        swarm = []
+        for _ in range(30):
+            n = FakeNode(swarm)
+            tr, _ = await loop.create_datagram_endpoint(lambda n=n: n, local_addr=("127.0.0.1", 0))
+            n.port = tr.get_extra_info("sockname")[1]
+            swarm.append(n)
+        class Sink(asyncio.DatagramProtocol):
+            to = None
+
+            def datagram_received(self, data, a):
+                if self.to is not None:
+                    self.to.handle(data, a)
+        sink = Sink()
+        me, _ = await loop.create_datagram_endpoint(lambda: sink, local_addr=("127.0.0.1", 0))
+        state = str(tmp_path / "dht.json")
+
+        async def resolve(h, p):
+            return [(h, p)]
+        d = dhtmod.Dht(me.sendto, resolve, bootstrap=["127.0.0.1:%d" % swarm[0].port],
+                       allow_private=True, state_path=state, qps=200, burst=50)
+        sink.to = d
+        key = Ed25519PrivateKey.generate()
+        assert await d.put(key, b"s", b"hello", 5) > 0
+        pub = dhtmod.raw_ed_pub(key)
+        before = d.sent
+        got = await d.get(pub, b"s")
+        assert got == (b"hello", 5)
+        assert d.sent - before <= dhtmod.K                       # the cached nearest only
+        d.close()                                                  # saves
+        d2 = dhtmod.Dht(me.sendto, resolve, bootstrap=[], allow_private=True, state_path=state)
+        assert d2.id == d.id and d2.node_count() >= dhtmod.K       # warm: no router needed
+        sink.to = d2
+        assert await d2.get(pub, b"s") == (b"hello", 5)
+        # the budget: 20 queries at 40/s with a burst of 4 take about 0.4 s
+        slow = dhtmod.Dht(me.sendto, resolve, bootstrap=[], qps=40, burst=4)
+        t0 = loop.time()
+        for _ in range(20):
+            await slow._take_token()
+        assert loop.time() - t0 >= 0.35
+        me.close()
+    run(go(), timeout=60)
+
+
 # -- the module in the app -------------------------------------------------------
 def test_client_config_is_public_and_carries_no_secret(client):
     j = client.get("/api/remote_access/pub/client").get_json()

@@ -39,6 +39,7 @@ peer is paired in family_share.
 
 import asyncio
 import base64
+import os
 import threading
 import time
 
@@ -128,6 +129,7 @@ class Runner:
         self.error = ""
         self.started = 0.0
         self.lock = threading.Lock()
+        self.dht_state_path = None
 
     def running(self):
         return self.server is not None and self.thread is not None and self.thread.is_alive()
@@ -150,7 +152,8 @@ class Runner:
                                       stun=cfg["stun"], gateways=cfg["gateways"], log=self.log)
                     await srv.open()
                     if cfg["remote_access_dht"]:
-                        srv.dht = dhtmod.Dht(srv.sendto, srv.resolve)
+                        # node id + node cache kept across restarts: a warm start, no router walk
+                        srv.dht = dhtmod.Dht(srv.sendto, srv.resolve, state_path=self.dht_state_path)
                     srv.set_devices(devices)
                     return srv
                 try:
@@ -220,6 +223,8 @@ def register(host):
     is the on switch; it does nothing until a phone or family peer is paired."""
     log = host.logger
     runner = Runner(log)
+    # beside library.db (a dot-file: the library scan skips it)
+    runner.dht_state_path = os.path.join(os.path.abspath(host.media_dir), ".remote_access_dht.json")
     state = {"timer": None, "devices_at": 0.0, "devices": [], "note": ""}
 
     validators = {
@@ -361,9 +366,10 @@ def register(host):
                 if d.get("announce_ok") is None:
                     v = "announcing..."
                 elif d.get("announce_ok"):
-                    v = "announced on %d node(s), %d known" % (d["stored"], d["nodes"])
+                    v = "announced on %d node(s), %d known, %d queries sent" % (d["stored"], d["nodes"], d.get("queries", 0))
                 else:
-                    v = "no node took the record yet" + (": " + d["error"] if d.get("error") else "")
+                    v = ("no node took the record yet (attempt %d, retrying with backoff)" % d.get("fails", 0)
+                         + (": " + d["error"] if d.get("error") else ""))
                 rows.append({"label": "DHT", "value": v})
             for ln in st["links"]:
                 rows.append({"label": "Linked: " + ln["label"],

@@ -1380,11 +1380,12 @@ def serve_streams(node, get_conn, port=0):
 
 # -- server (responder, and dialler of its family_share peers) -------------------
 class Pair:
-    __slots__ = ("name", "dev_pub", "keys", "knock_ts", "announced", "seq", "prefixes")
+    __slots__ = ("name", "dev_pub", "keys", "knock_ts", "knock_seq", "announced", "seq", "prefixes")
 
     def __init__(self, name, dev_pub, keys, prefixes=GATE_PREFIXES):
         self.name, self.dev_pub, self.keys, self.prefixes = name, dev_pub, keys, prefixes
         self.knock_ts = 0
+        self.knock_seq = None          # newest knock seen: polls ask only for newer ones
         self.announced = None
         self.seq = 0
 
@@ -1411,8 +1412,13 @@ class Server(Node):
 
     REG_EVERY = 20.0
     STUN_EVERY = 120.0
-    DHT_ANNOUNCE_EVERY = 15 * 60.0
-    DHT_POLL_EVERY = 20.0
+    # BEP 44 items live ~2 h on a node; republishing every 30 min keeps them with
+    # margin. A failed announce backs off 1, 2, 4, 8 min, ... up to the period.
+    DHT_ANNOUNCE_EVERY = 30 * 60.0
+    DHT_ANNOUNCE_RETRY = 60.0
+    # knocks: the K nodes nearest each knock are cached, so a poll is ~8 small
+    # queries per phone (a full lookup only every NEAR_TTL or when they stop answering)
+    DHT_POLL_EVERY = 30.0
     DIAL_RETRY = 300.0
 
     def __init__(self, priv, target=("127.0.0.1", 8000), use_dht=True, gate_prefixes=GATE_PREFIXES, **kw):
@@ -1579,7 +1585,15 @@ class Server(Node):
             self.last_stun = now
             self.loop.create_task(self.stun_once())
         if self.use_dht and self.dht is not None and not self._dht_busy:
-            due_announce = now - self.dht_state["announce_at"] >= self.DHT_ANNOUNCE_EVERY
+            # an announce no node took (cold routing table right after start, a blip)
+            # is retried within a minute, not after the full 15-minute period
+            if self.dht_state.get("announce_ok"):
+                every = self.DHT_ANNOUNCE_EVERY
+            else:
+                every = min(self.DHT_ANNOUNCE_EVERY,
+                            self.DHT_ANNOUNCE_RETRY * (2 ** min(5, self.dht_state.get("fails", 0))))
+            every *= self.dht_state.setdefault("jitter", 0.85 + 0.3 * (os.urandom(1)[0] / 255.0))
+            due_announce = now - self.dht_state["announce_at"] >= every
             cands = sorted(self.candidates())
             if cands != self._last_cands and now - self.dht_state["announce_at"] > 30:
                 due_announce = True
@@ -1598,12 +1612,16 @@ class Server(Node):
                     p.seq = max(p.seq + 1, int(time.time()))
                     v = seal_record(p.keys.box, cands, b"srv")
                     stored += await self.dht.put(p.keys.srv_key, p.keys.srv_salt, v, p.seq)
-                self.dht_state.update(announce_ok=stored > 0, stored=stored, error="")
+                self.dht_state.update(announce_ok=stored > 0, stored=stored, error="",
+                                      fails=0 if stored > 0 else self.dht_state.get("fails", 0) + 1,
+                                      jitter=0.85 + 0.3 * (os.urandom(1)[0] / 255.0))
             self.dht_state["poll_at"] = time.monotonic()
             for token, p in list(self.pairs.items()):
-                got = await self.dht.get(raw_pub(p.keys.dev_key.public_key()), p.keys.knock_salt)
+                got = await self.dht.get(raw_pub(p.keys.dev_key.public_key()), p.keys.knock_salt,
+                                         newer_than=p.knock_seq)
                 if not got:
                     continue
+                p.knock_seq = got[1]
                 rec = open_record(p.keys.box, got[0], b"dev")
                 if not rec:
                     continue
@@ -1624,7 +1642,8 @@ class Server(Node):
                 "links": [c.status() for c in self.conns.values()],
                 "peers_out": [{"name": o.name, "up": o.conn is not None and not o.conn.closed,
                                "via": o.path_note, "error": o.error} for o in self.out.values()],
-                "dht": dict(self.dht_state, nodes=self.dht.node_count() if self.dht else 0),
+                "dht": dict(self.dht_state, nodes=self.dht.node_count() if self.dht else 0,
+                            queries=self.dht.sent if self.dht else 0),
                 "errors": list(self.errors)}
 
     def close(self):

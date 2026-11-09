@@ -81,10 +81,13 @@ object Remote {
             throw ApiException("can't reach the server: ${prefs.serverUrl.ifEmpty { "it" }} doesn't answer from here and no remote-access gateway is set up")
         }
         val cfg = LinkConfig(prefs.privateKey, prefs.serverPub ?: throw ApiException("not paired"),
-            gateways = lines(prefs.remoteGateways), stun = lines(prefs.remoteStun), dht = prefs.remoteDht)
+            gateways = lines(prefs.remoteGateways), stun = lines(prefs.remoteStun), dht = prefs.remoteDht,
+            dhtState = prefs.dhtState)
         val l = Link(cfg)
         try {
-            l.connect()
+            // DHT only (no gateway): a knock plus a lookup take ~40 s on a cold table; allow two rounds
+            try { l.connect(if (lines(prefs.remoteGateways).isEmpty()) 90_000 else 45_000) }
+            finally { l.dhtState().takeIf { it.isNotEmpty() }?.let { prefs.dhtState = it } }   // warm next time
             l.serveLocal()
         } catch (e: Exception) {
             l.close()

@@ -6,11 +6,23 @@ Only what remote_access needs: find the nodes closest to a target, read the
 newest signed item stored there, and store one. It never answers queries
 itself and says so ("ro": 1, BEP 43), so other nodes keep it out of their
 routing tables.
+
+Being a light, polite client:
+  * a persistent node id and node cache (state_path): a restart starts warm
+    instead of walking from the bootstrap routers again;
+  * routers are only asked when fewer than K known nodes answer;
+  * the K nodes closest to each target (with their write tokens) are kept for
+    NEAR_TTL: a repeat get / put asks just those few nodes, and only a miss falls
+    back to a full iterative lookup;
+  * a get passes the newest "seq" already seen (BEP 44), so nodes with nothing
+    newer answer without the value;
+  * every query goes through a token bucket (QPS, BURST) shared by all lookups.
 """
 
 import asyncio
 import hashlib
 import ipaddress
+import json
 import os
 import struct
 import time
@@ -26,6 +38,10 @@ ALPHA = 4
 QUERY_TIMEOUT = 2.0
 LOOKUP_TIMEOUT = 20.0
 MAX_V = 1000
+NEAR_TTL = 10 * 60.0      # how long the K closest nodes of a target are trusted
+QPS = 8.0                 # average queries per second, all lookups together
+BURST = 16                # short bursts allowed (one lookup round is ALPHA queries)
+SAVE_EVERY = 10 * 60.0
 
 
 # -- bencode -------------------------------------------------------------------
@@ -135,7 +151,8 @@ def distance(a, b):
 class Dht:
     """! @brief KRPC over a send(data, (ip, port)) callable; feed replies to handle()."""
 
-    def __init__(self, send, resolve, bootstrap=BOOTSTRAP, allow_private=False):
+    def __init__(self, send, resolve, bootstrap=BOOTSTRAP, allow_private=False, state_path=None,
+                 qps=QPS, burst=BURST):
         self.send = send
         self.resolve = resolve
         self.bootstrap = list(bootstrap)
@@ -143,12 +160,63 @@ class Dht:
         self.id = os.urandom(20)
         self.pending = {}
         self.good = {}                 # node id -> (addr, last answer)
+        self.near = {}                 # target -> (when, [(id, addr, token | None)])
         self._tid = int.from_bytes(os.urandom(2), "big")
+        self.qps, self.burst = float(qps), float(burst)
+        self._tokens, self._tok_at = float(burst), time.monotonic()
+        self.sent = 0                  # queries sent (status / tests)
+        self.state_path = state_path
+        self._saved_at = time.monotonic()
+        self._load()
+
+    # -- persistence -----------------------------------------------------------------
+    def _load(self):
+        if not self.state_path:
+            return
+        try:
+            with open(self.state_path, encoding="utf-8") as f:
+                st = json.load(f)
+            nid = bytes.fromhex(st.get("id", ""))
+            if len(nid) == 20:
+                self.id = nid
+            now = time.monotonic()
+            for n in st.get("nodes", [])[:300]:
+                i, ip, port = bytes.fromhex(n[0]), str(n[1]), int(n[2])
+                if len(i) == 20 and 0 < port < 65536:
+                    self.good[i] = ((ip, port), now - 3600.0)      # unverified: oldest first to go
+        except (OSError, ValueError, TypeError, IndexError):
+            pass
+
+    def save(self):
+        """! @brief Keep the node id and the freshest nodes for the next start."""
+        if not self.state_path or not self.good:
+            return
+        self._saved_at = time.monotonic()
+        nodes = sorted(self.good.items(), key=lambda kv: -kv[1][1])[:200]
+        try:
+            tmp = self.state_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"id": self.id.hex(), "nodes": [[i.hex(), a[0], a[1]] for i, (a, _) in nodes]}, f)
+            os.replace(tmp, self.state_path)
+        except OSError:
+            pass
+
+    async def _take_token(self):
+        """! @brief Wait for room in the query budget."""
+        while True:
+            now = time.monotonic()
+            self._tokens = min(self.burst, self._tokens + (now - self._tok_at) * self.qps)
+            self._tok_at = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return
+            await asyncio.sleep((1.0 - self._tokens) / self.qps)
 
     def node_count(self):
         return len(self.good)
 
     def close(self):
+        self.save()
         for fut in self.pending.values():
             if not fut.done():
                 fut.cancel()
@@ -180,6 +248,8 @@ class Dht:
             fut.set_result(None)
 
     async def query(self, addr, q, args):
+        await self._take_token()
+        self.sent += 1
         self._tid = (self._tid + 1) & 0xFFFF
         t = struct.pack("!H", self._tid)
         fut = asyncio.get_running_loop().create_future()
@@ -247,13 +317,35 @@ class Dht:
                     for n_id, n_addr in parse_nodes(nodes, self.allow_private):
                         known.setdefault(n_addr, n_id)
         out = sorted(((nid, a, r) for a, (nid, r) in replies.items()), key=lambda x: distance(x[0], target))
+        if out:
+            self.near[target] = (time.monotonic(), [(nid, a, r.get(b"token")) for nid, a, r in out[:K]])
+        if time.monotonic() - self._saved_at > SAVE_EVERY:
+            self.save()
         return out
 
-    async def get(self, pub, salt=b""):
-        """! @brief The newest valid mutable item under (pub, salt) -> (v, seq) or None."""
+    async def closest(self, target, args=None):
+        """! @brief Replies from the nodes nearest to target: the cached K when they
+        still answer (a handful of queries), else a full lookup.
+        @param args extra "get" arguments (e.g. seq) for the cached round."""
+        hit = self.near.get(target)
+        if hit and time.monotonic() - hit[0] < NEAR_TTL:
+            nodes = hit[1]
+            a = dict(args or {}, target=target)
+            results = await asyncio.gather(*(self.query(addr, "get", a) for _, addr, _ in nodes))
+            got = [(nid, addr, r) for (nid, addr, _), r in zip(nodes, results) if r and b"__error" not in r]
+            if len(got) >= max(2, K // 2):
+                self.near[target] = (hit[0], [(nid, addr, r.get(b"token")) for nid, addr, r in got])
+                return got
+            self.near.pop(target, None)            # they went away: walk again
+        return await self.lookup(target)
+
+    async def get(self, pub, salt=b"", newer_than=None):
+        """! @brief The newest valid mutable item under (pub, salt) -> (v, seq) or None.
+        newer_than: a seq already seen; nodes holding nothing newer skip the value."""
         target = mutable_target(pub, salt)
         best = None
-        for _, _, r in await self.lookup(target):
+        args = {"seq": int(newer_than)} if newer_than is not None else None
+        for _, _, r in await self.closest(target, args):
             v, seq, sig, k = r.get(b"v"), r.get(b"seq"), r.get(b"sig"), r.get(b"k")
             if v is None or not isinstance(seq, int) or k != pub or not isinstance(sig, bytes):
                 continue
@@ -270,7 +362,7 @@ class Dht:
         if len(vb) > MAX_V:
             raise ValueError("value too large for the DHT")
         sig = key.sign(sig_buffer(salt, seq, vb))
-        closest = [(nid, a, r) for nid, a, r in await self.lookup(mutable_target(pub, salt))
+        closest = [(nid, a, r) for nid, a, r in await self.closest(mutable_target(pub, salt))
                    if isinstance(r.get(b"token"), bytes)][:K]
         args = {"v": v, "k": pub, "seq": seq, "sig": sig}
         if salt:

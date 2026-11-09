@@ -79,6 +79,9 @@ class Prefs(ctx: Context) {
     var linkStatus: String get() = p.getString("link_status", "") ?: ""; set(v) = p.edit().putString("link_status", v).apply()
 
     // on-device semantic search (ondevice.kt): off until the user turns it on
+    /** DHT node id + nodes from the last remote link (link.kt Dht.exportState): a warm start. */
+    var dhtState: String get() = p.getString("dht_state", "") ?: ""; set(v) = p.edit().putString("dht_state", v).apply()
+
     var onDeviceSearch: Boolean get() = p.getBoolean("od_search", false); set(v) = p.edit().putBoolean("od_search", v).apply()
     var embedModelUrl: String get() = p.getString("od_model_url", null)?.takeIf { it.isNotBlank() } ?: OnDevice.DEFAULT_URL
         set(v) = p.edit().putString("od_model_url", v).apply()

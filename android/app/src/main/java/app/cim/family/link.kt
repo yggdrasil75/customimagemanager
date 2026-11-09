@@ -337,6 +337,9 @@ class Dht(private val send: (ByteArray, InetSocketAddress) -> Unit,
         const val ALPHA = 4
         const val QUERY_TIMEOUT_MS = 2000L
         const val LOOKUP_TIMEOUT_MS = 20_000L
+        const val NEAR_TTL_MS = 10 * 60_000L
+        const val QPS = 8.0
+        const val BURST = 16
 
         fun sigBuffer(salt: ByteArray, seq: Long, vBencoded: ByteArray): ByteArray {
             val o = ByteArrayOutputStream()
@@ -348,9 +351,59 @@ class Dht(private val send: (ByteArray, InetSocketAddress) -> Unit,
         fun target(pub: ByteArray, salt: ByteArray): ByteArray = MessageDigest.getInstance("SHA-1").digest(pub + salt)
     }
 
-    val id = ByteArray(20).also { LinkProto.rng.nextBytes(it) }
+    var id = ByteArray(20).also { LinkProto.rng.nextBytes(it) }
+        private set
     private val pending = ConcurrentHashMap<String, CompletableFuture<Map<String, Any>?>>()
     private val good = ConcurrentHashMap<String, Pair<ByteArray, InetSocketAddress>>()
+    fun nodeCount(): Int = good.size
+    /** Queries sent (status). */
+    @Volatile var sent = 0L
+        private set
+    // the K nodes nearest each target and when they were found: a repeat get / put asks
+    // just those, and only a miss walks the DHT again (as the server does, dht.py)
+    private val near = ConcurrentHashMap<String, Pair<Long, List<Triple<ByteArray, InetSocketAddress, ByteArray?>>>>()
+    // token bucket shared by every query: no bursts that look like a scan
+    private var tokens = BURST.toDouble()
+    private var tokAt = System.currentTimeMillis()
+
+    private fun takeToken() {
+        while (true) {
+            val wait: Long
+            synchronized(this) {
+                val now = System.currentTimeMillis()
+                tokens = minOf(BURST.toDouble(), tokens + (now - tokAt) / 1000.0 * QPS)
+                tokAt = now
+                if (tokens >= 1.0) { tokens -= 1.0; return }
+                wait = ((1.0 - tokens) / QPS * 1000).toLong() + 1
+            }
+            Thread.sleep(wait)
+        }
+    }
+
+    /** @brief "id\nhexid ip port\n..." of the freshest nodes, for the next session. */
+    fun exportState(): String =
+        (listOf(id.joinToString("") { "%02x".format(it) }) +
+         good.values.take(200).map { (n, a) -> n.joinToString("") { "%02x".format(it) } + " " + a.address.hostAddress + " " + a.port })
+            .joinToString("\n")
+
+    /** @brief Reuse a saved id and nodes: a warm start instead of asking the routers. */
+    fun importState(s: String) {
+        val lines = s.lines().filter { it.isNotBlank() }
+        if (lines.isEmpty()) return
+        hex(lines[0])?.takeIf { it.size == 20 }?.let { id = it }
+        for (ln in lines.drop(1).take(300)) {
+            val p = ln.trim().split(" ")
+            if (p.size != 3) continue
+            val nid = hex(p[0])?.takeIf { it.size == 20 } ?: continue
+            val port = p[2].toIntOrNull()?.takeIf { it in 1..65535 } ?: continue
+            val ip = try { InetAddress.getByName(p[1]) } catch (e: Exception) { continue }
+            good.putIfAbsent(p[0], nid to InetSocketAddress(ip, port))
+        }
+    }
+
+    private fun hex(s: String): ByteArray? = try {
+        if (s.length % 2 != 0) null else ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+    } catch (e: NumberFormatException) { null }
     private var tid = LinkProto.rng.nextInt(0x10000)
 
     private fun key(t: ByteArray, a: InetSocketAddress) = t.joinToString("") { "%02x".format(it) } + "@" + LinkProto.norm(a)
@@ -373,6 +426,8 @@ class Dht(private val send: (ByteArray, InetSocketAddress) -> Unit,
     }
 
     private fun query(a: InetSocketAddress, q: String, args: Map<String, Any>): CompletableFuture<Map<String, Any>?> {
+        takeToken()
+        sent++
         val t: ByteArray
         synchronized(this) { tid = (tid + 1) and 0xFFFF; t = byteArrayOf((tid shr 8).toByte(), tid.toByte()) }
         val fut = CompletableFuture<Map<String, Any>?>()
@@ -434,13 +489,34 @@ class Dht(private val send: (ByteArray, InetSocketAddress) -> Unit,
                 (r["nodes"] as? ByteArray)?.let { parseNodes(it).forEach { (n, na) -> known.putIfAbsent(na, n) } }
             }
         }
-        return replies.entries.map { Triple(it.value.first, it.key, it.value.second) }.sortedBy { dist(it.first, target) }
+        val out = replies.entries.map { Triple(it.value.first, it.key, it.value.second) }.sortedBy { dist(it.first, target) }
+        if (out.isNotEmpty()) near[tkey(target)] = System.currentTimeMillis() to out.take(K).map { Triple(it.first, it.second, it.third["token"] as? ByteArray) }
+        return out
+    }
+
+    private fun tkey(t: ByteArray) = t.joinToString("") { "%02x".format(it) }
+
+    /** @brief Replies of the nodes nearest target: the cached K when they still answer,
+     *  else a full lookup. extra: more "get" arguments (seq) for the cached round. */
+    fun closest(target: ByteArray, extra: Map<String, Any> = emptyMap()): List<Triple<ByteArray, InetSocketAddress, Map<String, Any>>> {
+        val hit = near[tkey(target)]
+        if (hit != null && System.currentTimeMillis() - hit.first < NEAR_TTL_MS) {
+            val until = System.currentTimeMillis() + QUERY_TIMEOUT_MS
+            val futs = hit.second.map { (n, a, _) -> Triple(n, a, query(a, "get", extra + ("target" to target))) }
+            val got = futs.mapNotNull { (n, a, f) -> await(a, f, until)?.takeIf { !it.containsKey("__error") }?.let { Triple(n, a, it) } }
+            if (got.size >= maxOf(2, K / 2)) {
+                near[tkey(target)] = hit.first to got.map { Triple(it.first, it.second, it.third["token"] as? ByteArray) }
+                return got
+            }
+            near.remove(tkey(target))
+        }
+        return lookup(target)
     }
 
     /** @brief The newest validly signed item under (pub, salt) -> (v, seq). */
-    fun get(pub: ByteArray, salt: ByteArray): Pair<ByteArray, Long>? {
+    fun get(pub: ByteArray, salt: ByteArray, newerThan: Long? = null): Pair<ByteArray, Long>? {
         var best: Pair<ByteArray, Long>? = null
-        for ((_, _, r) in lookup(target(pub, salt))) {
+        for ((_, _, r) in closest(target(pub, salt), if (newerThan != null) mapOf("seq" to newerThan) else emptyMap())) {
             val v = r["v"] as? ByteArray ?: continue
             val seq = r["seq"] as? Long ?: continue
             val sig = r["sig"] as? ByteArray ?: continue
@@ -455,9 +531,9 @@ class Dht(private val send: (ByteArray, InetSocketAddress) -> Unit,
     fun put(seed: ByteArray, salt: ByteArray, v: ByteArray, seq: Long): Int {
         val pub = LinkProto.edPub(seed)
         val sig = LinkProto.edSign(seed, sigBuffer(salt, seq, Bencode.enc(v)))
-        val closest = lookup(target(pub, salt)).filter { it.third["token"] is ByteArray }.take(K)
+        val nearest = closest(target(pub, salt)).filter { it.third["token"] is ByteArray }.take(K)
         val until = System.currentTimeMillis() + QUERY_TIMEOUT_MS
-        val futs = closest.map { (_, a, r) ->
+        val futs = nearest.map { (_, a, r) ->
             a to query(a, "put", mapOf("v" to v, "k" to pub, "seq" to seq, "sig" to sig, "salt" to salt, "token" to r["token"]!!))
         }
         return futs.count { (a, f) -> await(a, f, until)?.containsKey("__error") == false }
@@ -559,6 +635,8 @@ class LinkConfig(
     val bootstrap: List<String> = Dht.BOOTSTRAP,
     val dhtAllowPrivate: Boolean = false,
     val extraTargets: List<InetSocketAddress> = emptyList(),
+    /** Saved DHT id + nodes from the last session ([Dht.exportState]): a warm start. */
+    val dhtState: String = "",
 )
 
 /**
@@ -575,7 +653,10 @@ class Link(private val cfg: LinkConfig, private val log: (String) -> Unit = {}) 
     }
     private val keys = PairKeys(cfg.devPriv, cfg.srvPub)
     private val devPub = LinkProto.x25519Pub(cfg.devPriv)
-    private val dht: Dht? = if (cfg.dht) Dht({ d, a -> sendTo(d, a) }, cfg.bootstrap, cfg.dhtAllowPrivate) else null
+    private val dht: Dht? = if (cfg.dht) Dht({ d, a -> sendTo(d, a) }, cfg.bootstrap, cfg.dhtAllowPrivate).also { it.importState(cfg.dhtState) } else null
+
+    /** @brief The DHT id + nodes to keep for the next session ("" without the DHT). */
+    fun dhtState(): String = dht?.exportState() ?: ""
     @Volatile private var closed = false
     private val targets = LinkedHashMap<InetSocketAddress, String>()
     private val reflexive = ConcurrentHashMap<String, InetSocketAddress>()
@@ -746,7 +827,8 @@ class Link(private val cfg: LinkConfig, private val log: (String) -> Unit = {}) 
                 try { ready.get(250, TimeUnit.MILLISECONDS) } catch (e: java.util.concurrent.TimeoutException) { }
                 if (System.currentTimeMillis() > deadline) {
                     val n = lock.withLock { targets.size }
-                    throw LinkException(if (n == 0) "server not found (no gateway answered and nothing on the DHT yet)"
+                    throw LinkException(if (n == 0) "server not found (no gateway answered" +
+                                            (if (dht != null) "; DHT: ${dhtNote.ifEmpty { "no answer" }})" else "; the DHT is off in the app)")
                                         else "server not reachable (tried $n address(es); both sides may be behind strict NATs)")
                 }
             }
@@ -755,15 +837,35 @@ class Link(private val cfg: LinkConfig, private val log: (String) -> Unit = {}) 
     }
 
     private fun dhtFind(d: Dht) {
-        try {
-            val rec = LinkProto.sealRecord(keys.box, candidates(), "dev")
-            d.put(keys.devSeed, keys.knockSalt, rec, System.currentTimeMillis() / 1000)
-            if (ready.isDone) return
-            val got = d.get(LinkProto.edPub(keys.srvSeed), keys.srvSalt) ?: return
-            val (cands, _) = LinkProto.openRecord(keys.box, got.first, "srv") ?: return
-            lock.withLock { cands.forEach { addTarget(it, "dht") } }
-        } catch (e: Exception) { log("dht: ${e.message}") }
+        // Keep at it until linked (connect() interrupts this thread): a cold routing
+        // table often finds nothing on the first round, and the server may only just
+        // have (re)announced. Knock again now and then so the server punches back.
+        var lastKnock = 0L
+        var rounds = 0
+        while (!ready.isDone && !closed && !Thread.currentThread().isInterrupted) {
+            try {
+                val now = System.currentTimeMillis()
+                if (now - lastKnock >= 60_000) {
+                    lastKnock = now
+                    val rec = LinkProto.sealRecord(keys.box, candidates(), "dev")
+                    d.put(keys.devSeed, keys.knockSalt, rec, now / 1000)
+                }
+                if (ready.isDone) return
+                val got = d.get(LinkProto.edPub(keys.srvSeed), keys.srvSalt)   // cached nearest after the first
+                rounds++
+                if (got != null) {
+                    LinkProto.openRecord(keys.box, got.first, "srv")?.let { (cands, _) ->
+                        lock.withLock { cands.forEach { addTarget(it, "dht") } }
+                        dhtNote = "found the server's record (${cands.size} address(es))"
+                    }
+                } else dhtNote = "no record for this server on the DHT after $rounds lookup(s), ${d.nodeCount()} node(s) known"
+                Thread.sleep(10_000)
+            } catch (e: InterruptedException) { return
+            } catch (e: Exception) { dhtNote = "dht error: ${e.message}"; log("dht: ${e.message}")
+                try { Thread.sleep(5_000) } catch (ie: InterruptedException) { return } }
+        }
     }
+    @Volatile private var dhtNote = ""
 
     /** @brief Listen on 127.0.0.1; every accepted connection becomes a stream to the server's app. */
     fun serveLocal(port: Int = 0): Int {
