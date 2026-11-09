@@ -106,14 +106,26 @@
     if (d.log && d.log.length) h += `<div class="mt-2 text-gray-500">Log</div><ul class="text-[11px] text-gray-400">${d.log.map(l =>
       `<li>${esc(when(l.at))}${l.at ? " - " : ""}${esc(l.text)}</li>`).join("")}</ul>`;
     if (d.note) h += `<div class="text-[10px] text-gray-500 mt-1">${esc(d.note)}</div>`;
-    if (d.link) h += `<a href="${esc(d.link.url)}" target="_blank" class="text-sky-400 hover:text-sky-300 text-[11px]">${esc(d.link.label || d.link.url)} ↗</a>`;
-    if (d.pre != null) h += `<pre data-ui-pre class="bg-black/60 border border-gray-700 rounded p-2 mt-2 max-h-56 overflow-auto text-[10px] font-mono whitespace-pre-wrap">${esc(Array.isArray(d.pre) ? d.pre.join("\n") : d.pre)}</pre>`;
-    const oldPre = el.querySelector("[data-ui-pre]");
-    const atBottom = !oldPre || oldPre.scrollTop + oldPre.clientHeight >= oldPre.scrollHeight - 4;
-    el.innerHTML = h;
-    const pre = el.querySelector("[data-ui-pre]");
-    if (pre && atBottom) pre.scrollTop = pre.scrollHeight;
     const box = el.closest("[data-ui-section]");
+    // state beside the buttons, link at the end of them (inline when the section has none)
+    const stateEl = box.querySelector("[data-ui-state]");
+    if (stateEl) { stateEl.textContent = d.state || ""; stateEl.className = "text-xs " + (TONE[d.state_tone] || "text-gray-400"); }
+    else if (d.state) h += `<div class="${TONE[d.state_tone] || ""}">${esc(d.state)}</div>`;
+    const linkEl = box.querySelector("[data-ui-link]");
+    if (linkEl) {
+      linkEl.classList.toggle("hidden", !d.link);
+      if (d.link) { linkEl.href = d.link.url; linkEl.textContent = (d.link.label || d.link.url) + " ↗"; }
+    } else if (d.link) h += `<a href="${esc(d.link.url)}" target="_blank" class="text-sky-400 hover:text-sky-300 text-[11px]">${esc(d.link.label || d.link.url)} ↗</a>`;
+    let ph = "";
+    if (d.pre != null) ph = `<pre data-ui-pre class="bg-black/60 border border-gray-700 rounded p-2 mt-2 ${d.pre_height ? "" : "max-h-56 "}overflow-auto text-[10px] font-mono whitespace-pre-wrap"${d.pre_height ? ` style="height:${esc(d.pre_height)}"` : ""}>${esc(Array.isArray(d.pre) ? d.pre.join("\n") : d.pre)}</pre>`;
+    // a top section keeps its log below the pane's fields (its tail box)
+    const tail = document.getElementById(box.id + "_tail");
+    const preBox = tail || el;
+    const oldPre = preBox.querySelector("[data-ui-pre]");
+    const atBottom = !oldPre || oldPre.scrollTop + oldPre.clientHeight >= oldPre.scrollHeight - 4;
+    if (tail) { el.innerHTML = h; tail.innerHTML = ph; } else el.innerHTML = h + ph;
+    const pre = preBox.querySelector("[data-ui-pre]");
+    if (pre && atBottom) pre.scrollTop = pre.scrollHeight;
     box.querySelectorAll("button[data-ui-action]").forEach(b => { b.disabled = !!d.busy; });
     // a select an action reads its option from: filled from the view's list of {value, label}
     box.querySelectorAll("select[data-ui-options-from]").forEach(sel => {
@@ -136,6 +148,21 @@
     try { renderStatus(el, await fetch(sec.status_url).then(r => r.json()), sec); }
     catch (e) { renderStatus(el, null, sec); }
   }
+  /** @brief The section's buttons as rows: an action with newline starts a row, its
+   *  lead text in front; the state goes beside the first row, the link after the last. */
+  function actionRows(sec, sid, btn) {
+    const rows = [[]];
+    for (const a of sec.actions) { if (a.newline && rows[rows.length - 1].length) rows.push([]); rows[rows.length - 1].push(a); }
+    return rows.map((row, i) => `<div class="flex flex-wrap items-center gap-2 mb-2">${row.map(a =>
+        (a.lead ? `<span class="text-xs text-gray-400">${esc(a.lead)}</span>` : "")
+        + (a.options_from ? `<select data-ui-options-from="${esc(a.options_from)}" data-ui-for="${esc(a.id)}" class="text-xs bg-gray-700 border border-gray-600 rounded px-1 py-1 text-white"></select>` : "")
+        + btn({ id: `${sid}_${a.id}`, label: a.label, variant: a.variant || "secondary", size: "sm", title: a.title || undefined,
+              attrs: { "data-ui-action": a.id } })).join("")}`
+      + (i === 0 ? `<span class="text-xs text-gray-400" data-ui-state></span><span class="text-xs text-gray-400" data-ui-msg></span>` : "")
+      + (i === rows.length - 1 ? `<a data-ui-link target="_blank" class="hidden text-sky-400 hover:text-sky-300 text-xs"></a>` : "")
+      + `</div>`).join("");
+  }
+
   function section(sec) {
     let pane = sec.mount ? document.getElementById(sec.mount) : null;
     if (pane) pane.classList.remove("hidden");
@@ -147,18 +174,25 @@
     if (!box) {
       box = document.createElement("div");
       box.id = sid; box.dataset.uiSection = sec.id; box.style.order = sec.order;
-      box.className = sec.mount ? "mt-2" : "mt-4 border-t border-gray-700 pt-3";
+      const top = !sec.mount && sec.placement === "top";
+      box.className = sec.mount ? "mt-2" : top ? "mb-4 border-b border-gray-700 pb-3" : "mt-4 border-t border-gray-700 pt-3";
       if (sec.feature) box.setAttribute("data-feature", sec.feature);
       const btn = typeof cimButton === "function" ? cimButton
         : (o => `<button type="button" id="${o.id}" class="px-3 py-1.5 rounded bg-blue-600 text-white text-sm">${esc(o.label)}</button>`);
       box.innerHTML = (sec.title ? `<div class="text-xs font-bold text-gray-300 mb-1">${esc(sec.title)}</div>` : "")
         + (sec.text ? `<p class="text-[11px] text-gray-500 mb-2">${esc(sec.text)}</p>` : "")
-        + (sec.actions.length ? `<div class="flex flex-wrap items-center gap-2 mb-2">${sec.actions.map(a =>
-            (a.options_from ? `<select data-ui-options-from="${esc(a.options_from)}" data-ui-for="${esc(a.id)}" class="text-xs bg-gray-700 border border-gray-600 rounded px-1 py-1 text-white"></select>` : "")
-            + btn({ id: `${sid}_${a.id}`, label: a.label, variant: a.variant || "secondary", size: "sm", title: a.title || undefined,
-                  attrs: { "data-ui-action": a.id } })).join("")}<span class="text-xs text-gray-400" data-ui-msg></span></div>` : "")
+        + (sec.actions.length ? actionRows(sec, sid, btn) : "")
         + `<div id="ui_status_${sec.module_id}_${sec.id}" class="text-xs text-gray-300"></div>`;
-      pane.appendChild(box);
+      if (top) {
+        // above the fields, after any earlier top sections (in order)
+        const after = [...pane.querySelectorAll(":scope > [data-ui-top]")].filter(x => +x.style.order <= sec.order).pop();
+        box.dataset.uiTop = "1";
+        pane.insertBefore(box, after ? after.nextSibling : pane.firstChild);
+        const tail = document.createElement("div");
+        tail.id = sid + "_tail";
+        if (sec.feature) tail.setAttribute("data-feature", sec.feature);
+        pane.appendChild(tail);
+      } else pane.appendChild(box);
       const msg = box.querySelector("[data-ui-msg]");
       for (const a of sec.actions) {
         box.querySelector(`#${sid}_${a.id}`).addEventListener("click", async () => {

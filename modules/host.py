@@ -164,9 +164,10 @@ class Host:
         module_id = module_id or self._current_module
         return f"/modules/{module_id}/static/{filename}"
 
-    def add_settings_tab(self, tab_id, label, icon="", admin_only=False, group="modules"):
+    def add_settings_tab(self, tab_id, label, icon="", admin_only=False, group="modules", columns=1):
         """! @brief Add a Settings tab; the module's own JS fills its pane.
         @param group       rail group: "you", "server", "admin" or "modules".
+        @param columns     settings fields side by side on wide screens (1 or 2).
         @param admin_only  block the tab for every non-admin role by default.
         The tab gets the permission settings.<tab_id>: read shows it, write saves it.
         Several modules may share one tab by passing the same id: the first
@@ -178,6 +179,7 @@ class Host:
         self.settings_tabs.append({
             "id": tab_id, "label": label, "icon": icon,
             "admin_only": bool(admin_only), "group": group or "modules",
+            "columns": 2 if columns == 2 else 1,
             "feature": feature,
             "module_id": self._current_module,
         })
@@ -467,11 +469,13 @@ class Host:
 
     def add_settings_section(self, pane, uid, *, title=None, text=None, status_url=None,
                              status=None, actions=(), poll=None, feature=None, order=100,
-                             mount=None):
+                             mount=None, placement="end"):
         """! @brief A block in a settings pane: `text`, a status view and action buttons.
         @param pane        a module tab's id, or a core pane ("storage", "general", ...).
         @param mount       id of an element inside the pane to render into (unhidden);
                            default: appended to the pane.
+        @param placement   "end" (after the pane's settings fields) or "top" (buttons and
+                           status above the fields, the view's "pre" log below them).
         @param status_url  a GET route of the module whose reply holds the view, either
                            at top level or under "view" (so the route keeps its other
                            fields): any of
@@ -486,9 +490,13 @@ class Host:
                             `message` (or `note`) is shown, `error` is a failure.
                             options_from names a view key holding [{"value", "label"}]: a
                             select next to the button, its value posted as `option`.
-                           The view may also carry "pre" (a log: text or lines), "link"
-                           ({"url", "label"}) and "live": true (re-read every `poll`
-                           seconds while the pane is on screen).
+                            "newline": true starts a new row of buttons at that action,
+                            "lead" is muted text in front of it ("No koboldcpp?").
+                           The view may also carry "pre" (a log: text or lines),
+                           "pre_height" (CSS height of that log, e.g. "14rem"), "link"
+                           ({"url", "label"}, shown at the end of the buttons), "state"
+                           (text beside the first row of buttons) and "live": true
+                           (re-read every `poll` seconds while the pane is on screen).
         @param feature     gate; defaults to the pane's settings.<pane> permission.
         """
         feature = feature or f"settings.{pane}"
@@ -499,9 +507,11 @@ class Host:
         for a in actions:
             url = a.get("url") or self._ui_route("section", uid, "action_" + a["id"], a["run"],
                                                  feature=feature, level=a.get("level", "write"))
-            acts.append({k: a.get(k) for k in ("id", "label", "variant", "title", "confirm", "options_from")} | {"url": url})
+            acts.append({k: a.get(k) for k in ("id", "label", "variant", "title", "confirm", "options_from",
+                                               "newline", "lead")} | {"url": url})
         self.ui["sections"].append({
             "pane": pane, "id": uid, "title": title, "text": text, "poll": poll, "order": order,
+            "placement": "top" if placement == "top" else "end",
             "feature": feature, "status_url": status_url, "actions": acts, "mount": mount,
             "module_id": self._current_module})
 

@@ -268,9 +268,9 @@ def register(host):
                 "endpoint_applied": (cfg.get("oai_endpoint") or "").startswith(_url(cfg)),
                 "log": list(_LOG)[-80:],
                 # the settings tab's block (host.add_settings_section)
-                "view": {"rows": [{"label": "koboldcpp", "value": state, "tone": "ok" if ready else None}],
+                "view": {"state": state, "state_tone": "ok" if ready else None,
                          "link": {"url": RELEASES_URL, "label": "all releases"},
-                         "pre": list(_LOG)[-80:], "live": True, "busy": _DL["busy"],
+                         "pre": list(_LOG)[-80:], "pre_height": "14rem", "live": True, "busy": _DL["busy"],
                          "builds": [{"value": k, "label": v[1]} for k, v in _BUILDS.items()]}}
 
     def api_status():
@@ -304,12 +304,13 @@ def register(host):
                    level="write", action="kobold_start")
     host.add_route("/api/kobold/stop", api_stop, methods=["POST"], feature="settings.kobold",
                    level="write", action="kobold_stop")
-    host.add_settings_tab("kobold", "Kobold", admin_only=True)
-    host.add_settings_section("kobold", "server", status_url="/api/kobold/status", poll=2, order=0,
+    host.add_settings_tab("kobold", "Kobold", admin_only=True, columns=2)
+    host.add_settings_section("kobold", "server", status_url="/api/kobold/status", poll=2, order=0, placement="top",
                               actions=[{"id": "start", "label": "\u25b6 Start", "url": "/api/kobold/start", "variant": "ok"},
                                        {"id": "stop", "label": "\u25a0 Stop", "url": "/api/kobold/stop", "variant": "danger"},
                                        {"id": "download", "label": "\u2b07 Download build", "url": "/api/kobold/download",
-                                        "variant": "neutral", "options_from": "builds", "title": "No koboldcpp? Fetch a release build"}])
+                                        "variant": "neutral", "options_from": "builds", "newline": True,
+                                        "lead": "No koboldcpp?", "title": "Fetch the latest release build for this OS"}])
     host.provide_service("kobold", {"start": start, "stop": stop, "status": _status})
 
     if cfg.get("kobold_autostart") and cfg.get("kobold_model"):

@@ -521,7 +521,7 @@ const SPEED_BADGE = { fast: "fast", balanced: "balanced", accurate: "accurate" }
         // Fields with pane=<tab id> render here (same mount id scheme as core panes).
         const mount = document.createElement("div");
         mount.id = "module_settings_fields_" + t.id;
-        mount.className = "space-y-3 mb-3";
+        mount.className = t.columns === 2 ? "grid gap-x-4 gap-y-3 md:grid-cols-2 mb-3" : "space-y-3 mb-3";
         pane.appendChild(mount);
         paneWrap.appendChild(pane);
       }
