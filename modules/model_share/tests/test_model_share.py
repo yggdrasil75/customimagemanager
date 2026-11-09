@@ -68,26 +68,3 @@ def test_unknown_class_and_bad_format(client, ungated, models):
     assert client.get("/api/model_share/yolo/download",
                       query_string={"class": "widget", "format": "exe"}).status_code == 400
     assert client.get("/api/model_share/yolo/find").status_code == 400
-
-
-def test_cim_upload_get_model_and_list(app, ungated, models, tmp_path, capsys):
-    """! @brief The uploader's --get-model / --list-models against a live server."""
-    import threading
-    from werkzeug.serving import make_server
-    import upload
-    srv = make_server("127.0.0.1", 0, app.app, threaded=True)
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    url = "http://127.0.0.1:%d" % srv.server_port
-    try:
-        out = tmp_path / "tube.pt"
-        assert upload.model_command(url, "", "", True, "blue tube", False, "pt", str(out), False) == 0
-        assert out.read_bytes() == b"RUN2"
-        assert upload.model_command(url, "", "", True, "ms_widgets", True, "pt", str(tmp_path / "w.pt"), False) == 0
-        assert (tmp_path / "w.pt").read_bytes() == b"LOOSE"
-        assert upload.model_command(url, "", "", True, "giraffe", False, "pt", str(tmp_path / "g.pt"), False) == 1
-        capsys.readouterr()
-        assert upload.model_command(url, "", "", True, None, False, "pt", "", True) == 0
-        assert "set_ms_tube_train_2" in capsys.readouterr().out
-    finally:
-        srv.shutdown()

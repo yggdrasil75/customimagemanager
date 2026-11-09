@@ -91,7 +91,7 @@
     const devs = data.devices;
     p.innerHTML = `<div class="fs-root">
       <section class="fs-card">
-        <h3>My devices <small>devices that act as <b>${esc(me)}</b> (phones running the app, other clients)</small></h3>
+        <h3>My devices <small>phones and other clients, paired as <b>${esc(me)}</b></small></h3>
         ${data.inbound ? "" : `<p class="fs-err">Receiving from devices is switched off on this server (Peer share options).</p>`}
         <table class="fs-table"><thead><tr><th>Name</th><th>Uploads land in</th><th>The device sees</th><th>On</th>
           <th>Pairing</th><th></th></tr></thead>
