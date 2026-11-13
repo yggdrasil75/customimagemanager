@@ -350,11 +350,17 @@ def register(host):
             _flush_embeddings(db, pending)
         return embedded
 
-    def _img_loader(rel):
+    def _img_loader(rel, cache=True):
+        """! @param cache  False for library sweeps: each image is decoded once, so its
+        full-res array must not be parked in the core decode cache."""
         fp, err = host.core.resolve_media(rel)
         if err:
             return None
-        img = host.core.read_image(fp)        # core decoder: JXL too, unlike cv2.imread
+        try:
+            # core decoder: JXL too, unlike cv2.imread
+            img = host.core.read_image(fp, cache=cache)
+        except TypeError:                       # a core without the cache switch
+            img = host.core.read_image(fp)
         return og.downscale_to_cap(host.core.to_bgr(img)) if img is not None else None
 
     def _img_mtime(rel):
@@ -389,7 +395,7 @@ def register(host):
                 failed["embed"] += 1
             return v
         def _load(rel):
-            img = _img_loader(rel)
+            img = _img_loader(rel, cache=False)
             if img is None:
                 failed["load"] += 1
             return img
@@ -441,15 +447,27 @@ def register(host):
         with host.app.app_context():
             return _bg_run_batch(rels, handle)
 
+    ## @brief One decode pool for the life of the process. A fresh 8-thread pool per
+    # 32-image batch gave every batch new threads (and new malloc arenas) to decode
+    # full-res images in, so freed decode buffers were scattered over arenas the
+    # allocator never returned to the OS: RSS climbed for as long as the sweep ran.
+    _decode_pool = {"ex": None}
+    _decode_pool_lock = threading.Lock()
+
+    def _decoder():
+        with _decode_pool_lock:
+            if _decode_pool["ex"] is None:
+                from concurrent.futures import ThreadPoolExecutor
+                _decode_pool["ex"] = ThreadPoolExecutor(max_workers=8, thread_name_prefix="embed-decode")
+            return _decode_pool["ex"]
+
     def _bg_run_batch(rels, handle):
-        from concurrent.futures import ThreadPoolExecutor
         db = host.db()
         tag = _embed_tag(handle, role="bg")
         todo = [r for r in rels if not _have_embedding(db, r, tag, _img_mtime(r))]
         if not todo:
             return
-        with ThreadPoolExecutor(max_workers=min(8, len(todo))) as ex:
-            imgs = list(ex.map(lambda r: _safe_load(r), todo))
+        imgs = list(_decoder().map(_safe_load, todo))
         pairs = [(r, im) for r, im in zip(todo, imgs) if im is not None]
         failed = [r for r, im in zip(todo, imgs) if im is None]
         vecs = []
@@ -476,6 +494,7 @@ def register(host):
                 continue
             v = _normalise(np.asarray(v, np.float32))
             rows.append((r, len(v), _pack(v), tag, _img_mtime(r), time.time()))
+        del pairs, imgs, vecs                     # the decoded images, before the DB write
         if rows:
             _flush_embeddings(db, rows)
         if failed:
@@ -487,7 +506,7 @@ def register(host):
         # decode threads are fresh threads: give them the app context the worker has
         try:
             with host.app.app_context():
-                return _img_loader(rel)
+                return _img_loader(rel, cache=False)
         except Exception:
             return None
 
@@ -869,7 +888,10 @@ def register(host):
     # to the text clears a threshold and leaves the order to the normal sort.
     # The kept set is computed once per (text, model, settings, library state)
     # and cached in memory (LRU), so paging, counts and the timeline's many
-    # bucket queries reuse it.
+    # bucket queries reuse it. The library state is stored WITH the entry, not in
+    # its key: while the background sweep runs every batch changes it, and as part
+    # of the key each change added a new entry (each holding up to the whole
+    # library's rel_paths) beside the stale ones instead of replacing them.
     _ABOUT_CACHE_SIZE = 32
     _about_cache = OrderedDict()
     _about_lock = threading.Lock()
@@ -909,15 +931,18 @@ def register(host):
                              (model,)).fetchone()
         if not n:
             return [], f"No embeddings for the current model '{model}'."
-        key = (pos_text, tuple(neg_texts), model, n, last,
+        key = (pos_text, tuple(neg_texts), model,
                *(host.config.get(k) for k in ("semantic_filter_threshold", "semantic_filter_top",
                                               "semantic_relative_cutoff", "semantic_min_score",
                                               "semantic_negative_weight")))
+        version = (n, last)
         with _about_lock:
             hit = _about_cache.get(key)
-            if hit is not None:
+            if hit is not None and hit[0] == version:
                 _about_cache.move_to_end(key)
-                return hit, None
+                return hit[1], None
+            if hit is not None:
+                del _about_cache[key]            # stale: drop it now, not after 32 more
         embed_text = _text_embedder()
         if embed_text is None:
             return [], "The picked embedding model can't embed text."
@@ -934,7 +959,7 @@ def register(host):
                 idx = idx[np.argsort(-sc[idx])[:cap]]
             kept = sorted(names[i] for i in idx)
         with _about_lock:
-            _about_cache[key] = kept
+            _about_cache[key] = (version, kept)
             _about_cache.move_to_end(key)
             while len(_about_cache) > _ABOUT_CACHE_SIZE:
                 _about_cache.popitem(last=False)

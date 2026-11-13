@@ -1347,8 +1347,11 @@ def get_safe_path(base_dir: str, user_path: str) -> str | None:
             return None
     return abs_target
 
-def read_jxl(path: str) -> np.ndarray | None:
+def read_jxl(path: str, cache: bool = True) -> np.ndarray | None:
     """! @brief Decode a stored image (or a video's poster frame), cached on mtime.
+    @param cache  False for one-pass library sweeps (embedding): their full-res decodes
+                  are never asked for again and would fill the 48-entry cache with
+                  arrays nothing reuses.
     @return uint8 (h, w) gray, (h, w, 3) RGB or (h, w, 4) RGBA; None when missing
             or undecodable (logged).
     """
@@ -1365,6 +1368,8 @@ def read_jxl(path: str) -> np.ndarray | None:
         if path.lower().endswith(".jxl"):
             # a JXL's Orientation lives in its sidecar: a rotate changes only that
             mtime = max(mtime, _getmtime_loose(os.path.splitext(path)[0] + ".xmp"))
+        if not cache:
+            return _decode_jxl_uncached(path)
         return _decode_cached(path, mtime)
     except OSError:
         access_logger.warning(f"read_jxl: file missing: {path}")
