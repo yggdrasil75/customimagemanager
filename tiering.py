@@ -111,6 +111,7 @@ def save_cfg(cfg):
     """! @brief Validate and save the tier config (legacy file only when no host store is wired)."""
     clean = _sanitize_cfg(cfg)
     _state["cfg"] = clean
+    _status_cache["at"] = 0.0
     storer = _state.get("store_cfg")
     if storer:
         storer(clean)
@@ -304,6 +305,7 @@ def plan(db=None, aggressive=False):
     # 3) compare with where files are, with hysteresis
     hyst = cfg["hysteresis"]
     moves = []
+    tier_actual = {}  # tier index -> bytes on disk, walked once per plan (not once per file)
     for f in files:
         tgt, cur = assign[f["rel"]], f["cur"]
         if cur == tgt:
@@ -312,7 +314,9 @@ def plan(db=None, aggressive=False):
         # meaningfully off budget or too slow for it.
         if cur is not None and not aggressive:
             too_slow = (f["kind"] == "video" and cur > _video_floor_tier(f["bitrate"], cfg))
-            actual_used = _tier_usage_bytes(cur, cfg)
+            if cur not in tier_actual:
+                tier_actual[cur] = _tier_usage_bytes(cur, cfg)
+            actual_used = tier_actual[cur]
             off_budget = actual_used > budget[cur] * (1 + hyst)
             if not too_slow and not off_budget and abs(cur - tgt) <= 1:
                 continue
@@ -767,6 +771,7 @@ def rebalance(block=False, aggressive=False, manual=False):
         finally:
             run["active"] = False
             run["last_run"] = time.time()
+            _status_cache["at"] = 0.0
     if block:
         work()
     else:
@@ -805,13 +810,33 @@ def moving():
     return {"active": bool(run.get("active")) and run.get("phase") == "moving",
             "rel": run.get("current")}
 
-def status():
-    cfg = _state["cfg"] or load_cfg()
+_status_cache = {"at": 0.0, "stats": []}
+_status_lock = threading.Lock()
+
+
+def _status_stats(max_age=30.0):
+    """! @brief Per-tier stats for status(), cached and computed by one caller at a time.
+    plan() loads every file row and walks the library; the Storage tab polls every few
+    seconds, so an uncached plan per poll piled up concurrent plans (each holding the
+    whole file list) whenever one took longer than the poll interval."""
+    if time.time() - _status_cache["at"] < max_age:
+        return _status_cache["stats"]
+    if not _status_lock.acquire(blocking=False):
+        return _status_cache["stats"]  # another poll is computing it: serve the last one
     try:
         _, stats = plan()
+        _status_cache.update(at=time.time(), stats=stats)
     except Exception as e:
-        stats = []
         log.error(f"status plan failed: {e}")
+        _status_cache["at"] = time.time()
+    finally:
+        _status_lock.release()
+    return _status_cache["stats"]
+
+
+def status():
+    cfg = _state["cfg"] or load_cfg()
+    stats = _status_stats()
     # the Storage tab polls this every few seconds: the walk is shared and cached
     u = usage(max_age=15.0)
     media_bytes = u["total"] - sum(t["bytes"] for t in u["tiers"])

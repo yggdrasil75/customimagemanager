@@ -389,6 +389,8 @@ async function loadStorageTab() {
     { name: 'ssd',  ratio: 50, speed_mbps: 500 },
     { name: 'hdd',  ratio: 45, speed_mbps: 150 }]).forEach(addTierRow);
   refreshTiersStatus();
+  // re-entering the tab must not stack a second interval on top of the first
+  stopTiersPoll();
   _tiersPoll = setInterval(refreshTiersStatus, 4000);
 }
 
@@ -466,10 +468,19 @@ function _statusRow(label, sub, files, bytes, barPct, barColor) {
       </div>${bar}</div>`;
 }
 
+let _tiersStatusBusy = false;
 async function refreshTiersStatus() {
   const el = document.getElementById('tiers_status');
   if (!el) return;
-  const r = await fetch('/api/tiers/status').then(r => r.json()).catch(() => null);
+  // a slow status call must not queue another request every tick
+  if (_tiersStatusBusy) return;
+  _tiersStatusBusy = true;
+  let r;
+  try {
+    r = await fetch('/api/tiers/status').then(r => r.json()).catch(() => null);
+  } finally {
+    _tiersStatusBusy = false;
+  }
   if (!r?.success) { el.textContent = 'Status unavailable.'; return; }
   const run = r.run || {};
   const worker = `<div class="text-[11px] text-gray-500 mb-2">Worker:
