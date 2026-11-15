@@ -174,6 +174,10 @@ def wait_for_space(*paths: str, stop=None, poll: float = 30.0) -> bool:
         log.info("resumed: space freed on %s", warned)
     return True
 
+import threading as _threading
+_FETCH_LOCKS: dict = {}
+_FETCH_LOCKS_GUARD = _threading.Lock()
+
 def fetch_file(url: str, dest: str, min_bytes: int = 1 << 16) -> str:
     """! @brief Download `url` to `dest` unless it is already there (atomic via .part).
     @param min_bytes  smaller downloads are rejected: a CDN 404 page is not a model.
@@ -182,17 +186,30 @@ def fetch_file(url: str, dest: str, min_bytes: int = 1 << 16) -> str:
     if os.path.exists(dest):
         return dest
     import urllib.request
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    tmp = dest + ".part"
-    wait_for_space(dest)
-    try:
-        urllib.request.urlretrieve(url, tmp)
-        if os.path.getsize(tmp) < min_bytes:
-            raise RuntimeError(f"{url}: {os.path.getsize(tmp)} bytes, not a model")
-        os.replace(tmp, dest)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+    dest = os.path.abspath(dest)
+    with _FETCH_LOCKS_GUARD:
+        lock = _FETCH_LOCKS.setdefault(dest, _threading.Lock())
+    # Concurrent callers (dedup scores groups in parallel) used to share one
+    # dest.part: the first to finish renamed it away and the rest died with
+    # FileNotFoundError (or kept writing into the renamed file). One download
+    # per dest; waiters return the finished file.
+    with lock:
+        if os.path.exists(dest):
+            return dest
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp = f"{dest}.{os.getpid()}.{_threading.get_ident()}.part"
+        wait_for_space(dest)
+        try:
+            urllib.request.urlretrieve(url, tmp)
+            size = os.path.getsize(tmp)
+            if size < min_bytes:
+                raise RuntimeError(f"{url}: {size} bytes, not a model")
+            os.replace(tmp, dest)
+        finally:
+            try:
+                os.remove(tmp)
+            except FileNotFoundError:
+                pass
     return dest
 
 
