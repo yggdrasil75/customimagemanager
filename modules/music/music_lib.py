@@ -18,7 +18,7 @@ librosa, HAVE_LIBROSA = optional_import("librosa")
 KMeans, HAVE_SKLEARN = optional_import("sklearn.cluster", attr="KMeans", quiet=True)
 
 # Containers we understand. Kept lowercase, with dot.
-MUSIC_EXTS = {".mp3", ".flac", ".m4a", ".mp4", ".aac",
+MUSIC_EXTS = {".mp3", ".flac", ".m4a", ".m4p", ".mp4", ".aac",
               ".ogg", ".oga", ".opus", ".wav", ".wma", ".aiff", ".aif"}
 
 EMB_DIM = 62          # MFCC(20*2) + chroma(12) + contrast(7) + tempo(1) + zcr(1) + rms(1)

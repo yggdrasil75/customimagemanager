@@ -205,14 +205,14 @@ def register(host):
 
     ## @brief Background sweep (Models -> Image quality -> "Run in background"): images
     # with no user rating that the background IQA model hasn't scored yet.
-    def _bg_pending(db, n):
+    def _bg_pending(db, n, after=""):
         model = host.broker.selected_id("iqa", "bg") or ""
         return [r["rel_path"] for r in db.execute(
             "SELECT f.rel_path FROM files f LEFT JOIN ratings r ON r.rel_path=f.rel_path "
             "WHERE f.media_kind='image' AND (f.comic_folder IS NULL OR f.comic_folder='') "
             "AND (r.rel_path IS NULL OR (r.user_stars IS NULL AND "
             "(r.iqa_stars IS NULL OR COALESCE(r.iqa_model,'')<>?))) "
-            "ORDER BY f.rel_path LIMIT ?", (model, n)).fetchall()]
+            "AND f.rel_path > ? ORDER BY f.rel_path LIMIT ?", (model, after, n)).fetchall()]
 
     def _bg_run(rel, fp, detect):
         img = core.read_image(fp)

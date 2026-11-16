@@ -1392,6 +1392,12 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
             # the first frame only: index=None decodes every frame of an animation
             # into memory (a long 1080p animation is tens of GB) to keep frame 0
             img = mt.jxl_decode(data, index=0)
+        elif mt.is_svg(path):
+            # a vector logo: rasterized for whoever needs pixels; the .svg stays as it is
+            img = mt.decode_svg(path)
+            if img is None:
+                access_logger.warning(f"read_jxl: svg not rasterizable ({mt.missing_decoder(path) or 'rasterizer failed'}): {path}")
+                return None
         elif mt.is_raw(path):
             # a camera raw found on disk is shown in place (indexed only with rawpy)
             img = mt.decode_raw(path)
@@ -3807,6 +3813,15 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
             resp.last_modified = mtime
         return resp
 
+    if mt.is_svg(abs_path) and not _image_adjust(abs_path)["crop"]:
+        # a vector's best thumbnail is itself: the tile's <img> scales it sharply, and
+        # it is smaller than a JPEG of it (a crs: crop still goes through pixels)
+        data = _read_bytes_loose(abs_path)
+        if data:
+            resp = _finish(data, "image/svg+xml")
+            resp.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+            resp.headers["X-Content-Type-Options"] = "nosniff"
+            return resp
     got = thumb_bytes(rel_path, abs_path, mtime)
     if got is None:
         return "", 404
@@ -4050,9 +4065,14 @@ def _folder_scope_clause(column: str, folder: str, recursive: bool = False) -> t
         return ([], []) if recursive else ([f"{column} NOT LIKE '%/%'"], [])
     if folder:
         f = folder.strip('/').replace('\\', '/')
+        # the range [f/, f0) ('0' sorts right after '/') lets SQLite seek the folder in
+        # the rel_path index instead of testing LIKE on every row of the library; it also
+        # keeps `_` / `%` in a folder name from matching other folders
+        rng = f"{column} >= ? AND {column} < ?"
+        lo, hi = f + '/', f + '0'
         if recursive:
-            return [f"{column} LIKE ?"], [f + '/%']
-        return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
+            return [f"({rng} AND {column} LIKE ?)"], [lo, hi, f + '/%']
+        return [f"({rng} AND {column} LIKE ? AND {column} NOT LIKE ?)"], [lo, hi, f + '/%', f + '/%/%']
     return [], []
 
 def _library_section(rel_path: str) -> tuple:
@@ -6779,7 +6799,12 @@ def api_file(filename):
             if path != fp:
                 return send_file(path, mimetype=extra, conditional=True)
         # conditional=True: Range requests, so <video> can seek
-        return send_file(fp, mimetype=mt.mime_for(filename), conditional=True)
+        resp = send_file(fp, mimetype=mt.mime_for(filename), conditional=True)
+        if mt.is_svg(fp):
+            # an SVG opened directly must not run its scripts on this origin
+            resp.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+            resp.headers["X-Content-Type-Options"] = "nosniff"
+        return resp
     access_logger.error("api_file: not found on disk %r", filename)
     return "",404
 

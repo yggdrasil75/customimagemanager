@@ -588,10 +588,11 @@ def _register_face_source():
 # them (FACE_BATCH) so the detector still gets one forward pass per batch.
 _body_dirty = {"v": False}
 
-def _face_sweep_pending(db, n):
+def _face_sweep_pending(db, n, after=""):
     rows = db.execute("SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 "
-                      "AND media_kind='image' ORDER BY rel_path LIMIT ?", (n,)).fetchall()
-    if not rows and _face_dirty["v"]:            # drained: trailing cluster pass
+                      "AND media_kind='image' AND rel_path > ? ORDER BY rel_path LIMIT ?",
+                      (after, n)).fetchall()
+    if not rows and not after and _face_dirty["v"]:  # drained: trailing cluster pass
         _face_dirty["v"] = False
         HOST.set_status("Face scan: clustering...")
         HOST.set_status(f"Face scan: done ({_recluster()} cluster(s)).")
@@ -600,10 +601,11 @@ def _face_sweep_pending(db, n):
 def _face_sweep_run(rels, fps, handle):
     _face_detect_batch(rels, face_run=handle, faces=True, bodies=False)
 
-def _body_sweep_pending(db, n):
+def _body_sweep_pending(db, n, after=""):
     rows = db.execute("SELECT rel_path FROM files WHERE COALESCE(body_done,0)=0 "
-                      "AND media_kind='image' ORDER BY rel_path LIMIT ?", (n,)).fetchall()
-    if not rows and _body_dirty["v"]:
+                      "AND media_kind='image' AND rel_path > ? ORDER BY rel_path LIMIT ?",
+                      (after, n)).fetchall()
+    if not rows and not after and _body_dirty["v"]:
         _body_dirty["v"] = False
         HOST.set_status(f"Body scan: done ({_recluster_bodies()} cluster(s)).")
     return [r[0] for r in rows]

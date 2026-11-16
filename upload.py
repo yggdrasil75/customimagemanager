@@ -407,7 +407,7 @@ IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.jxl', '.gif', '.
 VIDEO_EXTENSIONS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
                     '.mpeg', '.wmv', '.flv', '.ts', '.ogv'}
 AUDIO_EXTENSIONS = {'.mp3', '.flac', '.aac', '.ogg', '.oga', '.opus',
-                    '.wav', '.wma', '.aiff', '.aif'}
+                    '.wav', '.wma', '.aiff', '.aif', '.m4a', '.m4p'}
 RAW_EXTENSIONS = {
     '.dng', '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.srf', '.sr2',
     '.raf', '.rw2', '.orf', '.pef', '.ptx', '.raw', '.rwl', '.iiq', '.3fr',
@@ -445,7 +445,8 @@ del _ext
 SECTION_SIDECARS = {
     "movies": {".nfo", ".srt", ".vtt", ".ass", ".ssa", ".sub", ".idx", ".sup"},
     "tv":     {".nfo", ".srt", ".vtt", ".ass", ".ssa", ".sub", ".idx", ".sup"},
-    "music":  {".cue", ".log", ".m3u", ".m3u8", ".nfo"},
+    "music":  {".cue", ".log", ".m3u", ".m3u8", ".pls", ".xspf", ".wpl", ".nfo",
+               ".accurip", ".ffp", ".toc", ".md5", ".sfv", ".st5", ".crc", ".sha1", ".sha256"},
 }
 SIDECAR_EXTENSIONS = {".txt", ".xmp"} | set().union(*SECTION_SIDECARS.values())
 ## @brief The three sections every server has, for a server without GET /api/sections.

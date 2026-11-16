@@ -412,6 +412,11 @@ def register(host):
         elif not (ext in media.IMAGE_EXTS or ext in media.VIDEO_EXTS or media.is_raw(name)):
             if ext in media.registered_exts("exts"):
                 return "ignored"  # a module's kind (audio, books): its own scan
+            sid = media.library_section(rel)[0]
+            if sid is not None:
+                # a section stores every file type as sent (another app's library
+                # imports whole): its sidecars and extras are not leftovers
+                return "ignored"
             code, text = "unsupported", "unsupported extension %s" % (ext or "(none)")
         elif st.st_size == 0:
             code, text = "zero_byte", "the file is empty (0 bytes)"

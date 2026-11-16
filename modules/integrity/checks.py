@@ -153,7 +153,11 @@ TEMP_PREFIXES = ("~$", "~lock.")
 # files that are no media and nothing to report.
 BENIGN_EXTS = {".json", ".txt", ".log", ".ini", ".nfo", ".md5", ".sfv", ".sha1", ".sha256",
                ".url", ".lnk", ".xml", ".db", ".db-wal", ".db-shm", ".db-journal",
-               ".pp3", ".dop", ".on1", ".aae", ".thm"}
+               ".pp3", ".dop", ".on1", ".aae", ".thm",
+               # rips and downloads: cue sheets, rip / AccurateRip logs, checksums, playlists
+               ".cue", ".accurip", ".ffp", ".toc", ".st5", ".crc", ".sha512", ".md5sum",
+               ".m3u", ".m3u8", ".pls", ".xspf", ".wpl", ".asx",
+               ".srr", ".sfk", ".bak"}
 ## @brief Reason codes auto purge may act on (anything else is report + manual purge).
 AUTO_PURGE_CODES = ("temp", "zero_byte", "orphan_sidecar")
 ## @brief Days a file must be untouched before auto purge takes it.

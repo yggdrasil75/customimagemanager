@@ -173,12 +173,13 @@ def register(host):
                               "updated": time.time()})
 
     ## @brief Background sweep (Models -> Pose -> "Run in background").
-    def _bg_pending(db, n):
+    def _bg_pending(db, n, after=""):
         model = host.broker.selected_id("pose", "bg") or ""
         return [r["rel_path"] for r in db.execute(
             "SELECT f.rel_path FROM files f LEFT JOIN pose_runs p ON p.rel_path=f.rel_path AND p.model=? "
             "WHERE f.media_kind='image' AND (f.comic_folder IS NULL OR f.comic_folder='') "
-            "AND p.rel_path IS NULL ORDER BY f.rel_path LIMIT ?", (model, n)).fetchall()]
+            "AND p.rel_path IS NULL AND f.rel_path > ? ORDER BY f.rel_path LIMIT ?",
+            (model, after, n)).fetchall()]
 
     def _bg_run(rel, fp, handle):
         img = core.read_image(fp)

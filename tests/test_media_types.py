@@ -1,6 +1,7 @@
 """! @file
 @brief media_types.py: predicates, content sniffing, extension reconciliation, filename
 cleanup. The storage policy and converters are tested in modules/encoding/tests/test_convert.py."""
+import sqlite3
 import io
 import os
 import numpy as np
@@ -8,6 +9,8 @@ import pytest
 import media_types as mt
 from cimtest import png_bytes
 
+SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">'
+       b'<rect width="40" height="20" fill="#f00"/></svg>')
 
 def test_predicates():
     assert mt.is_video("x.mkv") and not mt.is_video("x.jxl")
@@ -170,3 +173,129 @@ def test_animated_jxl_is_never_decoded_whole_past_the_budget(tmp_path, monkeypat
     assert None not in calls
     monkeypatch.setattr(mt, "JXL_FRAMES_BUDGET", 1 << 30)
     assert len(mt.jxl_decode_frames(p)) == 6                        # fits: one decode
+
+
+def test_svg_is_an_image_with_a_mime():
+    assert mt.is_svg("logos/band.SVG") and mt.is_image("logos/band.svg")
+    assert mt.mime_for("band.svg") == "image/svg+xml"
+    assert mt.kind("band.svg") == "image"
+
+
+def test_svg_rasterizes_to_rgba(tmp_path):
+    if mt._svg_rasterizer() is None:
+        pytest.skip("no resvg-py / rsvg-convert")
+    p = tmp_path / "logo.svg"
+    p.write_bytes(SVG)
+    img = mt.decode_svg(str(p), size=200)
+    assert img is not None and img.ndim == 3 and img.shape[2] == 4
+    assert max(img.shape[:2]) == 200 and img.shape[1] == 2 * img.shape[0]  # aspect kept
+    assert tuple(img[10, 10][:3]) == (255, 0, 0)
+    assert mt.is_library_file(str(p)) and mt.missing_decoder(str(p)) is None
+
+
+def test_svg_reads_through_the_core(app, tmp_path):
+    if mt._svg_rasterizer() is None:
+        pytest.skip("no resvg-py / rsvg-convert")
+    p = tmp_path / "logo.svg"
+    p.write_bytes(SVG)
+    img = app.read_jxl(str(p), cache=False)
+    assert img is not None and img.shape[2] == 4
+
+
+def test_broken_svg_is_none(tmp_path):
+    p = tmp_path / "bad.svg"
+    p.write_bytes(b"<svg nope")
+    assert mt.decode_svg(str(p)) is None
+
+
+def test_m4a_is_not_corrected_to_mp4():
+    assert mt.ext_matches(".m4a", ".mp4") and mt.ext_matches(".m4p", ".mp4")
+
+
+def test_rip_sidecars_are_benign():
+    from modules.integrity import checks
+    assert {".cue", ".accurip", ".m3u", ".m3u8", ".ffp", ".pls"} <= checks.BENIGN_EXTS
+
+
+def _rows(sql, params, paths):
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE files(rel_path TEXT PRIMARY KEY)")
+    db.executemany("INSERT INTO files VALUES (?)", [(p,) for p in paths])
+    return sorted(r[0] for r in db.execute(f"SELECT rel_path FROM files WHERE {sql}", params))
+
+
+def test_section_sql_is_exact_and_case_insensitive():
+    mt.register_library_section("a_b", label="AB", kinds={"image"})
+    try:
+        paths = ["a_b/x.jpg", "A_B/y.jpg", "axb/z.jpg", "a_bc/w.jpg", "users/ann/a_b/v.jpg",
+                 "users/ann/axb/u.jpg", "users/ann/deep/a_b/t.jpg", "other/a_b/s.jpg"]
+        sql, p = mt.section_clause("a_b")
+        assert _rows(sql, p, paths) == ["A_B/y.jpg", "a_b/x.jpg", "users/ann/a_b/v.jpg"]
+        hide = mt.section_hide_clause()
+        assert "axb/z.jpg" in _rows(hide, [], paths) and "a_b/x.jpg" not in _rows(hide, [], paths)
+    finally:
+        mt.unregister_library_section("a_b")
+
+
+def test_folder_scope_uses_a_range(app):
+    paths = ["f_1/a.jpg", "f_1/sub/b.jpg", "fx1/c.jpg", "f_10/d.jpg", "top.jpg"]
+    cl, p = app._folder_scope_clause("rel_path", "f_1", False)
+    assert ">=" in cl[0] and _rows(cl[0], p, paths) == ["f_1/a.jpg"]
+    cl, p = app._folder_scope_clause("rel_path", "f_1", True)
+    assert _rows(cl[0], p, paths) == ["f_1/a.jpg", "f_1/sub/b.jpg"]
+
+
+def test_sweep_claims_read_on_from_a_cursor_and_wrap():
+    """A pending fn taking `after` is asked for the work past the last claim, and the
+    host wraps to the start once the end is reached."""
+    import types
+    from modules.host import Host
+
+    todo = [f"f{i:02d}" for i in range(10)]
+    calls = []
+
+    def pending(db, n, after=""):
+        calls.append(after)
+        return [r for r in todo if r > after][:n]
+
+    held = set()
+    tm = types.SimpleNamespace(max_slots=lambda: 8, try_acquire_model=lambda k: "",
+                               release_model=lambda t: None,
+                               try_acquire_key=lambda k: (k not in held) and not held.add(k))
+    fake = types.SimpleNamespace(
+        broker=types.SimpleNamespace(background_capabilities=lambda: ["cap"],
+                                     provider_for=lambda c, r: types.SimpleNamespace(key="m")),
+        thread_manager=tm, db=lambda: None, logger=None,
+        _sweep_inflight=0, _sweep_rr=0, _sweep_idle={}, _sweep_skip=set(), _sweep_done={},
+        _sweep_cursor={},
+        background_sweeps={"cap": {"pending": pending, "run": None, "batch": 4,
+                                   "takes_skip": False, "takes_after": True}})
+    claim = types.MethodType(Host._sweep_claim, fake)
+
+    j1 = claim(); held.clear(); fake._sweep_inflight = 0
+    j2 = claim(); held.clear(); fake._sweep_inflight = 0
+    assert j1["rel_paths"] == todo[:4] and j2["rel_paths"] == todo[4:8]
+    assert calls[:2] == ["", "f03"]
+    todo.remove("f01")                      # done meanwhile; f02 failed and is still to do
+    calls.clear()
+    j3 = claim()
+    # f08, f09 past the cursor, then the wrap picks up the rest from the start
+    assert j3["rel_paths"] == ["f08", "f09", "f00", "f02"] and calls == ["f07", ""]
+    assert fake._sweep_cursor["cap"] == "f02"
+
+
+def test_svg_is_served_as_the_vector(app, client):
+    """The viewer and the gallery tile get the .svg itself, sandboxed; pixels only for indexing."""
+    import os
+    rel = "svg_test/logo.svg"
+    fp = os.path.join(app.MEDIA_DIR, rel)
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
+    with open(fp, "wb") as f:
+        f.write(SVG)
+    try:
+        for url in (f"/api/file/{rel}", f"/api/thumb/{rel}"):
+            r = client.get(url)
+            assert r.status_code == 200 and r.mimetype == "image/svg+xml", url
+            assert r.data == SVG and "sandbox" in r.headers.get("Content-Security-Policy", "")
+    finally:
+        os.remove(fp)

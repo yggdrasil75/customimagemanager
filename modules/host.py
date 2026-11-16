@@ -71,6 +71,7 @@ class Host:
         self.declared_tables = {}
         self.background_sweeps = {}  # cap_id -> {pending, run, module_id}
         self._sweep_rr, self._sweep_idle, self._sweep_skip, self._sweep_done = 0, {}, set(), {}
+        self._sweep_cursor = {}  # cap -> the last rel_path claimed (pending fns taking `after`)
         self._sweep_inflight = 0
         # fn(db, rel_paths) -> {rel_path: {field: value}}, merged into listing rows
         self.file_enrichers = []
@@ -551,25 +552,34 @@ class Host:
         @param progress optional fn(db) -> {"done": int, "total": int} over the library,
                         shown as this capability's bar in Settings > Models.
         A pending fn that takes a `skip` keyword gets the rel_paths that failed this
-        session, so it can return the work after them. A run fn that raises an error
+        session, so it can return the work after them. One that takes an `after`
+        keyword gets the last rel_path claimed and returns only work past it
+        (`AND rel_path > ? ORDER BY rel_path`); the host wraps to the start once the
+        end is reached. Without it every claim re-reads the library from the top past
+        everything already done: ~0.5 s per claim at 300k files. A run fn that raises an error
         with a `.failed` list (part of a batch failed) has only those skipped.
         Detect / segment capabilities use the ingest path instead.
         """
         import inspect
         try:
-            takes_skip = "skip" in inspect.signature(pending).parameters
+            params = inspect.signature(pending).parameters
         except (TypeError, ValueError):
-            takes_skip = False
+            params = {}
+        takes_skip = "skip" in params
+        self._sweep_cursor.pop(cap_id, None)
         self.background_sweeps[cap_id] = {"pending": pending, "run": run,
                                           "batch": max(1, int(batch or 1)),
                                           "takes_skip": takes_skip,
+                                          "takes_after": "after" in params,
                                           "progress": progress,
                                           "module_id": self._current_module}
 
     def sweep_progress(self, max_age=15.0):
         """! @brief Every background sweep's progress: [{cap, enabled, done, total,
         failed, session_done, idle}]. done/total come from the sweep's progress fn
-        (cached max_age s: it counts the library); without one they are None."""
+        (cached max_age s: it counts the library, or 60x as long as the count took, so
+        a library where it takes a second is counted once a minute, not on every
+        poll); without one they are None."""
         now = time.time()
         cache = self.__dict__.setdefault("_sweep_prog_cache", {})
         enabled = set(self.broker.background_capabilities())
@@ -581,15 +591,16 @@ class Host:
             fn = sw.get("progress")
             if fn:
                 hit = cache.get(cap)
-                if hit and now - hit[0] < max_age:
+                if hit and now - hit[0] < max(max_age, hit[2] * 60):
                     row.update(hit[1])
                 else:
+                    t0 = time.perf_counter()
                     try:
                         got = dict(fn(self.db()) or {})
                     except Exception as e:
                         self.logger.warning(f"background {cap} progress: {e}")
                         got = {}
-                    cache[cap] = (now, got)
+                    cache[cap] = (now, got, time.perf_counter() - t0)
                     row.update(got)
             out.append(row)
         return out
@@ -622,17 +633,26 @@ class Host:
                 continue
             want = self.background_sweeps[cap]["batch"]
             n = max(16, want)
+            sw = self.background_sweeps[cap]
             while True:
                 try:
-                    pend = self.background_sweeps[cap]["pending"]
-                    if self.background_sweeps[cap].get("takes_skip"):
+                    pend = sw["pending"]
+                    kw = {}
+                    if sw.get("takes_skip"):
                         # skip files that failed this session in the query itself: a run of
                         # >1000 failures at the head of the order would otherwise hide all
                         # the work behind them and idle the sweep for good
-                        skip = {r for c, r in list(self._sweep_skip) if c == cap}
-                        rows = list(pend(self.db(), n, skip=skip))
+                        kw["skip"] = {r for c, r in list(self._sweep_skip) if c == cap}
+                    if sw.get("takes_after"):
+                        after = self._sweep_cursor.get(cap, "")
+                        rows = list(pend(self.db(), n, after=after, **kw))
+                        if len(rows) < n and after:
+                            # the end of the library: wrap once for what was passed over
+                            # (failed earlier, added since, or still in flight)
+                            seen = set(rows)
+                            rows += [r for r in pend(self.db(), n, after="", **kw) if r not in seen]
                     else:
-                        rows = list(pend(self.db(), n))
+                        rows = list(pend(self.db(), n, **kw))
                 except Exception as e:
                     self.logger.error(f"background {cap} pending: {e}"); rows = []
                 rels, keys = [], []
@@ -644,6 +664,9 @@ class Host:
                         rels.append(rel); keys.append(key)
                         if len(rels) >= want:
                             break
+                if sw.get("takes_after"):
+                    # read on from here next time (a wrap leaves it at the start again)
+                    self._sweep_cursor[cap] = rels[-1] if rels else (rows[-1] if rows else "")
                 if rels:
                     self._sweep_inflight += 1
                     return {"cap": cap, "rel_path": rels[0], "rel_paths": rels,

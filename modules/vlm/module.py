@@ -251,12 +251,13 @@ def register(host):
     host.add_table("CREATE TABLE IF NOT EXISTS classify_runs("
                    "rel_path TEXT PRIMARY KEY, model TEXT, class_name TEXT, conf REAL, updated REAL)", kind="cache")  # progress marker; the class is in the sidecar's analysis
 
-    def _cls_pending(db, n):
+    def _cls_pending(db, n, after=""):
         model = host.broker.selected_id("classify", "bg") or ""
         return [r["rel_path"] for r in db.execute(
             "SELECT f.rel_path FROM files f LEFT JOIN classify_runs c ON c.rel_path=f.rel_path AND c.model=? "
             "WHERE f.media_kind='image' AND (f.comic_folder IS NULL OR f.comic_folder='') "
-            "AND c.rel_path IS NULL ORDER BY f.rel_path LIMIT ?", (model, n)).fetchall()]
+            "AND c.rel_path IS NULL AND f.rel_path > ? ORDER BY f.rel_path LIMIT ?",
+            (model, after, n)).fetchall()]
 
     def _cls_run(rel, fp, handle):
         img = core.read_image(fp)

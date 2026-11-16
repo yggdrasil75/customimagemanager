@@ -317,9 +317,19 @@ def register(host):
             q = ""
         where_sql, params, _t, _s = core.files_where(
             q, (request.args.get("folder") or "").strip(), (request.args.get("album") or "").strip())
-        rows = host.db().execute(
-            f"SELECT path, rel_path FROM tag_tree WHERE rel_path IN "
-            f"(SELECT rel_path FROM files{where_sql})", params).fetchall()
+        db = host.db()
+        # IN (SELECT ...) builds the set of every file the grid lists (the whole library
+        # unfiltered); with fewer tag rows than files, probing files once per tag row
+        # (EXISTS on its primary key) is the cheaper way round
+        n_tags = db.execute("SELECT COUNT(*) FROM tag_tree").fetchone()[0]
+        n_files = db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        if n_tags < n_files:
+            scope = (f"{where_sql} AND rel_path=tag_tree.rel_path" if where_sql
+                     else " WHERE rel_path=tag_tree.rel_path")
+            sql = f"SELECT path, rel_path FROM tag_tree WHERE EXISTS (SELECT 1 FROM files{scope})"
+        else:
+            sql = f"SELECT path, rel_path FROM tag_tree WHERE rel_path IN (SELECT rel_path FROM files{where_sql})"
+        rows = db.execute(sql, params).fetchall()
         nodes, roots, files = {}, [], set()
         for r in rows:
             files.add(r["rel_path"])

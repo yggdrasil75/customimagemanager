@@ -671,10 +671,13 @@ def register(host):
         # registered verbatim as HIDE_CLAUSE, so swapping that text for a tautology
         # turns the grid's WHERE into "what the grid would list, archived or not".
         where_sql = where_sql.replace(HIDE_CLAUSE, "1=1")
+        # per archived row: one primary-key probe of files with the grid's WHERE (an
+        # IN (SELECT ...) built the whole gallery's set - every library row - per call)
+        scope = f"{where_sql} AND rel_path=a.rel_path" if where_sql else " WHERE rel_path=a.rel_path"
         live_sql = ("SELECT a.rel_path, a.archived_at, a.reason, f.width, f.height, "
                     "COALESCE(f.media_kind,'image') AS kind, 0 AS packed, NULL AS pack_id "
                     "FROM archived a JOIN files f ON f.rel_path=a.rel_path "
-                    f"WHERE a.rel_path IN (SELECT rel_path FROM files{where_sql})")
+                    f"WHERE EXISTS (SELECT 1 FROM files{scope})")
         live_params = list(params)
         pclauses, pparams = core.folder_scope_clause("m.rel_path", folder)
         if album:

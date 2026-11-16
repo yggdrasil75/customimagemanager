@@ -12,6 +12,7 @@ indexing, dedup, embeddings and thumbnails work on videos unchanged.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import shutil
 import struct
 import subprocess
 import threading
+import time
 import unicodedata
 import zlib
 
@@ -32,6 +34,7 @@ ImageSequence, _ = optional_import("PIL.ImageSequence")
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 rawpy, _HAVE_RAWPY = optional_import("rawpy", quiet=True)
 pillow_heif, _HAVE_PILLOW_HEIF = optional_import("pillow_heif", quiet=True)
+resvg_py, _HAVE_RESVG = optional_import("resvg_py", quiet=True)
 if _HAVE_PILLOW_HEIF:  # lets Pillow open .heic
     pillow_heif.register_heif_opener()
 
@@ -71,6 +74,68 @@ def _ftyp_brands(head: bytes) -> list:
 
 def is_heif(path: str) -> bool:
     return _ext(path) in HEIF_INPUT_EXTS
+
+# Vector stills (band / label logos, icons): stored and served as the .svg itself (the
+# viewer and the gallery tile show the vector; browsers draw it in an <img>). Pixels
+# are made only for what needs them - indexing (hashes, embeddings, detectors) and
+# the raster thumbnail other modules ask for - with resvg (pip: resvg-py, a
+# self-contained wheel), or librsvg's rsvg-convert when that is installed instead.
+SVG_EXTS = {'.svg'}
+## @brief Longest side an SVG is rasterized to for indexing (it has no pixels of its own).
+SVG_RASTER_SIZE = 1024
+## @brief [checked_at, tool]: library_image_exts() asks per file, a PATH search is not free.
+_SVG_TOOL = [0.0, None]
+
+
+def _svg_rasterizer():
+    """! @brief "resvg" | "rsvg" | None: what turns an SVG into pixels here
+    (looked up once a minute, so installing one is picked up without a restart)."""
+    now = time.monotonic()
+    if _SVG_TOOL[0] and now - _SVG_TOOL[0] < 60.0:
+        return _SVG_TOOL[1]
+    if _HAVE_RESVG:
+        tool = "resvg"
+    elif shutil.which("rsvg-convert"):
+        tool = "rsvg"
+    else:
+        tool = None
+    _SVG_TOOL[0], _SVG_TOOL[1] = now, tool
+    return tool
+
+
+def is_svg(path: str) -> bool:
+    return _ext(path) in SVG_EXTS
+
+
+def decode_svg(path: str, size: int = SVG_RASTER_SIZE):
+    """! @brief Rasterize an SVG: its longest side scaled to `size`, aspect kept. The
+    markup is read as a string, so references to other files or URLs are not followed.
+    @return uint8 (h, w, 4) RGBA, or None (no rasterizer, or a broken file)."""
+    tool = _svg_rasterizer()
+    png = None
+    try:
+        if tool == "resvg":
+            with open(path, "rb") as f:
+                text = f.read().decode("utf-8", "replace")
+            png = bytes(resvg_py.svg_to_bytes(svg_string=text, width=size))
+            with Image.open(io.BytesIO(png)) as im:
+                tall = im.height > size
+            if tall:  # width alone keeps the aspect: refit a tall logo to `size` high
+                png = bytes(resvg_py.svg_to_bytes(svg_string=text, height=size))
+        elif tool == "rsvg":
+            r = subprocess.run(["rsvg-convert", "-f", "png", "-a", "-w", str(size), "-h", str(size), path],
+                               capture_output=True, timeout=60)
+            if r.returncode == 0:
+                png = r.stdout
+    except Exception:
+        png = None
+    if not png:
+        return None
+    try:
+        with Image.open(io.BytesIO(png)) as im:
+            return np.asarray(im.convert("RGBA"))
+    except Exception:
+        return None
 
 # stored with their own extension
 VIDEO_EXTS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
@@ -208,10 +273,17 @@ def section_folders(section_id, media_dir):
     return out
 
 
+def _like_prefix(s):
+    """! @brief A LIKE pattern matching strings that start with `s` (ESCAPE '\\')."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 def _section_sql(sid, column, per_user, literal):
     """! @brief The SQL matching rows inside one section, exact on path segments
-    (LIKE would let `_` and `%` in an id match more). Per-user: the segment after
-    users/<name>/ is compared with substr/instr."""
+    (`_` / `%` escaped). A prefix LIKE (case-insensitive on ASCII, like lower(), and
+    run in C) does the per-row work: it is ~5x cheaper than lower(substr()) on every
+    row of the gallery's COUNT. Per-user: only rows under users/ compare the segment
+    after users/<name>/ with substr/instr."""
     pub = f"{sid}/"
     n = len(pub)
     ur = f"{SECTION_USER_ROOT}/"
@@ -221,14 +293,14 @@ def _section_sql(sid, column, per_user, literal):
     def val(v):
         # ids are [a-z0-9_] and the user root a plain word: safe to inline
         if literal:
-            return repr(v) if isinstance(v, str) else str(v)
+            return "'" + v.replace("'", "''") + "'" if isinstance(v, str) else str(v)
         params.append(v)
         return "?"
 
-    sql = f"lower(substr({column}, 1, {val(n)})) = {val(pub)}"
+    sql = f"{column} LIKE {val(_like_prefix(pub))} ESCAPE '\\'"
     if per_user:
         rest = f"substr({column}, {un + 1})"
-        sql += (f" OR (lower(substr({column}, 1, {val(un)})) = {val(ur)} AND instr({rest}, '/') > 0"
+        sql += (f" OR ({column} LIKE {val(_like_prefix(ur))} ESCAPE '\\' AND instr({rest}, '/') > 0"
                 f" AND lower(substr({column}, instr({rest}, '/') + {val(un + 1)}, {val(n)})) = {val(pub)})")
     return f"({sql})", params
 
@@ -305,6 +377,8 @@ def library_image_exts():
     policy turns uploads into: every still and animation the app decodes, HEIF with
     pillow-heif, camera raws with rawpy, plus the policy's own stored_image_exts()."""
     out = stored_image_exts() | STILL_INPUT_EXTS | ANIMATED_INPUT_EXTS | {'.jxl'}
+    if _svg_rasterizer():
+        out |= SVG_EXTS
     if _HAVE_PILLOW_HEIF:
         out |= HEIF_INPUT_EXTS
     if _HAVE_RAWPY:
@@ -321,6 +395,8 @@ def missing_decoder(path: str):
         return "rawpy not installed"
     if is_heif(path) and not _HAVE_PILLOW_HEIF:
         return "pillow-heif not installed"
+    if is_svg(path) and not _svg_rasterizer():
+        return "resvg-py not installed (pip install resvg-py)"
     return None
 
 
@@ -346,6 +422,7 @@ _IMAGE_MIME = {
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
     '.webp': 'image/webp', '.avif': 'image/avif', '.bmp': 'image/bmp',
     '.heic': 'image/heic', '.heif': 'image/heif', '.hif': 'image/heif',
+    '.svg': 'image/svg+xml',
 }
 
 def _ext(path: str) -> str:
@@ -358,7 +435,7 @@ def is_audio(path: str) -> bool:
     """! @brief True for an audio extension (False without the music module)."""
     return _ext(path) in _MEDIA_TYPES.get("audio", {}).get("exts", set())
 
-IMAGE_EXTS = STILL_INPUT_EXTS | ANIMATED_INPUT_EXTS | HEIF_INPUT_EXTS | {'.jxl', '.avif'}
+IMAGE_EXTS = STILL_INPUT_EXTS | ANIMATED_INPUT_EXTS | HEIF_INPUT_EXTS | SVG_EXTS | {'.jxl', '.avif'}
 
 def is_image(path: str) -> bool:
     """! @brief True for any image format the app reads."""
@@ -560,7 +637,7 @@ def jxl_anim_info(path: str) -> dict:
     @return a still ({"animated": False}) on any error.
     """
     default = {'animated': False, 'duration': None, 'n_frames': None}
-    if _ext(path) not in library_image_exts() - RAW_INPUT_EXTS - HEIF_INPUT_EXTS:
+    if _ext(path) not in library_image_exts() - RAW_INPUT_EXTS - HEIF_INPUT_EXTS - SVG_EXTS:
         return dict(default)
     try:
         key = (path, os.path.getmtime(path))
@@ -736,7 +813,7 @@ def mime_for(path: str) -> str | None:
 
 # what most browsers show natively
 SAFE_EXTS = {
-    'image': {'.jpg', '.jpeg', '.png', '.apng', '.gif', '.webp', '.avif', '.bmp'},
+    'image': {'.jpg', '.jpeg', '.png', '.apng', '.gif', '.webp', '.avif', '.bmp', '.svg'},
     'video': {'.mp4', '.m4v', '.webm', '.ogv', '.mov'},
     'audio': {'.mp3', '.wav', '.ogg', '.oga', '.opus', '.flac', '.aac', '.m4a'},
     'book':  {'.pdf', '.txt', '.htm', '.html'},
@@ -876,7 +953,7 @@ _EXT_ALIASES = [
     {'.jpg', '.jpeg'},
     {'.aiff', '.aif'},
     {'.mkv', '.webm'},  # Matroska
-    {'.mp4', '.m4v', '.mov'},  # ISO-BMFF
+    {'.mp4', '.m4v', '.mov', '.m4a', '.m4p'},  # ISO-BMFF
     {'.ogg', '.oga', '.opus', '.ogv'},  # Ogg
     {'.png', '.apng'},  # APNG is a PNG
     {'.heic', '.heif', '.hif'},  # HEIF

@@ -56,13 +56,17 @@ MANIFEST = {
     "assets":      ["music.js"],
 }
 
-# Containers that overlap with video (.mp4/.m4a) stay video so a real video
-# is never misfiled as a track.
-AUDIO_EXTS = sorted(ml.MUSIC_EXTS - {".mp4", ".m4a"})
+# .mp4 overlaps with video and stays video so a real video is never misfiled as
+# a track; .m4a / .m4p (iTunes AAC, FairPlay) are audio-only by definition.
+AUDIO_EXTS = sorted(ml.MUSIC_EXTS - {".mp4"})
 _MIME = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".aac": "audio/aac",
          ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/opus",
          ".wav": "audio/wav", ".wma": "audio/x-ms-wma", ".aiff": "audio/aiff",
-         ".aif": "audio/aiff"}
+         ".aif": "audio/aiff", ".m4a": "audio/mp4", ".m4p": "audio/mp4"}
+## @brief Non-media files a ripped / downloaded album carries: cue sheets, rip logs,
+# AccurateRip / checksum reports, playlists. Stored as sent beside the tracks.
+MUSIC_SIDECARS = {".cue", ".log", ".m3u", ".m3u8", ".pls", ".xspf", ".wpl", ".nfo",
+                  ".accurip", ".ffp", ".toc", ".md5", ".sfv", ".st5", ".crc", ".sha1", ".sha256"}
 
 
 def register(host):
@@ -71,7 +75,7 @@ def register(host):
     host.register_media_type("audio", exts=AUDIO_EXTS, mime_map=_MIME)
     # the folders that hold music: tracks, their art and descriptions
     host.register_library_section("music", label="Music", kinds={"audio", "video", "image", "book"},
-                                  sidecars={".cue", ".log", ".m3u", ".m3u8", ".nfo"})
+                                  sidecars=MUSIC_SIDECARS)
     def _migrate(conn):
         # has_cover: 1 / 0 once known, NULL until the track is (re)indexed
         try:
