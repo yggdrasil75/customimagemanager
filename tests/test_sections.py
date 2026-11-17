@@ -181,7 +181,9 @@ def test_api_sections(client, host, testsec):
     assert isinstance(by["testsec"]["folders"], list) and by["testsec"]["sidecars"] == []
     if "music" in host.library_sections():
         assert by["music"]["kinds"] == ["audio", "book", "image", "video"] and by["music"]["label"] == "Music"
-        assert by["music"]["sidecars"] == [".cue", ".log", ".m3u", ".m3u8", ".nfo"]
+        # the API lists the section's own set, sorted (the music module owns which ones)
+        assert by["music"]["sidecars"] == sorted(host.library_sections()["music"]["sidecars"])
+        assert {".cue", ".log", ".m3u", ".m3u8", ".nfo"} <= set(by["music"]["sidecars"])
     if "movies" in host.library_sections():
         assert by["movies"]["sidecars"] == [".ass", ".idx", ".nfo", ".srt", ".ssa", ".sub", ".sup", ".vtt"]
 

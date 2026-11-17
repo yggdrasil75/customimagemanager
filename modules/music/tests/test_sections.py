@@ -39,7 +39,9 @@ def _row(app, rel):
 def test_music_section_is_registered(host):
     sec = host.library_sections()["music"]
     assert sec["label"] == "Music" and sec["kinds"] == {"audio", "video", "image", "book"} and sec["per_user"]
-    assert sec["sidecars"] == {".cue", ".log", ".m3u", ".m3u8", ".nfo"}
+    from modules.music.module import MUSIC_SIDECARS
+    assert sec["sidecars"] == set(MUSIC_SIDECARS)
+    assert {".cue", ".log", ".m3u", ".m3u8", ".nfo"} <= sec["sidecars"]   # rip / playlist basics
 
 
 def test_audio_is_music_only_inside_a_section(app, host, tree):
