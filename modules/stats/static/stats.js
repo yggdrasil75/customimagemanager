@@ -1,8 +1,9 @@
 /* stats.js - the Stats & jobs settings tab (modules/stats).
- * Two panels side by side: Jobs (per-source table with Pause / Resume, running
- * jobs summed up per source with the files folded away, upload queue, memory /
- * VRAM bars; refreshed every 3 s while the tab is visible) and Server (counts,
- * storage bars, DB size, users, models, uptime, version). */
+ * Two panels side by side: Jobs (memory / VRAM / slot bars, a one-line summary,
+ * then a fixed-height box with three tabs - Sources with Pause / Resume, Running
+ * jobs, Recent jobs - whose lists scroll inside the box so nothing below or beside
+ * it gets pushed; refreshed every 3 s while the tab is visible) and Server
+ * (counts, storage bars, DB size, users, models, uptime, version). */
 (function () {
   "use strict";
   const TAB = "stats";
@@ -15,6 +16,7 @@
     : `<button type="button" id="${esc(o.id || "")}" class="px-2 py-0.5 rounded bg-blue-600 text-white text-xs">${esc(o.label)}</button>`;
   let timer = null;
   let paused = {};
+  let activeTab = "sources";
 
   /** @brief Bytes as a short human string. */
   function fmtBytes(b) {
@@ -61,10 +63,17 @@
           <span id="stats_msg" class="text-xs text-gray-400"></span>
         </div>
         <div id="stats_budgets" class="mb-2"></div>
-        <div id="stats_sources" class="mb-2 text-xs"></div>
-        <div id="stats_running" class="mb-2 text-xs"></div>
-        <div id="stats_queue" class="mb-2 text-xs text-gray-300"></div>
-        <div id="stats_history" class="text-xs"></div>
+        <div id="stats_summary" class="mb-2 text-xs text-gray-300"></div>
+        <div class="flex gap-1 border-b border-gray-700 text-xs" role="tablist">
+          <button type="button" data-stats-tab="sources" class="px-2 py-1 rounded-t">Sources <span id="stats_n_sources" class="text-gray-500"></span></button>
+          <button type="button" data-stats-tab="running" class="px-2 py-1 rounded-t">Running <span id="stats_n_running" class="text-gray-500"></span></button>
+          <button type="button" data-stats-tab="history" class="px-2 py-1 rounded-t">Recent <span id="stats_n_history" class="text-gray-500"></span></button>
+        </div>
+        <div class="h-80 overflow-y-auto text-xs border border-t-0 border-gray-700 rounded-b p-1">
+          <div id="stats_sources" data-stats-panel="sources"></div>
+          <div id="stats_running" data-stats-panel="running"></div>
+          <div id="stats_history" data-stats-panel="history"></div>
+        </div>
       </section>
       <section class="min-w-0 xl:border-l xl:border-gray-700 xl:pl-6">
         <h3 class="text-sm font-bold mb-2">Server</h3>
@@ -73,14 +82,32 @@
     pane.appendChild(root);
     $("stats_refresh").addEventListener("click", () => { refreshJobs(); refreshServer(); });
     root.addEventListener("click", ev => {
+      const t = ev.target.closest("[data-stats-tab]");
+      if (t) { showTab(t.getAttribute("data-stats-tab")); return; }
       const b = ev.target.closest("[data-stats-toggle]");
       if (!b) return;
       toggle(b.getAttribute("data-stats-toggle"), b.getAttribute("data-stats-paused") === "1");
     });
+    showTab(activeTab);
     if (window.CIMFeatures && CIMFeatures.apply) CIMFeatures.apply(root);
     return pane;
   }
   function msg(t) { const m = $("stats_msg"); if (m) m.textContent = t || ""; }
+
+  /** @brief Show one of the Jobs box's panels (sources / running / history); the box
+   *  keeps a fixed height so a long list scrolls inside it instead of pushing the page. */
+  function showTab(name) {
+    activeTab = name;
+    document.querySelectorAll("#stats_root [data-stats-panel]").forEach(p => {
+      p.style.display = p.getAttribute("data-stats-panel") === name ? "" : "none";
+    });
+    document.querySelectorAll("#stats_root [data-stats-tab]").forEach(b => {
+      const on = b.getAttribute("data-stats-tab") === name;
+      b.classList.toggle("bg-gray-700", on);
+      b.classList.toggle("text-white", on);
+      b.classList.toggle("text-gray-400", !on);
+    });
+  }
 
   /** @brief Pause or resume a worker source. */
   async function toggle(name, isPaused) {
@@ -117,56 +144,63 @@
       (st.held_keys && st.held_keys.length ? "; keys held: " + esc(st.held_keys.join(", ")) : "") + "</div>";
 
     paused = {};
-    const names = Object.keys(d.sources || {}).sort();
+    const sources = d.sources || {};
+    // stable order (a Pause button never moves under the pointer); idle rows are dimmed
+    const names = Object.keys(sources).sort();
     const rows = names.map(n => {
-      const s = d.sources[n];
+      const s = sources[n];
       paused[n] = !!s.paused;
       const b = btn({ label: s.paused ? "Resume" : "Pause", variant: s.paused ? "ok" : "warn", size: "xs",
         attrs: { "data-stats-toggle": n, "data-stats-paused": s.paused ? "1" : "0" } });
-      return `<tr class="${s.paused ? "text-amber-300" : ""}">
-        <td class="pr-2">${esc(n)}</td><td class="text-right pr-2">${s.running}</td>
+      const err = s.last_error ? `<span class="text-red-400" title="${esc(s.last_error)}">error</span>` : "";
+      const dim = !s.running && !s.paused ? " text-gray-400" : "";
+      return `<tr class="${s.paused ? "text-amber-300" : dim}">
+        <td class="pr-2 truncate max-w-[12rem]" title="${esc(n)}">${esc(n)}</td><td class="text-right pr-2">${s.running || ""}</td>
         <td class="text-right pr-2">${s.done}</td><td class="text-right pr-2 ${s.failed ? "text-red-400" : ""}">${s.failed}</td>
         <td class="text-right pr-2">${fmtSecs(s.avg_seconds)}</td><td class="text-right pr-2">${fmtSecs(s.last_seconds)}</td>
-        <td class="text-right pr-2">${fmtSecs(s.max_seconds)}</td><td class="pr-2">${s.paused ? "paused" : ""}</td>
-        <td>${b}</td></tr>` +
-        (s.last_error ? `<tr><td colspan="9" class="text-[10px] text-red-400 pl-2">last error: ${esc(s.last_error)}</td></tr>` : "");
+        <td class="text-right pr-2">${fmtSecs(s.max_seconds)}</td><td class="pr-2">${s.paused ? "paused" : err}</td>
+        <td>${b}</td></tr>`;
     }).join("");
     $("stats_sources").innerHTML = names.length
-      ? `<table class="w-full"><thead class="text-gray-500"><tr><th class="text-left">source</th><th class="text-right">running</th><th class="text-right">done</th><th class="text-right">failed</th><th class="text-right">avg</th><th class="text-right">last</th><th class="text-right">max</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+      ? `<table class="w-full"><thead class="text-gray-500 sticky top-0 bg-gray-900"><tr><th class="text-left">source</th><th class="text-right">running</th><th class="text-right">done</th><th class="text-right">failed</th><th class="text-right">avg</th><th class="text-right">last</th><th class="text-right">max</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : '<div class="text-gray-500">No worker sources registered.</div>';
     if (window.CIMFeatures && CIMFeatures.apply) CIMFeatures.apply($("stats_sources"));
 
-    // Running now: one line per source (count, longest); the per-file list is
-    // folded away so a busy pool doesn't push everything else off screen.
     const running = [];
-    names.forEach(n => (d.sources[n].running_jobs || []).forEach(j => running.push({ source: n, ...j })));
+    names.forEach(n => (sources[n].running_jobs || []).forEach(j => running.push({ source: n, ...j })));
     running.sort((a, b) => b.seconds - a.seconds);
     const bySource = {};
     for (const j of running) {
       const g = bySource[j.source] || (bySource[j.source] = { n: 0, longest: 0 });
       g.n++; g.longest = Math.max(g.longest, j.seconds || 0);
     }
-    const openRun = !!($("stats_running_list") && $("stats_running_list").open);
     $("stats_running").innerHTML = running.length
-      ? `<div><span class="text-gray-500">Running now (${running.length}):</span> ` +
-        Object.keys(bySource).sort().map(s => `${esc(s)} <b>${bySource[s].n}</b> <span class="text-gray-500">(longest ${fmtSecs(bySource[s].longest)})</span>`).join(", ") +
-        `</div><details id="stats_running_list" class="mt-0.5"${openRun ? " open" : ""}><summary class="text-[11px] text-gray-500 cursor-pointer">files</summary>
-          <div class="max-h-32 overflow-y-auto"><table class="w-full text-[11px]"><tbody>` +
-        running.map(j => `<tr><td class="pr-2 whitespace-nowrap">${esc(j.source)}</td><td class="pr-2 text-gray-500 truncate max-w-0 w-full">${esc(j.key || "")}</td><td class="text-right whitespace-nowrap">${fmtSecs(j.seconds)}</td></tr>`).join("") +
-        "</tbody></table></div></details>"
-      : '<div class="text-gray-500">Running now: nothing</div>';
-
-    const q = d.upload_queue || {};
-    const qk = Object.keys(q);
-    $("stats_queue").innerHTML = "Upload queue: " + (qk.length ? qk.map(k => esc(k) + " " + q[k]).join(", ") : "empty");
+      ? `<table class="w-full"><thead class="text-gray-500 sticky top-0 bg-gray-900"><tr><th class="text-left">source</th><th class="text-left">file / key</th><th class="text-right">elapsed</th></tr></thead><tbody>` +
+        running.map(j => `<tr><td class="pr-2 whitespace-nowrap">${esc(j.source)}</td><td class="pr-2 text-gray-400 truncate max-w-0 w-full" title="${esc(j.key || "")}">${esc(j.key || "")}</td><td class="text-right whitespace-nowrap">${fmtSecs(j.seconds)}</td></tr>`).join("") +
+        "</tbody></table>"
+      : '<div class="text-gray-500 p-1">Nothing running.</div>';
 
     const h = d.history || [];
     const failed = h.filter(j => !j.ok).length;
-    const openHist = !!($("stats_history_list") && $("stats_history_list").open);
     $("stats_history").innerHTML = h.length
-      ? `<details id="stats_history_list"${openHist ? " open" : ""}><summary class="text-gray-500 cursor-pointer">Recent jobs (${Math.min(h.length, 20)}${failed ? `, <span class="text-red-400">${failed} failed</span>` : ""})</summary>
-          <div class="max-h-48 overflow-y-auto"><table class="w-full text-[11px]"><tbody>${h.slice(0, 20).map(j => `<tr class="${j.ok ? "" : "text-red-400"}"><td class="pr-2 whitespace-nowrap">${when(j.started)}</td><td class="pr-2 whitespace-nowrap">${esc(j.source)}</td><td class="pr-2 text-gray-500 truncate max-w-0 w-full">${esc(j.key || "")}</td><td class="text-right pr-2 whitespace-nowrap">${fmtSecs(j.seconds)}</td><td class="whitespace-nowrap">${j.ok ? "ok" : esc(j.error)}</td></tr>`).join("")}</tbody></table></div></details>`
-      : '<div class="text-gray-500">Recent jobs: nothing finished yet</div>';
+      ? `<table class="w-full"><thead class="text-gray-500 sticky top-0 bg-gray-900"><tr><th class="text-left">started</th><th class="text-left">source</th><th class="text-left">file / key</th><th class="text-right">time</th><th class="text-left pl-2">result</th></tr></thead><tbody>` +
+        h.map(j => `<tr class="${j.ok ? "" : "text-red-400"}"><td class="pr-2 whitespace-nowrap">${when(j.started)}</td><td class="pr-2 whitespace-nowrap">${esc(j.source)}</td><td class="pr-2 text-gray-400 truncate max-w-0 w-full" title="${esc(j.key || "")}">${esc(j.key || "")}</td><td class="text-right pr-2 whitespace-nowrap">${fmtSecs(j.seconds)}</td><td class="pl-2 truncate max-w-[14rem]" title="${esc(j.ok ? "" : j.error)}">${j.ok ? "ok" : esc(j.error)}</td></tr>`).join("") +
+        "</tbody></table>"
+      : '<div class="text-gray-500 p-1">Nothing finished yet.</div>';
+
+    // one-line summary above the box: counts never move the box itself
+    const active = names.filter(n => sources[n].running).length;
+    const pausedN = names.filter(n => sources[n].paused).length;
+    const q = d.upload_queue || {};
+    const qk = Object.keys(q);
+    $("stats_summary").innerHTML =
+      `Running <b>${running.length}</b>` +
+      (running.length ? ` <span class="text-gray-500">(${Object.keys(bySource).sort().map(s => esc(s) + " " + bySource[s].n).join(", ")})</span>` : "") +
+      ` &middot; ${active} of ${names.length} sources busy` + (pausedN ? `, <span class="text-amber-300">${pausedN} paused</span>` : "") +
+      ` &middot; upload queue: ${qk.length ? qk.map(k => esc(k) + " " + q[k]).join(", ") : "empty"}`;
+    $("stats_n_sources").textContent = names.length ? "(" + names.length + ")" : "";
+    $("stats_n_running").textContent = running.length ? "(" + running.length + ")" : "";
+    $("stats_n_history").innerHTML = h.length ? `(${h.length}${failed ? `, <span class="text-red-400">${failed} failed</span>` : ""})` : "";
   }
 
   /** @brief Draw the Server panel from /api/stats/server. */

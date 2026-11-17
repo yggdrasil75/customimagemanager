@@ -70,3 +70,15 @@ test("bulk POSTs with many filenames are chunked and the replies merged", async 
   assert.deepEqual(calls.map(c => c.body.filenames.length), [200, 200, 50]);
   assert.equal(calls[0].body.tags[0], "zz");
 });
+test("the bulk bar follows the selection even when a caller skips refreshSelectionUI", async () => {
+  b.run(`selectedFiles.clear(); selectedFiles.add("a.jxl"); selectedFiles.add("b.jxl");`);
+  await b.tick(5);
+  assert.ok(!$("bulk_bar").classList.contains("hidden"));
+  assert.match($("bulk_count").innerText || $("bulk_count").textContent, /2 selected/);
+  b.run(`toggleBulkMore(true)`);
+  assert.ok(!$("bulk_more").classList.contains("hidden"));
+  b.run(`selectedFiles.clear()`);            // as a plain tile click / archive / trash do
+  await b.tick(5);
+  assert.ok($("bulk_bar").classList.contains("hidden"));
+  assert.ok($("bulk_more").classList.contains("hidden"));
+});

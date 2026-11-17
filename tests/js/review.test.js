@@ -28,3 +28,12 @@ test("refreshReviewCount reflects the server total", async () => {
   await b.tick(20);
   assert.equal((badge.innerText || badge.textContent), "");
 });
+
+test("module review counters join the Review badge", async () => {
+  b.api.on("/api/review_list", { success: true, total: 2, items: [], counts: {} });
+  b.run(`registerReviewCounter(async () => 5); refreshReviewCount();`);
+  await b.tick(20);
+  const badge = b.document.getElementById("review_tab_badge");
+  assert.match(badge.innerText || badge.textContent, /7/);
+  b.run(`window._reviewCounters.length = 0;`);
+});

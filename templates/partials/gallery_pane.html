@@ -127,32 +127,42 @@
       </div>
 
       <!-- Bulk action bar - shown only when items are selected -->
+      <!-- One row of the everyday actions; everything else (untag, AI, every module's
+           bulk button) sits in the "More" popover, which overlays the gallery instead of
+           pushing it down. -->
       <div id="bulk_bar"
-        class="hidden px-4 py-2 bg-gray-750 border-b border-gray-600 flex items-center gap-2 flex-shrink-0 flex-wrap">
-        <span id="bulk_count" class="text-xs font-bold text-blue-300 mr-1"></span>
+        class="hidden relative px-4 py-2 bg-gray-750 border-b border-gray-600 flex items-center gap-2 flex-shrink-0">
+        <span id="bulk_count" class="text-xs font-bold text-blue-300 mr-1 whitespace-nowrap"></span>
         <input id="bulk_tag_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
-          class="flex-1 min-w-[160px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-blue-400"
+          class="flex-1 min-w-[100px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-blue-400"
           onkeydown="if(event.key==='Enter') applyBulkTag()">
         <button onclick="applyBulkTag()" data-feature="annot.tags"
           class="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded font-bold">Tag</button>
-        <input id="bulk_untag_input" type="text" placeholder="Remove tag(s), comma-separated"
-          class="flex-1 min-w-[140px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-amber-400"
-          onkeydown="if(event.key==='Enter') applyBulkUntag()">
-        <button onclick="applyBulkUntag()" data-feature="annot.tags"
-          class="text-xs bg-amber-700 hover:bg-amber-600 px-3 py-1.5 rounded font-bold">Untag</button>
         <button onclick="addSelectedToAlbum()" title="Add every selected image to an album" data-feature="tab.albums.edit"
-          class="text-xs bg-indigo-700 hover:bg-indigo-600 px-3 py-1.5 rounded font-bold">📁 Add to album</button>
-        <button onclick="bulkDelete()" data-feature="data.delete" class="text-xs bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded font-bold">🗑
+          class="text-xs bg-indigo-700 hover:bg-indigo-600 px-3 py-1.5 rounded font-bold whitespace-nowrap">📁 Album</button>
+        <button onclick="bulkDelete()" data-feature="data.delete" class="text-xs bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded font-bold whitespace-nowrap">🗑
           Delete</button>
-        <button onclick="bulkBox()" data-feature="ai.autotag" title="Run AI box detection on every selected image"
-          class="text-xs bg-sky-700 hover:bg-sky-600 px-3 py-1.5 rounded font-bold">AI Box</button>
-        <!-- Extension region: modules append bulk buttons here via
-             registerControlButton('gallery_bulk', html). -->
-        <span data-ext-area="gallery_bulk" class="contents"></span>
-        <button onclick="bulkEmbed()" title="Generate/regenerate embeddings for every selected image (OAI endpoint if configured, else local)"
-          class="text-xs bg-indigo-700 hover:bg-indigo-600 px-3 py-1.5 rounded font-bold">Embed selected</button>
-        <button onclick="clearSelection()" class="text-xs bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded ml-auto">✕
+        <button id="bulk_more_btn" onclick="toggleBulkMore()" aria-expanded="false" title="More actions for the selection"
+          class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded font-bold whitespace-nowrap">More ▾</button>
+        <button onclick="clearSelection()" class="text-xs bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded whitespace-nowrap">✕
           Deselect</button>
+        <div id="bulk_more" class="hidden absolute right-2 top-full mt-1 z-40 w-[min(30rem,calc(100%-1rem))]
+             max-h-[60vh] overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-xl p-2">
+          <div class="flex items-center gap-2 mb-2">
+            <input id="bulk_untag_input" type="text" placeholder="Remove tag(s), comma-separated"
+              class="flex-1 min-w-0 bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-amber-400"
+              onkeydown="if(event.key==='Enter') applyBulkUntag()">
+            <button onclick="applyBulkUntag()" data-feature="annot.tags"
+              class="text-xs bg-amber-700 hover:bg-amber-600 px-3 py-1.5 rounded font-bold">Untag</button>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            <button onclick="bulkBox()" data-feature="ai.autotag" title="Run AI box detection on every selected image"
+              class="text-xs bg-sky-700 hover:bg-sky-600 px-3 py-1.5 rounded font-bold">AI Box</button>
+            <!-- Extension region: modules append bulk buttons here via
+                 registerControlButton('gallery_bulk', html). -->
+            <span data-ext-area="gallery_bulk" class="contents"></span>
+          </div>
+        </div>
       </div>
 
       <div id="dropzone" data-feature="data.upload"

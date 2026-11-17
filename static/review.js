@@ -21,7 +21,10 @@ async function refreshReviewCount(){
     let rel=0;
     try{ const r=await fetch('/api/persons/review').then(r=>r.json());
          if(r.success) rel=(r.problems||[]).length; }catch(e){}
-    const grand=(d.total||0)+rel;
+    const counts=await Promise.all((window._reviewCounters||[]).map(fn=>
+      Promise.race([Promise.resolve().then(fn).catch(()=>0), new Promise(r=>setTimeout(()=>r(0),5000))])));
+    const extra=counts.reduce((a,n)=>a+(Number(n)||0),0);
+    const grand=(d.total||0)+rel+extra;
     const b=document.getElementById('review_badge');
     if(b){
       if(grand>0){ b.innerText=_fmtCount(grand); b.title=grand+' pending'; b.classList.remove('hidden'); }
@@ -60,6 +63,11 @@ function registerReviewSection(fn){
   if(typeof fn==='function' && !window._reviewSections.includes(fn)) window._reviewSections.push(fn);
 }
 window.registerReviewSection = registerReviewSection;
+window._reviewCounters = window._reviewCounters || [];
+function registerReviewCounter(fn){
+  if(typeof fn==='function' && !window._reviewCounters.includes(fn)) window._reviewCounters.push(fn);
+}
+window.registerReviewCounter = registerReviewCounter;
 async function _renderModuleSections(list){
   let pending=0;
   for(const fn of window._reviewSections){

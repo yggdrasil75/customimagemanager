@@ -274,7 +274,24 @@ function adoptMirrorTags(){
 
 // window.* (not `let`) so module scripts can read it as window.selectedFiles
 // as well as bare selectedFiles. Never reassigned - mutate in place.
-window.selectedFiles = new Set();   // rel_paths currently selected
+/** @brief A Set that redraws the selection UI (bulk bar, tile rings) after any change,
+ *  batched to one redraw per tick, so a caller that clears or edits the selection
+ *  without calling refreshSelectionUI (a plain tile click, archive, trash, stacks,
+ *  reorganize) can't leave the bulk bar up with a stale count. */
+class _CIMSelection extends Set {
+  _changed(){
+    if(this._queued) return;
+    this._queued=true;
+    queueMicrotask(()=>{
+      this._queued=false;
+      if(typeof refreshSelectionUI==='function'){ try{ refreshSelectionUI(); }catch(e){} }
+    });
+  }
+  add(v){ const had=this.has(v); super.add(v); if(!had) this._changed(); return this; }
+  delete(v){ const r=super.delete(v); if(r) this._changed(); return r; }
+  clear(){ const had=this.size>0; super.clear(); if(had) this._changed(); }
+}
+window.selectedFiles = new _CIMSelection();   // rel_paths currently selected
 let lastClickedFile = null;      // for shift-range selection
 let galleryFiles = [];           // current page's file list, in render order
 

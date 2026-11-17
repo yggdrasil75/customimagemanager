@@ -701,6 +701,25 @@ function clearSelection(){
   refreshSelectionUI();
 }
 
+/** @brief Open / close (or flip, with no argument) the bulk bar's "More" popover. */
+function toggleBulkMore(open){
+  const p=document.getElementById('bulk_more'), b=document.getElementById('bulk_more_btn');
+  if(!p) return;
+  const on = (open===undefined) ? p.classList.contains('hidden') : !!open;
+  p.classList.toggle('hidden', !on);
+  if(b) b.setAttribute('aria-expanded', on ? 'true' : 'false');
+}
+// a click outside the popover (and not on its button) closes it; so does Escape
+document.addEventListener('click', e=>{
+  const p=document.getElementById('bulk_more');
+  if(!p || p.classList.contains('hidden')) return;
+  if(e.target.closest('#bulk_more_btn')) return;
+  // inside: a button ran its action, so close; inputs / selects keep it open
+  if(p.contains(e.target) && !e.target.closest('button')) return;
+  toggleBulkMore(false);
+});
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') toggleBulkMore(false); });
+
 function refreshSelectionUI(){
   // Update item borders
   document.querySelectorAll('.gallery-item').forEach(el=>{
@@ -730,8 +749,10 @@ function refreshSelectionUI(){
     cnt.innerText=`${selectedFiles.size} selected`;
   } else {
     bar.classList.add('hidden');
+    toggleBulkMore(false);
     document.getElementById('bulk_tag_input').value='';
-    document.getElementById('bulk_untag_input').value='';
+    const un=document.getElementById('bulk_untag_input');
+    if(un) un.value='';
   }
   const sa=document.getElementById('btn_select_all');
   if(sa){
