@@ -38,9 +38,9 @@ MANIFEST = {
 
 def register(host):
     # -- settings this module owns -----------------------------------------
-    # Bodies run as the Person detection background sweep (Models tab ->
-    # Person detection -> "Run in background"), not a toggle of their own.
-    # The legacy body_enabled toggle folds into that switch once.
+    # Bodies run as part of the person pipeline (Settings > Task pipelines;
+    # Models tab -> People pipeline -> "Run in background"), not a toggle of
+    # their own. The legacy body_enabled toggle folds into that switch once.
     host.add_config_key("body_cluster_eps", default=0.0,
                         validate=lambda v: max(0.0, min(1.0, float(v or 0))))
     host.add_settings_field(key="body_cluster_eps", label="Body cluster distance (0 = auto)",
@@ -48,10 +48,8 @@ def register(host):
 
     def _migrate_toggle():
         if host.config.pop("body_enabled", None):
-            sel = host.broker.current_selection().get("detect.persons") or {}
-            host.broker.select("detect.persons", sel.get("provider") or host.broker.selected_id("detect.persons"),
-                               sel.get("size"), sel.get("type"), True, sel.get("classes"))
-            host.persist_model_selection()
+            if host.broker.select("people.pipeline", "task", None, None, True)[0]:
+                host.persist_model_selection()
     host.on_startup(_migrate_toggle)
 
     # -- capabilities ------------------------------------------------------
@@ -81,6 +79,24 @@ def register(host):
              "when no backbone loads.",
         loader=lambda: (lambda img, boxes, *a, **k: bodylib.embed_bodies_appearance(img, boxes)),
         transform=None, available=lambda: True, reason="", cost_mb=0)
+    ## @brief insightface 2.x cheetah ReID (the faces module owns the package).
+    def _cheetah_reid_loader():
+        fs = host.get_service("faces") or {}
+        if not fs.get("cheetah_ready"):
+            raise RuntimeError("the Faces module (which holds the cheetah package) is off")
+        fs["cheetah_ready"]()
+        fn = lambda img, boxes, *a, **k: fs["cheetah_reid"](img, boxes)
+        fn.registry_key = fs["cheetah_registry_key"]()
+        return fn
+
+    host.provide_model(
+        "embed.bodies", "cheetah", label="Cheetah body ReID (insightface 2.x)", family="insightface",
+        speed="fast", supports_conf=False,
+        note="256-d person re-identification from the cheetah package (Faces settings pick "
+             "s / l). Like any ReID it leans on clothing, so faces still lead identity.",
+        loader=_cheetah_reid_loader, transform=None,
+        available=lambda: bool((host.get_service("faces") or {}).get("cheetah_available", lambda: False)()),
+        reason="needs insightface >= 2.0 with onnx, and the Faces module", cost_mb=400)
     # A backbone change moves vectors to a different space: clear the
     # unconfirmed body rows so the next scan rebuilds them.
     _last = {"v": None}
@@ -138,7 +154,9 @@ def register(host):
 
     host.provide_service("bodies", {
         "fuse_shape": bodylib.fuse_shape,
-        "enabled": lambda: bool(host.broker.variant("detect.persons")["background"]),
+        # bodies are part of the scan when the person pipeline's people step is on
+        "enabled": lambda: bool((host.get_service("task_pipeline") or {}).get(
+            "step_enabled", lambda *a: False)("person", "people.detect_persons")),
         "embed_bodies": embed_bodies,
         "associate_faces_bodies": bodylib.associate_faces_bodies,
         "reid_registry_key": reid_registry_key,

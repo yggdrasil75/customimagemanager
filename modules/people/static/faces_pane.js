@@ -200,6 +200,31 @@ function _splitConfidentOutliers(c) {
   return { main, tail };
 }
 
+/** @brief Gender (only when confident faces agree) and birth-year range chips. */
+function _personAttrs(c) {
+  const out = [];
+  if (c.gender && c.gender_src === 'user') {
+    out.push(`<span class="text-[10px] text-gray-200" title="Set on the person record${
+      c.gender_est ? ` - the faces lean ${c.gender_est}; check the photos` : ''}">${c.gender}${c.gender_est ? ' !' : ''}</span>`);
+  } else if (c.gender) {
+    const pct = Math.round((c.gender_share || 0) * 100);
+    const sure = c.gender !== '?';
+    out.push(`<span class="text-[10px] ${sure ? 'text-gray-300' : 'text-gray-500'}"
+      title="${sure ? `${pct}% of ${c.gender_faces} confident face(s) agree`
+        : `Not sure: ${c.gender_faces} confident face(s), ${pct}% lean ${c.gender_lean || 'neither way'} (People settings set the bar)`}">${
+      sure ? c.gender : '?' + (c.gender_lean ? ' ' + c.gender_lean + ' ' + pct + '%' : '')}</span>`);
+  }
+  if (c.born != null && c.born_src === 'user') {
+    out.push(`<span class="text-[10px] text-gray-200" title="Birthday on the person record${
+      c.born_est ? ` - the dated photos suggest ${c.born_est}; check the photos` : ''}">b. ${c.born}${c.born_est ? ' !' : ''}</span>`);
+  } else if (c.born != null) {
+    const range = c.born_lo !== c.born_hi ? `${c.born_lo}-${c.born_hi}` : `${c.born}`;
+    out.push(`<span class="text-[10px] text-gray-400"
+      title="Photo date minus estimated age over ${c.born_faces} dated face(s); the range is the middle half of those guesses${c.born_faces < 3 ? ' - few dated photos, take it loosely' : ''}">b. ${range}</span>`);
+  }
+  return out.join(' ');
+}
+
 function _renderFaceCluster(c) {
   const { main, tail } = _splitConfidentOutliers(c);
   return `
@@ -215,6 +240,10 @@ function _renderFaceCluster(c) {
                  class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600
                         text-sm text-white">
           <span class="text-[10px] text-gray-500">${c.count}</span>
+          ${_personAttrs(c)}
+          ${!c.name && c.name_hint ? `<button onclick="useNameHint(${c.id})"
+              title="Suggested by the person pipeline from ${c.name_hint_n} face(s) (tags, description, LLM or a close match to a named person). Click to name them all."
+              class="text-[10px] bg-emerald-800 hover:bg-emerald-700 px-1.5 py-0.5 rounded">Use "${(c.name_hint || '').replace(/[<>"&]/g, '')}"?</button>` : ''}
           ${c.drawn >= 0.3 ? `<span title="Average drawn/illustration score (0 photo ... 1 drawing)"
               class="text-[10px] ${c.drawn >= 0.55 ? 'text-amber-400' : 'text-gray-500'}">✏ ${c.drawn.toFixed(2)}</span>` : ''}
           <button onclick="nameCluster(${c.id})"
@@ -389,6 +418,15 @@ async function loadFaces() {
   } catch (e) {
     el.innerHTML = '<div class="text-xs text-red-400 p-2">Failed to load faces.</div>';
   }
+}
+
+/** @brief Accept the person pipeline's suggested name for a cluster. */
+function useNameHint(cid) {
+  const c = _faceClusters.find(x => x.id === cid);
+  const input = document.getElementById('fname_' + cid);
+  if (!c || !c.name_hint || !input) return;
+  input.value = c.name_hint;
+  return nameCluster(cid);
 }
 
 async function nameCluster(cid) {

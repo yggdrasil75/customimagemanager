@@ -5,8 +5,13 @@ Face detection, identity embedding, and cross-image clustering.
 
 DESIGN
 ------
-Detection  : a YOLO face model from ./models (community weights, auto-fetched).
-Embedding  : insightface (ArcFace-family recognition head) when available.
+Detection  : the picked detect.faces provider - SCRFD (the pack's own detector),
+             YuNet, insightface 2.x cheetah, or YOLO-face (community weights,
+             auto-fetched). The first three give 5 landmarks per box.
+Embedding  : insightface (ArcFace-family recognition head) when available. A box
+             with landmarks is aligned and embedded directly (no second
+             detection); a box without gets them from SCRFD on a crop.
+Attributes : gender / age from the pack's genderage head (face_attributes).
              Falls back to object_grouping's CNN/cv2 embedder, which clusters by
              *appearance* rather than *identity* - noticeably weaker, so we mark
              the degraded mode in the cluster payload so the UI can say so.
@@ -38,6 +43,8 @@ _ensure_available, _ = optional_import("insightface.utils.storage", attr="ensure
 import sys as _sys
 
 FaceAnalysis, _HAVE_INSIGHT_APP = optional_import("insightface.app", attr="FaceAnalysis")
+InsightFace, _ = optional_import("insightface.app.common", attr="Face")
+face_align, _ = optional_import("insightface.utils.face_align")
 cv2, _HAVE_CV2 = optional_import("cv2")
 
 MODELS_DIR = facemodels.MODELS_DIR
@@ -353,73 +360,255 @@ def face_shape(f):
 
 FACE_SHAPE_DIM = 215
 
+def _det_model(app):
+    """! @brief The pack's SCRFD detector (FaceAnalysis keeps it as det_model)."""
+    return getattr(app, "det_model", None) or (getattr(app, "models", {}) or {}).get("detection")
+
+def _face_obj(img_bgr, b):
+    """! @brief An insightface Face for a normalised box: pixel bbox, and the 5 kps
+    when the box carries them (what ArcFace alignment needs)."""
+    H, W = img_bgr.shape[:2]
+    x1, y1 = (b["cx"] - b["w"] / 2) * W, (b["cy"] - b["h"] / 2) * H
+    x2, y2 = (b["cx"] + b["w"] / 2) * W, (b["cy"] + b["h"] / 2) * H
+    kps = b.get("kps")
+    kps = None if kps is None else np.asarray(kps, np.float32).reshape(5, 2) * np.array([W, H], np.float32)
+    return InsightFace(bbox=np.array([x1, y1, x2, y2], np.float32), kps=kps,
+                       det_score=float(b.get("conf") or 1.0))
+
+def _dets_to_boxes(bboxes, kpss, W, H, conf=0.0, ox=0.0, oy=0.0):
+    """! @brief SCRFD (bboxes Nx5, kpss Nx5x2) in a (possibly cropped) frame -> normalised
+    boxes of the full W x H image; (ox, oy) is the crop's top-left in pixels."""
+    out = []
+    for i in range(0 if bboxes is None else bboxes.shape[0]):
+        x1, y1, x2, y2, sc = [float(v) for v in bboxes[i, :5]]
+        if sc < conf:
+            continue
+        x1, x2 = max(0.0, (x1 + ox) / W), min(1.0, (x2 + ox) / W)
+        y1, y2 = max(0.0, (y1 + oy) / H), min(1.0, (y2 + oy) / H)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        b = {"cx": (x1 + x2) / 2, "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1, "conf": sc}
+        if kpss is not None and i < len(kpss):
+            k = (np.asarray(kpss[i], np.float32) + np.array([ox, oy], np.float32)) / np.array([W, H], np.float32)
+            b["kps"] = np.clip(k, 0.0, 1.0).round(5).tolist()
+        out.append(b)
+    return out
+
+def _infer(fn, *a):
+    """! @brief Run one insightface call on the single inference thread, with the
+    timeout that keeps a wedged GPU session from freezing the scan."""
+    fut = _INSIGHT_INFER_POOL.submit(fn, *a)
+    return fut.result(timeout=INSIGHT_INFER_TIMEOUT_S)
+
+def scrfd_detect(img_bgr, conf=0.5):
+    """! @brief Faces through the recognition pack's own SCRFD detector (det_10g in
+    buffalo_l, det_500m in buffalo_s / sc): normalised boxes with conf and 5 kps.
+    Reuses the loaded pack, so picking it as the detector costs no extra memory.
+    @throws RuntimeError when no pack loads."""
+    img_bgr = _as_bgr(img_bgr)
+    if img_bgr is None:
+        return []
+    app = _load_insight()
+    det = _det_model(app) if app is not None else None
+    if det is None:
+        raise RuntimeError(_face_model_error["v"] or "insightface pack unavailable")
+    H, W = img_bgr.shape[:2]
+    bboxes, kpss = _infer(lambda im: det.detect(im, max_num=0), img_bgr)
+    return _dets_to_boxes(bboxes, kpss, W, H, conf)
+
+def _refine_one(det, img_bgr, b):
+    """! @brief 5 landmarks for one box that came without them: SCRFD on a padded crop
+    around it (enough context to detect, far cheaper than the whole frame); the
+    detection overlapping the box best lends its kps. None when nothing matches."""
+    H, W = img_bgr.shape[:2]
+    side = max(b["w"] * W, b["h"] * H) * 1.8
+    cx, cy = b["cx"] * W, b["cy"] * H
+    x1, y1 = int(max(0, cx - side / 2)), int(max(0, cy - side / 2))
+    x2, y2 = int(min(W, cx + side / 2)), int(min(H, cy + side / 2))
+    if x2 - x1 < 16 or y2 - y1 < 16:
+        return None
+    bboxes, kpss = det.detect(np.ascontiguousarray(img_bgr[y1:y2, x1:x2]), max_num=0)
+    best, best_iou = None, 0.0
+    for d in _dets_to_boxes(bboxes, kpss, W, H, 0.3, x1, y1):
+        i = _iou(b, d)
+        if i > best_iou and d.get("kps"):
+            best, best_iou = d, i
+    return best["kps"] if best is not None and best_iou >= MATCH_IOU else None
+
+def refine_kps(img_bgr, boxes):
+    """! @brief Fill `kps` on every box lacking it (YOLO-face boxes have none). Boxes are
+    changed in place and returned; a box SCRFD can't place keeps no kps."""
+    img_bgr = _as_bgr(img_bgr)
+    if img_bgr is None or not boxes or all(b.get("kps") for b in boxes):
+        return boxes
+    app = _load_insight()
+    det = _det_model(app) if app is not None else None
+    if det is None:
+        return boxes
+    def _all():
+        """! @brief Fill kps on every box lacking them (runs on the inference thread)."""
+        for b in boxes:
+            if not b.get("kps"):
+                k = _refine_one(det, img_bgr, b)
+                if k is not None:
+                    b["kps"] = k
+    try:
+        _infer(_all)
+    except Exception:
+        pass
+    return boxes
+
+def _genderage(ga, img_bgr, f):
+    """! @brief Gender and age of one face from the genderage head, WITH the gender's
+    confidence. insightface's own get() keeps only the argmax, so a 51/49 call
+    and a 99/1 call look the same; we run the same crop and keep the logits.
+    @return {"gender": 'M'|'F', "p_male": 0..1, "age": years} (None values on failure)."""
+    out = {"gender": None, "p_male": None, "age": None}
+    try:
+        x1, y1, x2, y2 = [float(v) for v in f.bbox]
+        size = ga.input_size[0]
+        scale = size / (max(x2 - x1, y2 - y1) * 1.5)
+        crop, _ = face_align.transform(img_bgr, ((x1 + x2) / 2, (y1 + y2) / 2), size, scale, 0)
+        blob = cv2.dnn.blobFromImage(crop, 1.0 / ga.input_std, (size, size),
+                                     (ga.input_mean,) * 3, swapRB=True)
+        pred = ga.session.run(ga.output_names, {ga.input_name: blob})[0][0]
+        lo = np.asarray(pred[:2], np.float64)
+        e = np.exp(lo - lo.max())
+        p_male = float(e[1] / e.sum())               # class 1 = male, as insightface reads it
+        out.update(gender="M" if p_male >= 0.5 else "F", p_male=round(p_male, 4),
+                   age=float(np.clip(pred[2] * 100.0, 0.0, 110.0)))
+    except Exception:
+        try:                                         # an odd pack: at least the call itself
+            g, a = ga.get(img_bgr, f)
+            out.update(gender="M" if int(g) == 1 else "F", age=float(a))
+        except Exception:
+            pass
+    return out
+
+def analyze_faces(img_bgr, boxes, want_shape=True, attributes=False):
+    """! @brief Identity vector (+ geometry, + gender / age) for each face box.
+
+    The fast path: a box that carries 5 kps (SCRFD, YuNet, cheetah, or a YOLO box
+    refine_kps placed) goes straight to the pack's recognition head - align on
+    the kps, 112x112, ArcFace - with no second detection. A box without kps is
+    given some by SCRFD on a crop around it; only boxes still lacking them fall
+    back to the old whole-frame detect + IoU match.
+
+    @return (rows, mode): one {"vec", "shape", "gender", "p_male", "age", "kps"} per box
+            (None values where unknown) and 'arcface' | 'appearance' | 'none'.
+    """
+    blank = lambda: {"vec": None, "shape": None, "gender": None, "p_male": None, "age": None, "kps": None}
+    if img_bgr is None or not boxes:
+        return [], "none"
+    img_bgr = _as_bgr(img_bgr)
+    if img_bgr is None:
+        return [], "none"
+    app = _load_insight()
+    rows = [blank() for _ in boxes]
+    if app is not None:
+        models = getattr(app, "models", {}) or {}
+        rec = models.get("recognition")
+        lm2d, lm3d, ga = models.get("landmark_2d_106"), models.get("landmark_3d_68"), models.get("genderage")
+        det = _det_model(app)
+
+        def _run():
+            """! @brief The work, on the single inference thread."""
+            for b in boxes:
+                if not b.get("kps") and det is not None:
+                    k = _refine_one(det, img_bgr, b)
+                    if k is not None:
+                        b["kps"] = k
+            todo = []
+            for i, b in enumerate(boxes):
+                if not b.get("kps") or rec is None:
+                    todo.append(i)
+                    continue
+                f = _face_obj(img_bgr, b)
+                rec.get(img_bgr, f)
+                if want_shape:
+                    for m in (lm2d, lm3d):
+                        if m is not None:
+                            m.get(img_bgr, f)
+                if attributes and ga is not None:
+                    rows[i].update(_genderage(ga, img_bgr, f))
+                rows[i]["vec"] = np.asarray(f.normed_embedding, np.float32)
+                rows[i]["shape"] = face_shape(f) if want_shape else None
+                rows[i]["kps"] = b["kps"]
+            if not todo:
+                return
+            # last resort: whole-frame detect + align + embed, matched back by IoU
+            found = app.get(img_bgr)
+            H, W = img_bgr.shape[:2]
+            dets = []
+            for f in found or []:
+                x1, y1, x2, y2 = [float(v) for v in f.bbox]
+                dets.append(({"cx": ((x1 + x2) / 2) / max(1, W), "cy": ((y1 + y2) / 2) / max(1, H),
+                              "w": (x2 - x1) / max(1, W), "h": (y2 - y1) / max(1, H)}, f))
+            for i in todo:
+                best, best_iou = None, 0.0
+                for db, f in dets:
+                    o = _iou(boxes[i], db)
+                    if o > best_iou:
+                        best, best_iou = f, o
+                if best is not None and best_iou >= MATCH_IOU and best.embedding is not None:
+                    rows[i]["vec"] = np.asarray(best.normed_embedding, np.float32)
+                    rows[i]["shape"] = face_shape(best) if want_shape else None
+                    if attributes and ga is not None:
+                        rows[i].update(_genderage(ga, img_bgr, best))
+        try:
+            _infer(_run)
+        except _futures.TimeoutError:
+            print("INSIGHT_INFER_TIMEOUT: face analysis exceeded "
+                  f"{INSIGHT_INFER_TIMEOUT_S:.0f}s; degrading to appearance",
+                  file=_sys.stderr, flush=True)
+        except Exception as e:
+            _face_model_error["v"] = f"face analysis: {type(e).__name__}: {e}"
+        if any(r["vec"] is not None for r in rows):
+            return rows, "arcface"
+    vecs, mode = embed_faces_appearance(img_bgr, boxes)
+    for r, v in zip(rows, vecs or [None] * len(rows)):
+        r["vec"] = v
+    return rows, mode
+
+def face_attributes(img_bgr, boxes):
+    """! @brief Gender ('M' / 'F'), its confidence p_male (0..1) and an age estimate per face
+    box from the pack's genderage head (buffalo_* ship it).
+    [{"gender", "p_male", "age"}], None values when unavailable."""
+    out = [{"gender": None, "p_male": None, "age": None} for _ in boxes or []]
+    img_bgr = _as_bgr(img_bgr)
+    app = _load_insight() if img_bgr is not None and boxes else None
+    ga = ((getattr(app, "models", {}) or {}).get("genderage")) if app is not None else None
+    if ga is None:
+        return out
+    def _run():
+        """! @brief The work, on the single inference thread."""
+        for i, b in enumerate(boxes):
+            out[i] = _genderage(ga, img_bgr, _face_obj(img_bgr, b))
+    try:
+        _infer(_run)
+    except Exception:
+        pass
+    return out
+
+def have_attributes():
+    """! @brief Whether the loaded pack has a genderage head."""
+    app = _load_insight()
+    return bool(app is not None and (getattr(app, "models", {}) or {}).get("genderage") is not None)
+
 def embed_faces(img_bgr, boxes, want_shape=False):
-    """! @brief Embed each face crop. `boxes` are normalised center-form dicts.
+    """! @brief Embed each face box. `boxes` are normalised center-form dicts, optionally
+    with `kps` (5 [x, y] in 0..1) from a landmark-giving detector.
 
     Returns (vectors, mode), or (vectors, mode, shapes) with want_shape (shapes
     from face_shape(), one per box, None where unmatched). Vectors are
-    L2-normalised so cosine distance == what group_embeddings expects.
-
-    We run insightface ONCE over the whole image rather than per-crop. Its
-    pipeline is detect -> 5-point landmark -> similarity-transform to a 112x112
-    canonical face -> ArcFace. Handing it a pre-cropped face means it must
-    re-detect inside a tight crop, which frequently fails (no margin, no
-    context) and returns nothing -- which is why the old per-crop path produced
-    all-None vectors and silently fell through to 'appearance'. Detecting on the
-    full frame gives it the context it wants; we then match its detections back
-    to the YOLO boxes by IoU so the caller's box list stays authoritative.
+    L2-normalised so cosine distance == what group_embeddings expects. See
+    analyze_faces for how a box is aligned (its own kps first, no re-detection).
     """
-    def _ret(vecs, mode, shapes=None):
-        return (vecs, mode, shapes or [None] * len(vecs)) if want_shape else (vecs, mode)
-
-    if img_bgr is None or not boxes:
-        return _ret([], "none")
-
-    # Same 3-channel expectation as YOLO: insightface's detector and ArcFace head
-    # both assume BGR uint8. Callers should hand us BGR already, but guard here
-    # so an RGBA/grayscale array degrades to a correct embed rather than a shape
-    # error deep in onnxruntime.
-    img_bgr = _as_bgr(img_bgr)
-    if img_bgr is None:
-        return _ret([], "none")
-
-    app = _load_insight()
-
-    if app is not None:
-        try:
-            fut = _INSIGHT_INFER_POOL.submit(app.get, img_bgr)
-            found = fut.result(timeout=INSIGHT_INFER_TIMEOUT_S)   # full-image detect + align + embed
-        except _futures.TimeoutError:
-            print("INSIGHT_INFER_TIMEOUT: app.get exceeded "
-                  f"{INSIGHT_INFER_TIMEOUT_S:.0f}s; degrading to appearance",
-                  file=_sys.stderr, flush=True)
-            found = []
-        except Exception:
-            found = []
-        if found:
-            H, W = img_bgr.shape[:2]
-            dets = []
-            for f in found:
-                x1, y1, x2, y2 = [float(v) for v in f.bbox]
-                dets.append(({"cx": ((x1 + x2) / 2) / max(1, W),
-                              "cy": ((y1 + y2) / 2) / max(1, H),
-                              "w": (x2 - x1) / max(1, W),
-                              "h": (y2 - y1) / max(1, H)},
-                             np.asarray(f.normed_embedding, dtype=np.float32),
-                             face_shape(f)))
-            vecs, shapes = [], []
-            for b in boxes:
-                best, best_iou = None, 0.0
-                for db, v, sh in dets:
-                    i = _iou(b, db)
-                    if i > best_iou:
-                        best, best_iou = (v, sh), i
-                ok = best_iou >= MATCH_IOU
-                vecs.append(best[0] if ok else None); shapes.append(best[1] if ok else None)
-            if any(v is not None for v in vecs):
-                return _ret(vecs, "arcface", shapes)
-
-    return embed_faces_appearance(img_bgr, boxes, want_shape)
+    rows, mode = analyze_faces(img_bgr, boxes, want_shape=want_shape)
+    vecs = [r["vec"] for r in rows]
+    if want_shape:
+        return vecs, mode, [r["shape"] for r in rows] or [None] * len(vecs)
+    return vecs, mode
 
 
 def embed_faces_appearance(img_bgr, boxes, want_shape=False):

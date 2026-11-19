@@ -33,7 +33,6 @@ CORE_CAPABILITIES = {
     },
     "detect.persons": {
         "label": "Person detection",
-        "background": True,  # body boxes and identity per image (people module)
         "summary": "People/characters as boxes: the picked Detection model's person "
                    "class, or dedicated (often oriented-box) person weights.",
         "input": _IMG,
@@ -42,11 +41,12 @@ CORE_CAPABILITIES = {
     },
     "detect.faces": {
         "label": "Face detection",
-        "background": True,
         "summary": "Faces as boxes (dedicated face detectors; feeds the person "
-                   "module).",
+                   "pipeline). Landmark detectors (SCRFD, YuNet, cheetah) add 5 "
+                   "keypoints per face, which recognition aligns on directly.",
         "input": _IMG,
-        "output": "list of {cx, cy, w, h, conf} normalized 0..1 center-form",
+        "output": "list of {cx, cy, w, h, conf, kps?} normalized 0..1 center-form; "
+                  "kps = 5 [x, y] (left eye, right eye, nose, left / right mouth corner)",
     },
     "detect.barcodes": {
         "label": "Barcode detection",

@@ -9,9 +9,9 @@ Models come from the faces / bodies modules through their services
 (host.get_service("faces") / ("bodies")); region masks and the background
 capability sweep come from host.core.
 """
-import contextlib
 import json
 import os
+import re
 import threading
 import time
 from typing import Optional
@@ -19,7 +19,6 @@ from typing import Optional
 import numpy as np
 from flask import request, jsonify
 from modules.model_broker import NoProviderError
-import model_registry
 import object_grouping as og
 from . import personlib, appearances
 import common
@@ -30,6 +29,8 @@ update_file = access_logger = thread_manager = _background_instances = None
 _fold_background = _detect_obb_or_box = None
 _faces = _bodies = _body_on = HOST = None
 _merge_regions = _read_pose_from_xmp = _kpts_in_box = _last_activity = None
+# the person_pipeline module, set by register() (it imports this one, so not the other way)
+_pipeline = None
 
 
 def _rows(table, where, params=(), set=None, remove=False, commit=False):
@@ -53,7 +54,7 @@ def _bind(host):
         "_kpts_in_box": og.kpts_in_box, "_last_activity": c.last_activity,
         "_faces": lambda: host.get_service("faces"),
         "_bodies": lambda: host.get_service("bodies"),
-        "_body_on": lambda: bool((host.get_service("bodies") or {}).get("enabled", lambda: False)()),
+        "_body_on": lambda: bool(host.get_service("bodies") and _pipeline and _pipeline.bodies_on()),
     })
 
 
@@ -86,20 +87,6 @@ def _face_err(msg, *args):
     when the scan misbehaves, instead of grepping it out of access.log."""
     access_logger.error("face: " + (msg % args if args else msg))
 
-def _run_faces(img_bgr) -> list:
-    """!
-    @brief Detect faces through the picked 'detect.faces' provider (faces module),
-           which already applies the min-size / drawn-face filter.
-    @return Boxes [{class_name:'face',cx,cy,w,h}]; [] when no provider.
-    """
-    try:
-        return HOST.broker.request("detect.faces")(img_bgr) or []
-    except NoProviderError:
-        return []
-    except Exception as e:
-        access_logger.error(f"detect.faces: {e}")
-        return []
-
 def _run_person(img_bgr) -> list:
     """!
     @brief People/character boxes via the picked 'detect.persons' provider
@@ -115,94 +102,6 @@ def _run_person(img_bgr) -> list:
     except Exception as e:
         access_logger.error(f"detect.persons: {e}")
         return []
-
-def _face_regions_for(img, rel: str) -> list:
-    """!
-    @brief Detect faces + people (+ optional custom model) in one image.
-    @return MWG-shaped region dicts, all unconfirmed (user promotes them in the Faces tab).
-    """
-    out = []
-    for b in _run_faces(img):
-        out.append({"class_name": "face", "region_name": "",
-                    "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
-                    "confirmed": False, "region_tags": [], "region_description": "",
-                    "conf": b.get("conf"), "_drawn": b.get("_drawn")})
-    person_regions = []
-    for b in _run_person(img):
-        person_regions.append({"class_name": "person", "region_name": "",
-                    "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
-                    "confirmed": False, "region_tags": [], "region_description": "",
-                    "conf": b.get("conf")})
-
-    _fold_background(_background_instances(img), person_regions, out)
-
-    out.extend(person_regions)
-    return out
-
-def _face_regions_for_batch(imgs, rels, face_run=None, person_run=None,
-                            faces=True, bodies=True) -> list:
-    """!
-    @brief Batched equivalent of _face_regions_for for a list of images.
-    @return List (len == len(imgs)) of MWG-shaped region-dict lists.
-    @note Runs each detector ONCE over the whole batch (face, person, optional
-          custom) - the real YOLO batching. Per-image background segmentation is
-          still done per image (segmenters are not batch-aware); it is skipped in
-          the batched path only when no background capability is on (the default).
-    """
-    n = len(imgs)
-    results = [[] for _ in range(n)]
-
-    # Faces - one forward pass over the batch through the picked provider
-    # (the sweep hands in the background pick; a forced scan uses the foreground one).
-    try:
-        run = face_run or HOST.broker.request("detect.faces")
-        face_batches = ([[] for _ in imgs] if not faces else
-                        run.batch(imgs) if hasattr(run, "batch") else
-                        [run(im) if im is not None else [] for im in imgs])
-    except NoProviderError:
-        face_batches = [[] for _ in imgs]
-    except Exception as e:
-        access_logger.error(f"detect.faces batch: {e}")
-        face_batches = [[] for _ in imgs]
-    for i, boxes in enumerate(face_batches):
-        for b in boxes or []:
-            results[i].append({"class_name": "face", "region_name": "",
-                               "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
-                               "confirmed": False, "region_tags": [],
-                               "region_description": "", "conf": b.get("conf"),
-                               "_drawn": b.get("_drawn")})
-
-    # People - the picked 'detect.persons' provider, batched when it can.
-    try:
-        prun = person_run or HOST.request_model("detect.persons")
-        pconf = HOST.broker.variant("detect.persons", "bg" if person_run else None)["conf"]
-        person_batches = ([[] for _ in imgs] if not bodies else
-                          prun.batch(imgs, conf=pconf) if hasattr(prun, "batch")
-                          else [prun(im, conf=pconf) if im is not None else [] for im in imgs])
-    except NoProviderError:
-        person_batches = [[] for _ in imgs]
-    except Exception as e:
-        access_logger.error(f"detect.persons batch: {e}")
-        person_batches = [[] for _ in imgs]
-    person_regions_per = [[] for _ in range(n)]
-    for i, boxes in enumerate(person_batches):
-        for b in boxes:
-            person_regions_per[i].append({"class_name": "person", "region_name": "",
-                                          "cx": b["cx"], "cy": b["cy"],
-                                          "w": b["w"], "h": b["h"], "confirmed": False,
-                                          "region_tags": [], "region_description": "",
-                                          "conf": b.get("conf")})
-
-    # Region-shaped background capabilities (detect/segment, Models tab) ride
-    # the face pass - per image; ponytail: no batch API on handles.
-    for i in range(n):
-        if faces and imgs[i] is not None:
-            _fold_background(_background_instances(imgs[i]), person_regions_per[i], results[i])
-
-    for i in range(n):
-        results[i].extend(person_regions_per[i])
-
-    return results
 
 def _upsert_region_embeddings(table: str, rel: str, boxes: list, vecs: list,
                               mode: str, extra=None) -> None:
@@ -227,42 +126,90 @@ def _upsert_region_embeddings(table: str, rel: str, boxes: list, vecs: list,
                     dont_write=True, commit=False)
     db.commit()
 
-def _cache_faces(rel: str, img, regions: list) -> None:
-    """! @brief Embed and cache the face boxes for one image (confirmed names untouched)."""
-    fboxes = [r for r in regions if r["class_name"] == "face"]
-    if not fboxes:
-        return
-    # Honour not_face tombstones: if the user already said a box here isn't a face,
-    # a re-detection of (approximately) the same box must not resurrect it.
+def _drop_tombstoned(rel: str, boxes: list) -> list:
+    """! @brief Boxes minus those the user already said are not a face: a re-detection of
+    (approximately) the same box must not resurrect it."""
+    if not boxes:
+        return boxes
     tomb = _db().execute(
         "SELECT cx,cy,w,h FROM face_regions WHERE rel_path=? AND COALESCE(not_face,0)=1",
         (rel,)).fetchall()
-    if tomb:
-        def _is_tomb(b):
-            for cx, cy, w, h in tomb:
-                if (abs(b["cx"] - cx) < 1e-2 and abs(b["cy"] - cy) < 1e-2
-                        and abs(b["w"] - w) < 2e-2 and abs(b["h"] - h) < 2e-2):
-                    return True
-            return False
-        fboxes = [b for b in fboxes if not _is_tomb(b)]
-        if not fboxes:
-            return
-    fs = _faces()
-    if not fs:
-        return
-    vecs, mode, shapes = fs["embed_faces"](img, fboxes, want_shape=True)
+    if not tomb:
+        return boxes
+    def _is_tomb(b):
+        for cx, cy, w, h in tomb:
+            if (abs(b["cx"] - cx) < 1e-2 and abs(b["cy"] - cy) < 1e-2
+                    and abs(b["w"] - w) < 2e-2 and abs(b["h"] - h) < 2e-2):
+                return True
+        return False
+    return [b for b in boxes if not _is_tomb(b)]
+
+def _row_ids(table: str, rel: str, boxes: list) -> list:
+    """! @brief The cache row id of each box (matched on its rounded centre), None when
+    the box was not stored (no vector)."""
+    rows = _db().execute(f"SELECT id,cx,cy FROM {table} WHERE rel_path=?", (rel,)).fetchall()
+    out = []
+    for b in boxes:
+        cx, cy = round(b["cx"], 5), round(b["cy"], 5)
+        hit = next((r[0] for r in rows if abs(r[1] - cx) < 1e-5 and abs(r[2] - cy) < 1e-5), None)
+        out.append(hit)
+    return out
+
+def _store_faces(rel: str, img, fboxes: list, infos: list, mode: str) -> list:
+    """! @brief Cache one image's embedded faces: vector, geometry, landmarks, detector
+    confidence, gender / age and the drawn score; a vector near a rejected
+    cluster is tombstoned on arrival. Confirmed names are untouched.
+    @return the face_regions id per box (None where no vector was stored)."""
+    fs = _faces() or {}
     rejects = _reject_centroids(mode)
-    extra = []
-    for b, v, sh in zip(fboxes, vecs, shapes):
-        e = {"drawn": b["_drawn"] if b.get("_drawn") is not None
-             else float(fs["drawn_score"](img, b))}
-        if sh is not None:
-            e["shape"] = np.asarray(sh, np.float32).tobytes()
+    vecs, extra = [], []
+    for i, b in enumerate(fboxes):
+        info = infos[i] if i < len(infos) else {}
+        v = info.get("vec")
+        drawn = b.get("_drawn")
+        if drawn is None and fs.get("drawn_score"):
+            drawn = float(fs["drawn_score"](img, b))
+        e = {"drawn": drawn}
+        if info.get("shape") is not None:
+            e["shape"] = np.asarray(info["shape"], np.float32).tobytes()
+        if b.get("kps"):
+            e["kps"] = np.asarray(b["kps"], np.float32).tobytes()
+        if b.get("conf") is not None:
+            e["det_conf"] = float(b["conf"])
+        if info.get("gender") is not None:
+            e["gender"] = info["gender"]
+        if info.get("p_male") is not None:
+            e["p_male"] = float(info["p_male"])
+        if info.get("age") is not None:
+            e["age"] = float(info["age"])
         if v is not None and rejects is not None and _near_reject(v, rejects):
             e.update({"not_face": 1, "cluster_id": -1})
+        vecs.append(v)
         extra.append(e)
     _upsert_region_embeddings("face_regions", rel, fboxes, vecs, mode, extra=extra)
     _sync_names_from_metadata(rel)
+    return _row_ids("face_regions", rel, fboxes)
+
+def _user_kept_rows(ids: list) -> set:
+    """! @brief Of these face rows, the ones a user decision covers: named / confirmed,
+    'unknown', 'not a face', or moved to a person by hand (assign). Automation
+    must not re-cluster or re-suggest these."""
+    ids = [i for i in ids if i is not None]
+    if not ids:
+        return set()
+    return {r[0] for r in _db().execute(
+        f"SELECT id FROM face_regions WHERE id IN ({','.join('?' * len(ids))}) AND "
+        "(COALESCE(confirmed,0)=1 OR COALESCE(unknown,0)=1 OR COALESCE(not_face,0)=1 "
+        "OR COALESCE(user_set,0)=1)", ids).fetchall()}
+
+def _cache_faces(rel: str, img, regions: list) -> None:
+    """! @brief Embed and cache the face boxes for one image (confirmed names untouched)."""
+    fboxes = _drop_tombstoned(rel, [r for r in regions if r["class_name"] == "face"])
+    fs = _faces()
+    if not fboxes or not fs:
+        return
+    vecs, mode, shapes = fs["embed_faces"](img, fboxes, want_shape=True)
+    _store_faces(rel, img, fboxes, [{"vec": v, "shape": sh} for v, sh in zip(vecs, shapes)], mode)
 
 def _reject_eps() -> float:
     return float(state.get("face_cluster_eps") or (_faces() or {}).get("DEFAULT_EPS", 0.4))
@@ -336,58 +283,47 @@ def _sync_names_from_metadata(rel: str) -> int:
     db.commit()
     return n
 
+def _store_bodies(rel: str, persons: list, vecs: list, faces=None, face_ids=None) -> None:
+    """! @brief Cache person boxes with their body vectors, each bound to the face row
+    it contains: the detector's own binding when it made one (`_face`, an index
+    into `faces`, set by the person pipeline from cheetah's binding), else
+    face-in-box geometry. `vecs` is one (vector, mode) or None per person."""
+    bs = _bodies()
+    face_rows = _db().execute(
+        "SELECT id,cx,cy,w,h FROM face_regions WHERE rel_path=?", (rel,)).fetchall()
+    faces_geom = [{"id": r[0], "cx": r[1], "cy": r[2], "w": r[3], "h": r[4]} for r in face_rows]
+    pairs = bs["associate_faces_bodies"](faces_geom, persons) if bs and faces_geom else []
+    body_to_face = {bi: faces_geom[fi]["id"] for fi, bi in pairs}
+    for i, p in enumerate(persons):
+        fi = p.get("_face")
+        if fi is not None and face_ids and fi < len(face_ids) and face_ids[fi] is not None:
+            body_to_face[i] = face_ids[fi]
+    by_mode = {}
+    for i, (p, vm) in enumerate(zip(persons, vecs)):
+        if vm is not None and vm[0] is not None:
+            by_mode.setdefault(vm[1], []).append(i)
+    for mode, idx in by_mode.items():
+        _upsert_region_embeddings("body_regions", rel, [persons[i] for i in idx],
+                                  [vecs[i][0] for i in idx], mode,
+                                  [{"face_id": body_to_face.get(i)} for i in idx])
+
 def _cache_bodies(rel: str, img, regions: list) -> None:
     """! @brief Embed and cache person boxes, binding each to the face row it contains."""
     pboxes = [r for r in regions if r["class_name"] == "person"]
-    if not pboxes:
-        return
     bs = _bodies()
-    if not bs:
+    if not pboxes or not bs:
         return
     vecs, mode = bs["embed_bodies"](img, pboxes)
-    face_rows = _db().execute(
-        "SELECT id,cx,cy,w,h FROM face_regions WHERE rel_path=?", (rel,)).fetchall()
-    faces_geom = [{"id": r[0], "cx": r[1], "cy": r[2], "w": r[3], "h": r[4]}
-                  for r in face_rows]
-    pairs = bs["associate_faces_bodies"](faces_geom, pboxes)  # (face_idx, body_idx)
-    body_to_face = {bi: faces_geom[fi]["id"] for fi, bi in pairs}
-    extra = [{"face_id": body_to_face.get(i)} for i in range(len(pboxes))]
-    _upsert_region_embeddings("body_regions", rel, pboxes, vecs, mode, extra)
+    _store_bodies(rel, pboxes, [(v, mode) if v is not None else None for v in vecs])
 
 def _mark_body_done(rel: str) -> None:
     """! @brief Mark a file's body-embedding pass complete."""
     update_file(rel, db={"body_done": 1}, dont_write=True)
 
 def _face_scan_lease_keys():
-    """! @brief Registry keys the face-scan pass touches per image, so we can lease them
-    resident for the whole pass. On a small resident-model budget, acquiring
-    insightface (or the body backbone) after the YOLO detector would otherwise
-    evict the detector, forcing a reload+refuse on the very next image - the thrash
-    that both wastes time and trips ultralytics' double-fuse ('Conv has no bn')."""
-    keys = []
-    fs = _faces()
-    if fs:
-        try:
-            fk = getattr(HOST.request_model("detect.faces"), "registry_key", None)
-            if fk:
-                keys.append(fk)
-        except Exception:
-            pass
-        keys.append(fs["insight_registry_key"]())
-    if _body_on():
-        try:
-            keys.append(_bodies()["reid_registry_key"]())
-        except Exception:
-            pass
-    try:
-        pk = getattr(HOST.request_model("detect.persons"), "registry_key", None)
-        if pk:
-            keys.append(pk)
-    except Exception:
-        pass
-    # De-dup while preserving order (person may equal face in odd configs).
-    seen = set()
-    return [k for k in keys if not (k in seen or seen.add(k))]
+    """! @brief Registry keys the person pipeline touches per image (see
+    person_pipeline.lease_keys)."""
+    return _pipeline.lease_keys() if _pipeline else []
 
 FACE_BATCH = 16
 def _face_process_one(job) -> None:
@@ -398,19 +334,11 @@ def _face_process_one(job) -> None:
         _face_log_last["dev"] = True
         _face_log("device: %s", (_faces() or {}).get("device_desc", lambda: "?")())
     _face_log("batch start: %d image(s)", len(rels))
-    lease_keys = []
+    # resolving the lease keys loads the picked detectors: a setup failure backs
+    # off here instead of spinning on the same batch
     try:
-        lease_keys = _face_scan_lease_keys()
+        _face_scan_lease_keys()
     except Exception as e:
-        _face_err("lease-key build failed: %s", e)
-        lease_keys = []
-    try:
-        ctx = model_registry.lease(*lease_keys) if lease_keys else contextlib.nullcontext()
-        ctx.__enter__()
-    except Exception as e:
-        # A persistent failure (e.g. a detector that just won't load) would other-
-        # wise re-enter setup every poll. Back off so we retry ~once a minute and
-        # keep the queue intact; the source self-heals the moment the model loads.
         _face_setup_backoff["until"] = time.time() + 60
         _face_err("SETUP FAILED (%s) - backing off 60s", e)
         err = (_faces() or {}).get("face_model_error", lambda: "")() or "model/detector unavailable"
@@ -421,10 +349,6 @@ def _face_process_one(job) -> None:
     try:
         failed = _face_detect_batch(rels)
     finally:
-        try:
-            ctx.__exit__(None, None, None)
-        except Exception:
-            pass
         # Did the batch actually advance the queue? If these rows are still
         # face_done=0 the scan will re-serve them forever and the count will sit
         # still - this line is the one that proves it either way.
@@ -449,95 +373,15 @@ def _face_process_one(job) -> None:
 def _face_detect_batch(rels: list, face_run=None, person_run=None,
                        faces=True, bodies=None) -> int:
     """!
-    @brief Detect faces/people for a whole batch with ONE YOLO forward pass per
-           detector, then finish (metadata + embed) per image.
-    @return Count of images that failed and were marked done to keep the queue moving.
-    @note This is the real batching. Detection - the slow, GPU-bound part even
-          under migraphx - was previously N sequential single-image calls; now the
-          batch's decoded images are handed to YOLO as one list. Decode, metadata
-          write and embedding stay per image (they are not GPU-batchable here).
+    @brief Detect, identify and store faces / people for a batch: the person pipeline
+           (Settings > Task pipelines) over these files.
+    @param face_run / person_run  detector handles to use instead of the pipeline's picks.
+    @return Count of images that failed (they are marked done to keep the queue moving).
     """
-    failed = 0
-    if bodies is None:
-        bodies = _body_on()
-    def _done(rel):
-        if faces:
-            _mark_face_done(rel)
-        if bodies:
-            _mark_body_done(rel)
-    # -- decode phase: load every image up front so detection sees a full batch --
-    abs_paths, imgs, decoded_rels = [], [], []
-    for rel in rels:
-        abs_p = get_safe_path(MEDIA_DIR, rel)
-        if not abs_p or not os.path.exists(abs_p):
-            _done(rel)
-            continue
-        why = _skip_scan_reason(rel)
-        if why:
-            _face_log("skip %s (%s)", rel, why)
-            _done(rel)
-            continue
-        _t = time.time()
-        try:
-            img = read_jxl(abs_p)
-        except Exception as e:
-            _face_err("decode failed (%s): %s", rel, e); img = None
-        _face_t["decode"] += time.time() - _t
-        if img is None:
-            _done(rel)
-            continue
-        try:
-            bgr = _to_bgr(img)             # read_jxl may return gray/RGBA; YOLO needs 3-ch BGR
-        except Exception as e:
-            _face_err("to_bgr failed (%s): %s", rel, e)
-            _done(rel)
-            continue
-        abs_paths.append(abs_p); imgs.append(bgr); decoded_rels.append(rel)
-
-    if not decoded_rels:
-        return failed
-
-    # -- detect phase: single batched forward pass per detector --
-    _t = time.time()
-    try:
-        regions_per = _face_regions_for_batch(imgs, decoded_rels, face_run, person_run,
-                                              faces=faces, bodies=bodies)
-    except Exception as e:
-        # Detection blew up for the whole batch - fall back so the queue still drains.
-        _face_err("batch detect failed, marking %d done: %s", len(decoded_rels), e)
-        for rel in decoded_rels:
-            failed += 1
-            _done(rel)
-        _face_t["detect"] += time.time() - _t
-        return failed
-    _face_t["detect"] += time.time() - _t
-
-    # -- finish phase: metadata + embeds, per image (one bad image can't sink the rest) --
-    for rel, abs_p, bgr, found in zip(decoded_rels, abs_paths, imgs, regions_per):
-        try:
-            if found:
-                _t = time.time()
-                meta = read_metadata(abs_p)
-                merged = _merge_regions(meta["regions"], found)
-                update_file(abs_p, set={"regions": merged}, meta=meta)
-                _face_t["meta"] += time.time() - _t
-                _t = time.time()
-                if faces:
-                    _cache_faces(rel, bgr, found)
-                    _face_dirty["v"] = True
-                if bodies:
-                    _cache_bodies(rel, bgr, found)   # same decoded image
-                    _body_dirty["v"] = True
-                _face_t["embed"] += time.time() - _t
-            _done(rel)
-        except Exception as e:
-            failed += 1
-            _face_err("image failed (%s): %s", rel, e)
-            try:
-                _done(rel)
-            except Exception as e2:
-                _face_err("mark-done FAILED for %s: %s", rel, e2)
-    return failed
+    if not _pipeline:
+        return len(rels)
+    return _pipeline.run_batch(rels, face_run=face_run, person_run=person_run,
+                               faces=faces, bodies=bodies)
 
 def _claim_face_job():
     """! @brief One unit of a FORCED face scan ("Scan faces" button) for the
@@ -583,48 +427,9 @@ def _register_face_source():
         "face", _claim_face_job, _face_process_one,
         key_of=lambda job: "face-scan")
 
-# -- Models-tab sweeps: Face detection and Person detection, each on its own --
-# switch, each marking only its own *_done column. The host batches files for
-# them (FACE_BATCH) so the detector still gets one forward pass per batch.
+# The background pass is the Models tab's People pipeline switch (person_pipeline
+# registers its sweep); bodies dirty mirrors _face_dirty for the body recluster.
 _body_dirty = {"v": False}
-
-def _face_sweep_pending(db, n, after=""):
-    rows = db.execute("SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 "
-                      "AND media_kind='image' AND rel_path > ? ORDER BY rel_path LIMIT ?",
-                      (after, n)).fetchall()
-    if not rows and not after and _face_dirty["v"]:  # drained: trailing cluster pass
-        _face_dirty["v"] = False
-        HOST.set_status("Face scan: clustering...")
-        HOST.set_status(f"Face scan: done ({_recluster()} cluster(s)).")
-    return [r[0] for r in rows]
-
-def _face_sweep_run(rels, fps, handle):
-    _face_detect_batch(rels, face_run=handle, faces=True, bodies=False)
-
-def _body_sweep_pending(db, n, after=""):
-    rows = db.execute("SELECT rel_path FROM files WHERE COALESCE(body_done,0)=0 "
-                      "AND media_kind='image' AND rel_path > ? ORDER BY rel_path LIMIT ?",
-                      (after, n)).fetchall()
-    if not rows and not after and _body_dirty["v"]:
-        _body_dirty["v"] = False
-        HOST.set_status(f"Body scan: done ({_recluster_bodies()} cluster(s)).")
-    return [r[0] for r in rows]
-
-def _body_sweep_run(rels, fps, handle):
-    _face_detect_batch(rels, person_run=handle, faces=False, bodies=True)
-
-def _sweep_progress(col):
-    def fn(db):
-        r = db.execute(f"SELECT COUNT(*) t, SUM(CASE WHEN COALESCE({col},0)<>0 THEN 1 ELSE 0 END) d "
-                       "FROM files WHERE media_kind='image'").fetchone()
-        return {"done": int(r[1] or 0), "total": int(r[0] or 0)}
-    return fn
-
-def _register_sweeps():
-    HOST.add_background_sweep("detect.faces", _face_sweep_pending, _face_sweep_run, batch=FACE_BATCH,
-                              progress=_sweep_progress("face_done"))
-    HOST.add_background_sweep("detect.persons", _body_sweep_pending, _body_sweep_run, batch=FACE_BATCH,
-                              progress=_sweep_progress("body_done"))
 
 def _mark_face_done(rel: str) -> None:
     """! @brief Mark a file's face-boxing pass complete."""
@@ -1188,6 +993,127 @@ def _cluster_outlier_dists(cluster_ids):
             dists[fid] = float(1.0 - float(np.dot(vv / vn, centroid)))
     return dists
 
+# -- gender / birth year per person ------------------------------------------------
+# A per-face gender call is a guess with a confidence, and a per-face age is only
+# meaningful against the date the photo was taken. So a person gets:
+#   gender  only when enough faces call it confidently and nearly all agree
+#           (a 51/49 split is "unsure", not "male");
+#   born    a birth-year range from (photo year - estimated age) over dated photos,
+#           never an average age across decades of photos.
+_GENDER_SURE = 0.25        # a face votes when its p_male is <= .25 or >= .75
+_YEAR_S = 365.25 * 86400.0
+# capture dates only: d_digitized is the scan date of an old print, d_modified a file time
+_PHOTO_EPOCH = "COALESCE(files.d_original_epoch, files.d_capture_epoch, files.d_actual_epoch)"
+
+def _gender_of(rows, min_faces: int, min_share: float) -> dict:
+    """! @brief {gender: 'M'|'F'|'?', gender_share, gender_faces} from per-face (p_male,
+    gender) rows; {} when no face has a call. '?' = too few confident faces, or
+    they don't agree by min_share."""
+    votes = []
+    for p_male, g in rows:
+        if p_male is not None:
+            if abs(float(p_male) - 0.5) >= _GENDER_SURE:
+                votes.append(float(p_male) >= 0.5)
+        elif g in ("M", "F"):                     # rows from before p_male was kept
+            votes.append(g == "M")
+    if not votes:
+        return {}
+    n, m = len(votes), sum(votes)
+    share = max(m, n - m) / float(n)
+    sure = n >= min_faces and share >= min_share
+    return {"gender": ("M" if m > n - m else "F") if sure else "?",
+            "gender_lean": "M" if m > n - m else "F" if m < n - m else "",
+            "gender_share": round(share, 2), "gender_faces": n}
+
+def _wquantile(vals, weights, q: float) -> float:
+    """! @brief Weighted quantile (q in 0..1) of vals."""
+    order = np.argsort(vals)
+    v, w = np.asarray(vals, np.float64)[order], np.asarray(weights, np.float64)[order]
+    c = np.cumsum(w) - 0.5 * w
+    return float(np.interp(q * w.sum(), c, v))
+
+def _birth_of(rows) -> dict:
+    """! @brief {born, born_lo, born_hi, born_faces} from per-face (age, photo epoch) rows.
+    Each dated face says born = photo year - age. Young faces weigh more (an age
+    model is off by a year or two on a child, by five or more on an adult); faces
+    more than 15 years from the first median are dropped as a wrong date or a
+    stranger in the cluster. One dated face gives a wide range, none gives {}."""
+    pts = [(1970.0 + float(ep) / _YEAR_S - float(a), 1.0 / (4.0 + float(a)))
+           for a, ep in rows if a is not None and ep is not None and float(ep) > 0]
+    if not pts:
+        return {}
+    b, w = [p[0] for p in pts], [p[1] for p in pts]
+    if len(pts) == 1:
+        age = 1.0 / w[0] - 4.0
+        pad = max(2.0, 0.25 * age)
+        return {"born": int(round(b[0])), "born_lo": int(round(b[0] - pad)),
+                "born_hi": int(round(b[0] + pad)), "born_faces": 1}
+    med = _wquantile(b, w, 0.5)
+    keep = [(x, y) for x, y in zip(b, w) if abs(x - med) <= 15.0] or list(zip(b, w))
+    b, w = [k[0] for k in keep], [k[1] for k in keep]
+    return {"born": int(round(_wquantile(b, w, 0.5))), "born_lo": int(np.floor(_wquantile(b, w, 0.25))),
+            "born_hi": int(np.ceil(_wquantile(b, w, 0.75))), "born_faces": len(b)}
+
+def _attach_attributes(clusters: list) -> None:
+    """! @brief Gender (with how sure) and birth-year range on each face cluster. A gender
+    or birthday the user set on the person record is shown instead of the estimate
+    (`*_src` = "user"); nothing here writes to the record."""
+    ids = [c["id"] for c in clusters]
+    if not ids:
+        return
+    by = {}
+    for i in range(0, len(ids), 900):
+        part = ids[i:i + 900]
+        for cid, p_male, g, age, ep in _db().execute(
+                f"SELECT f.cluster_id, f.p_male, f.gender, f.age, {_PHOTO_EPOCH} "
+                "FROM face_regions f LEFT JOIN files ON files.rel_path=f.rel_path "
+                f"WHERE f.cluster_id IN ({','.join('?' * len(part))}) "
+                "AND COALESCE(f.unknown,0)=0 AND COALESCE(f.not_face,0)=0", part).fetchall():
+            by.setdefault(cid, []).append((p_male, g, age, ep))
+    min_faces = int(state.get("person_gender_min_faces") or 3)
+    min_share = float(state.get("person_gender_min_share") or 0.8)
+    descs, by_cluster = _person_meta()
+    for c in clusters:
+        rows = by.get(c["id"]) or []
+        g = _gender_of([(r[0], r[1]) for r in rows], min_faces, min_share)
+        b = _birth_of([(r[2], r[3]) for r in rows])
+        c.update(g)
+        c.update(b)
+        c["gender_src"] = "faces" if g else ""
+        c["born_src"] = "faces" if b else ""
+        # What the user set on the person record wins; the estimate is only kept
+        # beside it (gender_est / born_est) when it disagrees, as a hint, never a write.
+        bio = (descs.get(by_cluster.get(c["id"]), {}) or {}).get("bio") or {}
+        ug = {"male": "M", "female": "F"}.get(str(bio.get("gender") or "").lower())
+        if ug:
+            if g.get("gender") in ("M", "F") and g["gender"] != ug:
+                c["gender_est"] = g["gender"]
+            c.update(gender=ug, gender_src="user")
+        m = re.match(r"\s*(\d{4})", str(bio.get("birthday") or ""))
+        if m:
+            y = int(m.group(1))
+            if b and not (b["born_lo"] <= y <= b["born_hi"]):
+                c["born_est"] = f"{b['born_lo']}-{b['born_hi']}"
+            c.update(born=y, born_lo=y, born_hi=y, born_src="user")
+
+def _attach_name_hints(clusters: list) -> None:
+    """! @brief An unnamed cluster's most suggested name (metadata / LLM / known-person
+    match), with how many of its faces carry it, as `name_hint` / `name_hint_n`."""
+    ids = [c["id"] for c in clusters if not c.get("name")]
+    if not ids:
+        return
+    ph = ",".join("?" * len(ids))
+    best = {}
+    for cid, hint, n in _db().execute(
+            f"SELECT cluster_id, name_hint, COUNT(*) FROM face_regions WHERE cluster_id IN ({ph}) "
+            "AND COALESCE(name_hint,'')<>'' AND COALESCE(confirmed,0)=0 "
+            "GROUP BY cluster_id, name_hint", ids).fetchall():
+        if n > best.get(cid, ("", 0))[1]:
+            best[cid] = (hint, n)
+    for c in clusters:
+        if c["id"] in best:
+            c["name_hint"], c["name_hint_n"] = best[c["id"]]
+
 def api_face_clusters():
     """! @brief Clusters for the Faces tab, biggest first. Unnamed clusters lead.
 
@@ -1203,6 +1129,8 @@ def api_face_clusters():
         extra_to_fields=lambda row: {"drawn": round(float(row[5] or 0.0), 3)},
         flag_filter="COALESCE(unknown,0)=0 AND COALESCE(not_face,0)=0",
         sample_limit=60)
+    _attach_name_hints(clusters)
+    _attach_attributes(clusters)
     # Drawn-looking clusters are folded away (not deleted) so the threshold can
     # be tuned after the fact; ?show_drawn=1 lists them too.
     hide_at = float(state.get("face_hide_drawn") if state.get("face_hide_drawn") is not None else 0.55)
@@ -1662,14 +1590,15 @@ def api_face_progress():
     idle_wait = 0 if forced else max(0, int(60 - (time.time() - _last_activity())))
     return jsonify({"success": True, "pending": pending, "total": total,
                     "faces": cached, "done": total - pending,
-                    "enabled": bool(HOST.broker.variant("detect.faces")["background"]),
+                    "enabled": bool(HOST.broker.variant("people.pipeline")["background"]),
                     "forced": forced, "idle_wait": idle_wait,
                     "identity": bool(fs and fs["have_identity_embedder"]()),
                     # '' when healthy. Non-empty means the detector never loaded,
                     # so every image will scan clean with zero faces -- the pane
                     # must say so rather than report a cheerful "all caught up".
                     "model_error": fs["face_model_error"]() if fs else "faces module disabled",
-                    "face_detector": HOST.broker.selected_id("detect.faces"),
+                    "face_detector": (_pipeline.face_backend() if _pipeline
+                                      else HOST.broker.selected_id("detect.faces")),
                     "face_recognition": fs["recognition_model"]() if fs else "",
                     "status": state.get("status_text", "")})
 
@@ -2353,7 +2282,7 @@ def api_face_assign():
     _write_region_name(rel, cx, cy, w, h, name, bool(name))
     _rows("face_regions", "id=?", (fid,), commit=True,
           set={"cluster_id": target, "name": name, "confirmed": 1 if name else 0,
-               "unknown": 0, "not_face": 0})
+               "unknown": 0, "not_face": 0, "user_set": 1})
     push_face_flags([rel])
     return jsonify({"success": True, "face_id": fid, "cluster_id": target, "old_cluster_id": old,
                     "name": name, "uuid": uid})

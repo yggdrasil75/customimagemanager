@@ -4,9 +4,15 @@
 ======================================================================
 Model picks (Settings -> Models):
   detect.faces   YOLO face weights from the face registry (sizes n/s/m/l,
-                 custom .pt), fetched into models/face/yolo on first use.
-                 The handle applies this module's post-filter (min 32 px,
-                 optional drawn-face rejection).
+                 custom .pt; run by the yolo module), plus two providers
+                 here that also give 5 landmarks per face: SCRFD (the
+                 recognition pack's own detector) and YuNet (OpenCV). Every handle
+                 applies this module's post-filter (min 32 px, optional
+                 drawn-face rejection).
+  detect.persons cheetah: insightface 2.x person packages run on the app's own
+                 runtime (onnxruntime providers or torch): body boxes with their
+                 ReID vector and the face bound to each
+                 (the bodies module serves embed.bodies 'cheetah' from it)
   embed.faces    identity vectors: insightface packs (buffalo_* / antelope)
                  as types of one provider, plus the cv2 appearance fallback.
   face.shape     3D face-shape estimators (deep3d / insight3d / landmarks3d).
@@ -18,19 +24,21 @@ scoring, clustering, shape aggregation, model errors) is exposed as the
 from flask import jsonify
 
 from modules.model_broker import NoProviderError
-from . import facelib, registry, mesh
+from . import facelib, registry, mesh, yunet, cheetah
 import common
+import model_registry
 
 MANIFEST = {
     "id":          "faces",
     "name":        "Faces (detect, identify, shape)",
     "version":     "1.0.0",
-    "description": "Face detection (YOLO-face), ArcFace identity embeddings via "
-                   "insightface, 3D face shape and the drawn-face filter.",
+    "description": "Face detection (SCRFD / YuNet / YOLO-face), cheetah people, ArcFace identity "
+                   "embeddings and gender / age via insightface, 3D face shape and the "
+                   "drawn-face filter.",
     "core":        False,
     "requires":    [],
     "pip":         ["insightface"],  # recognition is insightface; YOLO face detectors need ultralytics
-    "pip_optional": ["ultralytics", "scipy"],
+    "pip_optional": ["ultralytics", "scipy", "onnx", "onnx2torch"],
     "assets":      [],
 }
 
@@ -100,9 +108,107 @@ def register(host):
             out.append(b)
         return out
 
-    # The detect.faces provider itself is the yolo module's (it is the
+    # The YOLO detect.faces provider is the yolo module's (it is the
     # ultralytics runtime); it takes the weights and the filter from the
     # service below. face_weights (custom .pt) is the picker setting it shows.
+    # The landmark-giving detectors live here: their boxes carry `kps`, so
+    # recognition aligns on them without detecting the face a second time.
+    host.add_config_key("cheetah_pack", default="cheetah_s",
+                        validate=lambda v: v if v in cheetah.PACKS else "cheetah_s")
+    host.add_settings_field(key="cheetah_pack", label="Cheetah package (insightface 2.x people)",
+                            kind="select", pane="module",
+                            options=[{"value": "cheetah_s", "label": "cheetah_s (small, ~29 MB)"},
+                                     {"value": "cheetah_l", "label": "cheetah_l (large)"}],
+                            help="Person detector + body ReID behind the cheetah providers and the "
+                                 "person pipeline's cheetah backend.")
+    host.add_config_key("cheetah_runtime", default="auto",
+                        validate=lambda v: v if v in cheetah.RUNTIMES else "auto")
+    host.add_settings_field(key="cheetah_runtime", label="Cheetah runtime",
+                            kind="select", pane="module",
+                            options=[{"value": "auto", "label": "Auto (torch on AMD / ROCm, else onnxruntime)"},
+                                     {"value": "onnx", "label": "onnxruntime (the app's providers: MIGraphX / CUDA / CPU)"},
+                                     {"value": "torch", "label": "torch (needs onnx2torch; the app's torch device)"}],
+                            help="insightface's own runner allows only CPU and CUDA; this one runs "
+                                 "the same models on whatever the app runs on.")
+
+    def _cheetah_faces(img):
+        """! @brief Faces for cheetah's face-body binding when no face list is handed in:
+        the recognition pack's SCRFD ([] without a pack)."""
+        try:
+            return facelib.scrfd_detect(img)
+        except RuntimeError:
+            return []
+
+    def _cheetah_ready():
+        """! @brief Point the cheetah runner at the picked package / runtime and load it;
+        raises with the reason."""
+        cheetah.configure(host.config.get("cheetah_pack") or "cheetah_s",
+                          host.config.get("cheetah_runtime") or "auto", _cheetah_faces)
+        if cheetah._load() is None:
+            raise RuntimeError(cheetah.error() or cheetah.reason() or "cheetah unavailable")
+
+    def _scrfd_loader():
+        """! @brief detect.faces 'scrfd' handle: the recognition pack's own detector."""
+        if not facelib.have_identity_embedder():
+            raise RuntimeError(facelib.face_model_error() or "insightface pack unavailable")
+
+        def run(img_bgr, *a, conf=0.5, **k):
+            """! @brief Boxes for one image, through this module's face filter."""
+            c = common.coerce_bgr(img_bgr)
+            return _filter(c, facelib.scrfd_detect(c, conf=conf)) if c is not None else []
+        run.registry_key = facelib.INSIGHT_KEY
+        return run
+
+    def _yunet_loader():
+        """! @brief detect.faces 'yunet' handle (fetches the weights once)."""
+        if not yunet.weights_path():
+            raise RuntimeError(yunet.error() or "YuNet weights unavailable")
+
+        def run(img_bgr, *a, conf=0.6, **k):
+            """! @brief Boxes for one image, through this module's face filter."""
+            c = common.coerce_bgr(img_bgr)
+            return _filter(c, yunet.detect(c, conf=max(0.3, float(conf or 0.6)))) if c is not None else []
+        return run
+
+    host.provide_model(
+        "detect.faces", "scrfd", label="SCRFD (insightface pack)", family="insightface",
+        speed="accurate", supports_conf=True,
+        note="The recognition pack's own detector (det_10g in buffalo_l, det_500m in s/sc): "
+             "boxes + 5 landmarks, best recall on small / profile faces, and no extra model "
+             "to load since recognition already holds it. Non-commercial weights.",
+        loader=_scrfd_loader, transform=None,
+        available=registry._have_insightface, reason="pip install insightface onnxruntime",
+        cost_mb=0, gpu=model_registry.on_gpu())
+    host.provide_model(
+        "detect.faces", "yunet", label="YuNet (OpenCV)", family="OpenCV",
+        speed="fast", supports_conf=True,
+        note="230 KB OpenCV-zoo detector run by cv2 itself: boxes + 5 landmarks, quick on "
+             "CPU, MIT-licensed weights. Weaker than SCRFD on tiny faces.",
+        loader=_yunet_loader, transform=None,
+        available=yunet.available, reason="needs OpenCV >= 4.5.4 (cv2.FaceDetectorYN)",
+        cost_mb=5, gpu=False)
+    def _cheetah_persons_loader():
+        """! @brief detect.persons 'cheetah' handle; boxes carry their body vector."""
+        _cheetah_ready()
+
+        def run(img_bgr, *a, conf=0.4, **k):
+            """! @brief Person boxes for one image."""
+            c = common.coerce_bgr(img_bgr)
+            if c is None:
+                return []
+            return [p for p in cheetah.analyze(c)["persons"] if p.get("conf", 1) >= (conf or 0)]
+        run.registry_key = cheetah.KEY
+        return run
+
+    host.provide_model(
+        "detect.persons", "cheetah", label="Cheetah people (insightface 2.x)", family="insightface",
+        speed="balanced",
+        note="Person boxes from insightface's cheetah package (run on the app's own runtime, "
+             "Settings: Cheetah runtime); each box carries its body ReID vector and the face "
+             "bound to it, so body identity needs no second model.",
+        loader=_cheetah_persons_loader, transform=None,
+        available=cheetah.available, reason=cheetah.reason, cost_mb=400, gpu=model_registry.on_gpu())
+
 
     # -- embed.faces: insightface packs + appearance fallback --------------
     def _pack():
@@ -184,6 +290,18 @@ def register(host):
         "detector_options": lambda: [{"value": "", "label": "Stock (size)"}] +
                                     [{"value": d["id"], "label": d["label"]}
                                      for d in registry.list_detectors() if d.get("custom")],
+        "analyze_faces": facelib.analyze_faces,
+        "face_attributes": facelib.face_attributes,
+        "have_attributes": facelib.have_attributes,
+        "refine_kps": facelib.refine_kps,
+        "scrfd_detect": facelib.scrfd_detect,
+        "yunet_detect": yunet.detect,
+        "cheetah_available": cheetah.available,
+        "cheetah_ready": _cheetah_ready,
+        "cheetah_analyze": cheetah.analyze,
+        "cheetah_runtime": cheetah.resolved_runtime,
+        "cheetah_reid": cheetah.reid,
+        "cheetah_registry_key": lambda: cheetah.KEY,
         "insight_registry_key": facelib.insight_registry_key,
         "have_identity_embedder": facelib.have_identity_embedder,
         "recognition_model": facelib.recognition_model,

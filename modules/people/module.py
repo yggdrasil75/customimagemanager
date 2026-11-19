@@ -8,6 +8,11 @@ the *product* built on them: it runs the library scan that caches
 detections + embeddings, clusters them into people, and owns every
 /api/faces, /api/bodies and /api/persons route plus the UI that shows them.
 
+The scan is the "person" task pipeline (person_pipeline.py; Settings > Task
+pipelines): load -> detect faces -> detect people -> landmarks -> identity ->
+gender / age -> bodies -> save -> name suggestions, run by the Models tab's
+People pipeline background switch and by People > Scan faces.
+
 Core touchpoints are events and one service:
   service "people"      person_for_cluster, store_person_field, BODY_FIELDS,
                         clusters_in_image - used by the LLM body-description action
@@ -29,6 +34,7 @@ Single-valued facts about a person live in the .person record: `hidden`
 (person_favorites).
 """
 from . import people_core as pc
+from . import person_pipeline
 from . import personlib
 
 MANIFEST = {
@@ -38,7 +44,7 @@ MANIFEST = {
     "description": "Scans the library for faces/bodies, clusters them into people, "
                    "and provides the People tab, person editor and 3D views.",
     "core":        False,
-    "requires":    ["faces"],
+    "requires":    ["faces", "task_pipeline"],
     "pip":         [],
     "assets":      ["people_pick.js", "faces_pane.js", "person.js", "person_mesh.js"],
 }
@@ -112,7 +118,18 @@ def _migrate(db):
                  "ALTER TABLE face_regions ADD COLUMN unknown INTEGER DEFAULT 0",
                  "ALTER TABLE face_regions ADD COLUMN not_face INTEGER DEFAULT 0",
                  "ALTER TABLE face_regions ADD COLUMN shape BLOB",
-                 "ALTER TABLE face_regions ADD COLUMN drawn REAL"):
+                 "ALTER TABLE face_regions ADD COLUMN drawn REAL",
+                 # person pipeline: landmarks, detector confidence, gender / age, and
+                 # a suggested name (metadata / LLM / known-person match) with its source
+                 "ALTER TABLE face_regions ADD COLUMN kps BLOB",
+                 "ALTER TABLE face_regions ADD COLUMN det_conf REAL",
+                 "ALTER TABLE face_regions ADD COLUMN gender TEXT",
+                 "ALTER TABLE face_regions ADD COLUMN p_male REAL",
+                 # 1 = a user put this face where it is (assign): automation leaves it
+                 "ALTER TABLE face_regions ADD COLUMN user_set INTEGER DEFAULT 0",
+                 "ALTER TABLE face_regions ADD COLUMN age REAL",
+                 "ALTER TABLE face_regions ADD COLUMN name_hint TEXT DEFAULT ''",
+                 "ALTER TABLE face_regions ADD COLUMN name_hint_src TEXT DEFAULT ''"):
         try:
             db.execute(stmt)
         except Exception:
@@ -120,8 +137,41 @@ def _migrate(db):
     db.commit()
 
 
+def _migrate_background(host):
+    """! @brief The Face detection / Person detection background switches became the one
+    People pipeline switch: carry an 'on' over (in the saved picks, before the
+    broker reads them). @return True when people detection was off but faces on, so
+    the pipeline's people steps start off too."""
+    sel = host.config.get("model_selection")
+    if not isinstance(sel, dict) or "people.pipeline" in sel:
+        return False
+    faces_on = bool((sel.get("detect.faces") or {}).get("background"))
+    persons_on = bool((sel.get("detect.persons") or {}).get("background"))
+    if faces_on or persons_on:
+        host.set_config("model_selection",
+                        {**sel, "people.pipeline": {"provider": "task", "background": True}}, save=False)
+    return faces_on and not persons_on
+
+
 def register(host):
     pc._bind(host)
+    pc._pipeline = person_pipeline
+    person_pipeline.register(host)
+    person_pipeline.register_sweep(host, pc.FACE_BATCH)
+    _no_people = _migrate_background(host)
+
+    def _pipeline_defaults():
+        """! @brief Faces were scanned but people were off: start the pipeline's people steps off too."""
+        if not _no_people or "person" in (host.config.get("task_pipelines") or {}):
+            return
+        svc = host.get_service("task_pipeline")
+        d = svc and svc["definition"]("person")
+        if d:
+            steps = [dict(s, enabled=s["enabled"] and s["step"] not in
+                          ("people.detect_persons", "people.embed_bodies")) for s in d["steps"]]
+            host.set_config("task_pipelines", {**(host.config.get("task_pipelines") or {}),
+                                               "person": {"steps": steps}})
+    host.on_startup(_pipeline_defaults)
     # face / body regions and persons are caches (names live in the MWG regions, the
     # not-a-face / unknown flags in Xmp.cim.Data "people"); face_rejects is DB-only
     host.add_table(_DDL, kind="state", check=_migrate)
@@ -143,6 +193,16 @@ def register(host):
                             kind="number", pane="module",
                             help="Clusters whose average drawn score is at or above this are folded "
                                  "away in the People tab (a toggle shows them). Tune without rescanning.")
+    host.add_config_key("person_gender_min_share", default=0.8,
+                        validate=lambda v: max(0.5, min(1.0, float(v if v not in (None, "") else 0.8))))
+    host.add_settings_field(key="person_gender_min_share", label="Show a person's gender when this share of faces agrees (0.5-1)",
+                            kind="number", pane="module",
+                            help="Faces vote only when the model is sure of them (p >= 0.75 either way). "
+                                 "Below this agreement the card says '?' with the lean.")
+    host.add_config_key("person_gender_min_faces", default=3,
+                        validate=lambda v: max(1, int(float(v or 3))))
+    host.add_settings_field(key="person_gender_min_faces", label="...and at least this many confident faces",
+                            kind="number", pane="module")
     host.add_config_key("face_skip_ai_generated", default=False, validate=bool)
     host.add_settings_field(key="face_skip_ai_generated", label="Skip face scan on AI-generated images",
                             kind="toggle", pane="module",
@@ -200,19 +260,16 @@ def register(host):
 
     # -- background scan worker + persons cache ----------------------------
     ## @brief Legacy: the People module used to own "detect faces on every scan"; that
-    # is the Face-detection model's own background switch now.
+    # is the People pipeline's background switch now.
     def _migrate_settings():
         cfg = host.config
         if cfg.pop("face_bg_enabled", None):
-            sel = host.broker.current_selection().get("detect.faces") or {}
-            host.broker.select("detect.faces", sel.get("provider") or host.broker.selected_id("detect.faces"),
-                               sel.get("size"), sel.get("type"), True, sel.get("classes"))
+            host.broker.select("people.pipeline", "task", None, None, True)
             host.persist_model_selection(save=False)
         if "face_bg_custom" in cfg:
             host.set_config("our_model_bg", bool(cfg.pop("face_bg_custom")), save=False)  # personal_box migrates it on
     host.on_startup(_migrate_settings)
     host.on_startup(pc._register_face_source)      # the forced "Scan faces" button
-    pc._register_sweeps()                          # Face / Person detection background switches
     host.on_startup(lambda: pc.rebuild_persons_cache())
 
     # -- core integration --------------------------------------------------
