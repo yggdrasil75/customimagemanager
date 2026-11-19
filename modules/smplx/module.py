@@ -74,6 +74,10 @@ def register(host):
         return host.model_variant("body.mesh")["type"] or "neutral"
 
     def _loader():
+        """! @brief The body.mesh handle; fetches the mirrored model files on first use
+        (here, not in the availability probe: settings must never wait on a download)."""
+        if not any(model_file(g["value"]) for g in _GENDERS):
+            _fetch_mirror()
         m = load(_gender())
         if m is None:
             raise RuntimeError(f"SMPL-X model files missing in {_DIR}")
@@ -105,11 +109,9 @@ def register(host):
                 _fetch_err[name] = f"{type(last).__name__}: {last}"
 
     def _available():
-        if any(model_file(g["value"]) for g in _GENDERS):
-            return True
-        if not _fetch_err:                       # try once per process
-            _fetch_mirror()
-        return any(model_file(g["value"]) for g in _GENDERS)
+        """! @brief Files on disk, or a mirror fetch not yet tried and failed (the loader
+        fetches). Disk and memory only."""
+        return any(model_file(g["value"]) for g in _GENDERS) or not _fetch_err
 
     host.provide_model(
         "body.mesh", "smplx", label="SMPL-X", family="SMPL", types=_GENDERS,

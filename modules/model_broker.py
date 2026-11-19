@@ -21,6 +21,9 @@ backend (`resource`) aren't serialized.
 
 import threading
 import contextlib
+import logging
+import time
+from concurrent import futures as _futures
 
 # "fg" (button / pipeline) or "bg" (background sweep), set while request() binds,
 # so a loader reading variant() gets the pick of the run it serves.
@@ -30,6 +33,19 @@ _ROLE = threading.local()
 # duration of a call (model_registry.lease); None until the app wires it. Without
 # it a budget eviction triggered by another load can unload a model mid-forward.
 _LEASE = None
+
+
+# Availability probes for listings (the Models tab, pickers): every provider's
+# available() runs in parallel on this pool, off the broker lock, and a listing
+# waits at most PROBE_BUDGET_S for them. A probe still running then is shown with
+# its last answer (or as available, "checking") - one slow probe (a model load,
+# a download, a network check) must not hold the settings menu hostage.
+_PROBE_POOL = _futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="probe")
+PROBE_BUDGET_S = 1.5
+PROBE_WARN_S = 2.0
+_log = logging.getLogger("cim.models")
+# set while a listing builds: available() / reason() read the probe results
+_QUICK = threading.local()
 
 
 def set_lease_hook(fn):
@@ -148,6 +164,9 @@ class Provider:
         self._handles = handles
         # one call at a time into this provider's models (see the module note)
         self._call_lock = threading.RLock()
+        # availability probe for listings (see _PROBE_POOL): running future, last answer
+        self._probe_fut = None
+        self._probe_last = None
 
     def classes(self):
         if self._classes is None:
@@ -165,7 +184,8 @@ class Provider:
         except Exception:
             return False
 
-    def available(self):
+    def _available_now(self):
+        """! @brief Run the module's availability check (no caching)."""
         if self._available is None:
             return True
         try:
@@ -173,9 +193,8 @@ class Provider:
         except Exception:
             return False
 
-    def reason(self):
-        if self.available():
-            return ""
+    def _reason_now(self):
+        """! @brief The module's unavailability reason, evaluated now."""
         r = self._reason
         if callable(r):  # say what actually went wrong
             try:
@@ -183,6 +202,66 @@ class Provider:
             except Exception:
                 r = ""
         return r or "unavailable"
+
+    def _probe(self):
+        """! @brief One full probe: (available, reason) - kept as the last answer. A probe
+        slower than PROBE_WARN_S is logged by name: probes should read imports,
+        files and settings only, and a slow one is a bug in its module."""
+        t = time.monotonic()
+        ok = self._available_now()
+        res = (ok, "" if ok else self._reason_now())
+        self._probe_last = res
+        dt = time.monotonic() - t
+        if dt > PROBE_WARN_S:
+            _log.warning("availability probe of %s took %.1fs (it should load / fetch nothing)",
+                         self.key, dt)
+        return res
+
+    def probe_async(self):
+        """! @brief Start a probe on the pool unless one is already running.
+        @return its future, or None for a provider with no check."""
+        if self._available is None:
+            return None
+        f = self._probe_fut
+        if f is None or f.done():
+            f = self._probe_fut = _PROBE_POOL.submit(self._probe)
+        return f
+
+    def checking(self):
+        """! @brief A probe is still running (a listing shows its last answer)."""
+        f = self._probe_fut
+        return bool(f is not None and not f.done())
+
+    def _quick(self):
+        """! @brief (available, reason) for a listing without waiting: the finished probe,
+        else the last answer, else optimistic while the first probe runs."""
+        f = self._probe_fut
+        if f is not None and f.done():
+            try:
+                return f.result()
+            except Exception:
+                return (False, "availability check failed")
+        return self._probe_last or (True, "")
+
+    def available(self):
+        if self._available is None:
+            return True
+        if getattr(_QUICK, "on", False):
+            return self._quick()[0]
+        f = self._probe_fut
+        if f is not None and not f.done():      # one already running: share it
+            try:
+                return f.result()[0]
+            except Exception:
+                return False
+        return self._available_now()
+
+    def reason(self):
+        if getattr(_QUICK, "on", False):
+            return "" if self._available is None else self._quick()[1]
+        if self.available():
+            return ""
+        return self._reason_now()
 
     @property
     def key(self):
@@ -204,6 +283,7 @@ class Provider:
                 "supports_conf": self.supports_conf,
                 "settings": [dict(f) for f in self.settings],
                 "available": self.available(), "reason": self.reason(),
+                "checking": self.checking(),
                 "cost_mb": self.cost_mb, "gpu": self.gpu,
                 "module_id": self.module_id}
 
@@ -532,13 +612,34 @@ class ModelBroker:
         except NoProviderError:
             return None
 
-    def providers_for(self, cap_id):
+    @contextlib.contextmanager
+    def _listing(self, cap_ids=None):
+        """! @brief Probe the providers in parallel, off the lock, for at most
+        PROBE_BUDGET_S, then let available() / reason() read the results (a probe
+        still running keeps its last answer and shows as `checking`)."""
         with self._lock:
+            provs = [p for c, d in self._providers.items()
+                     if cap_ids is None or c in cap_ids for p in d.values()]
+        futs = [f for f in (p.probe_async() for p in provs) if f is not None]
+        if futs:
+            _futures.wait(futs, timeout=PROBE_BUDGET_S)
+        prev = getattr(_QUICK, "on", False)
+        _QUICK.on = True
+        try:
+            yield
+        finally:
+            _QUICK.on = prev
+
+    def providers_for(self, cap_id, quick=False):
+        """! @brief The providers of one capability as dicts; quick=True for a listing
+        (probes in parallel with a time budget, see _listing)."""
+        with (self._listing([cap_id]) if quick else contextlib.nullcontext()), self._lock:
             return [p.as_dict() for p in self._providers.get(cap_id, {}).values()]
 
     def status(self):
-        """! @brief Every capability with its providers and picks."""
-        with self._lock:
+        """! @brief Every capability with its providers and picks. Availability comes from
+        parallel, time-boxed probes (see _listing): a slow probe can't stall it."""
+        with self._listing(), self._lock:
             out = []
             for cap_id, cap in self._caps.items():
                 out.append({

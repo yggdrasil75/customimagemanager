@@ -70,7 +70,7 @@ def _provider_choices(cap):
     """! @brief Select choices for a step's backend: the Models tab pick, then every
     registered provider (greyed with its reason when unavailable)."""
     try:
-        provs = pc.HOST.broker.providers_for(cap)
+        provs = pc.HOST.broker.providers_for(cap, quick=True)
         picked = pc.HOST.broker.selected_id(cap)
     except Exception:
         provs, picked = [], None

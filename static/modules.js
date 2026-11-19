@@ -278,6 +278,7 @@ const SPEED_BADGE = { fast: "fast", balanced: "balanced", accurate: "accurate" }
       if (r && r.error && window.showToast) showToast(r.error);
     } catch (e) { /* non-fatal */ }
   }
+  let _checkingRetries = 0;      // re-fetches while a server-side probe is still running
   async function buildModelPicker() {
     const mount = document.getElementById("model_capabilities");
     if (!mount) return;
@@ -310,7 +311,7 @@ const SPEED_BADGE = { fast: "fast", balanced: "balanced", accurate: "accurate" }
           label: (SPEED_BADGE[x.speed] ? SPEED_BADGE[x.speed] + " " : "") + x.label
                  + (x.family && x.family !== x.label ? ` (${x.family})` : "")
                  + (x.prompted ? " | prompted" : "")
-                 + (x.available ? "" : " | unavailable") })),
+                 + (x.checking ? " | checking..." : x.available ? "" : " | unavailable") })),
         p.id, (id) => pick({ provider: id, size: null, type: null }))));
       grid.appendChild(_cell("Size", _select(
         (p.sizes || []).map((s) => ({ value: s, label: s })), v.size, (s) => pick({ size: s }))));
@@ -341,6 +342,17 @@ const SPEED_BADGE = { fast: "fast", balanced: "balanced", accurate: "accurate" }
     }
     if (window.applyFeatureVisibility) applyFeatureVisibility(mount);
     _bgProgressStart();
+    // A slow availability check (a model / network probe) is still running on the
+    // server: look again shortly, unless the user is working in the picker.
+    const pending = caps.some((c) => (c.providers || []).some((x) => x.checking));
+    if (pending && _checkingRetries < 6) {
+      _checkingRetries += 1;
+      setTimeout(() => {
+        if (window._settingsOpen && !mount.contains(document.activeElement)) buildModelPicker();
+      }, 3000);
+    } else if (!pending) {
+      _checkingRetries = 0;
+    }
   }
   /** @brief "Run on every image" toggle + class whitelist for region-producing
    *  capabilities. Classes come from the selected provider (may load weights).

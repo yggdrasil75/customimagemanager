@@ -82,7 +82,7 @@ Delaunay, _HAVE_SCIPY = optional_import("scipy.spatial", attr="Delaunay")
 
 import object_grouping as og
 import model_registry
-from . import facelib
+from . import facelib, registry
 
 MODELS_DIR = facelib.MODELS_DIR
 
@@ -352,11 +352,27 @@ def _align_similarity_3d(src: np.ndarray, dst: np.ndarray) -> Optional[np.ndarra
 
 
 def _have_landmarks3d() -> bool:
-    """! @brief Whether the zero-download landmark backend can run (buffalo_l present)."""
-    try:
-        return facelib._load_insight() is not None
-    except Exception:
-        return False
+    """! @brief Whether the zero-download landmark backend can run: insightface is
+    installed (its pack downloads on first use). A probe, so it loads nothing - a
+    pack that then fails to load says so when it is used."""
+    return registry._have_insightface()
+
+
+def have_insight3d() -> bool:
+    """! @brief Cheap availability of the 3DMM fit: face3d imported and insightface
+    present (BFM.mat is fetched on first use). Loads nothing."""
+    return bool(_HAVE_FACE3D) and registry._have_insightface()
+
+
+def insight3d_static_reason() -> str:
+    """! @brief Why insight3d can't run, from imports alone ('' when it can be tried);
+    a load failure is reported by insight3d_reason() after a real attempt."""
+    if not _HAVE_FACE3D:
+        return ("insightface is installed but its face3d 3DMM (insightface.thirdparty.face3d) "
+                "did not import; see the 'insightface face3d unavailable' log line")
+    if not registry._have_insightface():
+        return "pip install insightface onnxruntime"
+    return _insight3d_state["reason"]
 
 
 def have_face_estimator() -> bool:
@@ -365,9 +381,9 @@ def have_face_estimator() -> bool:
           no extra weights - so this is effectively always available in a working
           install, and the deep3d/BFM paths are quality upgrades layered on top.
     """
-    return (_load_deep3d() is not None
-            or _load_insight3d() is not None
-            or _have_landmarks3d())
+    # cheap on purpose: settings and status polls ask this; loading the packs to
+    # answer it once took minutes on GPUs that compile ONNX graphs (MIGraphX)
+    return (_load_deep3d() is not None or have_insight3d() or _have_landmarks3d())
 
 
 def face_estimator_name() -> str:

@@ -253,10 +253,10 @@ def register(host):
         ("deep3d", "Deep3DFaceRecon", lambda: mesh._load_deep3d() is not None,
          "Full 3DMM regression (BFM basis). Not implemented yet - " + mesh.DEEP3D_REASON + ".",
          mesh.DEEP3D_REASON),
-        ("insight3d", "insightface 3D", lambda: mesh._load_insight3d() is not None,
+        ("insight3d", "insightface 3D", mesh.have_insight3d,
          "Morphable-model fit via insightface's face3d; needs its cython mesh extension "
-         "built and BFM.mat in models/face3d.",
-         mesh.insight3d_reason),
+         "built and BFM.mat in models/face3d (fetched on first use).",
+         mesh.insight3d_static_reason),
         ("landmarks3d", "Landmarks (fast)", mesh._have_landmarks3d,
          "Similarity-aligned 3D landmarks only. Always available with a buffalo pack.",
          "needs a loadable insightface buffalo pack"),
