@@ -49,6 +49,7 @@ from flask import request, jsonify, send_file, Response
 
 from . import book_index as bi
 from . import book_meta_write as bmw
+from . import book_cover
 import hashlib
 import mimetypes
 from urllib.parse import quote
@@ -129,6 +130,80 @@ def _user():
 # Indexing
 # ==============================================================================
 
+def make_cover(rel_path, abs_path, fmt, meta=None):
+    """! @brief A generated cover for a book without one (book_cover), written into the
+    file's cover slot when the format has one (EPUB, OPF folder, FB2, DOCX).
+    Off with the books_generate_covers setting.
+    @return (written into the file, jpeg bytes or None)."""
+    if not CTX.get("generate_covers", lambda: True)():
+        return False, None
+    meta = meta or {}
+    row = _db().execute("SELECT title, authors, series, series_index FROM books WHERE rel_path=?",
+                        (rel_path,)).fetchone()
+    title = (row["title"] if row and row["title"] else meta.get("title")) or \
+        os.path.splitext(os.path.basename(rel_path))[0]
+    try:
+        authors = json.loads(row["authors"]) if row and row["authors"] not in (None, "", "[]") \
+            else (meta.get("authors") or [])
+    except ValueError:
+        authors = meta.get("authors") or []
+    series = (row["series"] if row and row["series"] else meta.get("series")) or ""
+    sidx = (row["series_index"] if row and row["series_index"] else meta.get("series_index"))
+    try:
+        jpg = book_cover.generate(title, authors, series, sidx)
+    except Exception as e:
+        _log().warning(f"books: cover for {rel_path}: {e}")
+        return False, None
+    written = False
+    if fmt in bmw.COVER_FMTS and abs_path and os.path.exists(abs_path):
+        res = bmw.write_cover(abs_path, fmt, jpg)
+        if res["error"]:
+            _log().warning(f"books: writing a cover into {rel_path}: {res['error']}")
+        written = bool(res["written"])
+        if written:
+            _log().info(f"books: {rel_path} had no cover; generated one into the file")
+    return written, jpg
+
+
+def backfill_covers(limit=50) -> int:
+    """! @brief Books indexed before covers were generated (or while it was off): give the
+    next `limit` of them a cover. @return how many got one."""
+    if not CTX.get("generate_covers", lambda: True)():
+        return 0
+    db = _db()
+    rows = db.execute("SELECT rel_path, fmt FROM books WHERE COALESCE(cover, '')='' AND kind='book' "
+                      "AND reader!='paged' ORDER BY rel_path LIMIT ?", (limit,)).fetchall()
+    n = 0
+    for r in rows:
+        rp, fmt = r["rel_path"], r["fmt"]
+        ap = _abs(rp)
+        if not ap or not os.path.exists(ap):
+            continue
+        written, jpg = make_cover(rp, ap, fmt)
+        jpg = bi.make_cover_jpeg(jpg) if jpg else None
+        if not jpg:
+            continue
+        name = bi.cover_cache_name(rp)
+        try:
+            with open(os.path.join(_cache_dir(), name), "wb") as f:
+                f.write(jpg)
+        except OSError as e:
+            _log().warning(f"books: cover cache for {rp}: {e}")
+            continue
+        upd = {"cover": name}
+        if written:
+            try:
+                st = os.stat(ap)
+                upd.update(mtime=st.st_mtime, size=st.st_size)
+            except OSError:
+                pass
+        sets = ", ".join(f"{k}=?" for k in upd)
+        db.execute(f"UPDATE books SET {sets} WHERE rel_path=?", (*upd.values(), rp))
+        db.commit()
+        n += 1
+    return n
+
+
 def _upsert_book(rel_path, abs_path, verdict, force=False) -> bool:
     """! @brief Index one book if new or changed. Returns True if (re)indexed."""
     try:
@@ -167,6 +242,19 @@ def _upsert_book(rel_path, abs_path, verdict, force=False) -> bool:
         meta["page_count"] = len(pages) or None
         if pages and not meta.get("cover_bytes"):
             meta["cover_bytes"] = bi.comic_page_bytes(abs_path, fmt, pages[0])
+
+    if not meta.get("cover_bytes") and kind == "book" and reader != "paged":
+        # no cover in the file: make one from the title / author, and put it in the
+        # file's own cover slot where the format has one (the file stays the source)
+        written, jpg = make_cover(rel_path, abs_path, fmt, meta)
+        if jpg:
+            meta["cover_bytes"] = jpg
+        if written:
+            try:
+                st = os.stat(abs_path)
+                mtime, size = st.st_mtime, st.st_size  # we changed it: no re-index for that
+            except OSError:
+                pass
 
     cover_name = ""
     if meta.get("cover_bytes"):
@@ -314,6 +402,13 @@ def _index_background(force=False):
                 _record_triage(rel, ap, v)
             except Exception as e:
                 _log().error(f"book triage {rel}: {e}")
+
+        # books shelved before covers were generated (or while it was off)
+        try:
+            while backfill_covers(50):
+                pass
+        except Exception as e:
+            _log().warning(f"books: cover backfill: {e}")
 
         book_state["status"] = "idle"
     except Exception as e:

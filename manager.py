@@ -1140,6 +1140,10 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
         m = _FILTER_RE.match(tok)
         if m and not (m.group(4) and m.group(2)):          # "width:>1..2" is malformed
             col, val = m.group(1).lower(), int(m.group(3))
+            # 0 x 0 is "size unknown" (a file that did not decode when indexed): it is
+            # not smaller than anything, so only width:0 / width:=0 asks for it
+            if not (val == 0 and not m.group(4) and (m.group(2) or "=") in ("=", "<=")):
+                where.append("(width > 0 AND height > 0)")
             if m.group(4):
                 hi = int(m.group(4))
                 where.append(f"{_DIM_COLS[col]} BETWEEN ? AND ?")
@@ -8633,16 +8637,9 @@ if __name__=='__main__':
                   load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg,
                   read_document_id=_document_id, ensure_document_id=_ensure_document_id)
 
-    # Module startup hooks run before any background DB work: their tables, checks
-    # and migrations are done when the sync and the workers come along.
     access_logger.info("Running module startup hooks...")
     module_host.run_startup_hooks()
 
-    ## @brief Boot work runs one step at a time, each on the finished DB: the tier
-    # rebalance, then the sync the launch check scheduled (a full re-index holds
-    # the write lock for long stretches, so nothing else writes until it is done),
-    # then the indexer / upload workers and the background sources (autotag, face,
-    # sweeps). The web server answers from the start; uploads queue meanwhile.
     def _boot_tiering_then_workers():
         access_logger.info("Boot rebalance: placing library on the right tiers...")
         try:

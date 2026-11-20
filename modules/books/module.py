@@ -113,7 +113,16 @@ def register(host):
         "current_user":  host.current_user,
         "files_clause":  host.files_clause,     # access policies (ownership): listings
         "check_path":    host.check_path,       # and per-book routes see only what's allowed
+        "generate_covers": lambda: str(host.config.get("books_generate_covers", True)).strip().lower()
+                           not in ("0", "false", "no", "off", ""),
     })
+    host.add_config_key("books_generate_covers", default=True,
+                        validate=lambda v: str(v).strip().lower() not in ("0", "false", "no", "off", ""))
+    host.add_settings_field(key="books_generate_covers", label="Make covers for books without one",
+                            kind="toggle",
+                            help="A book whose file has no cover gets one with its title and author, "
+                                 "written into the file's own cover slot (EPUB, FB2, DOCX); other "
+                                 "formats keep it in the app only. PDFs and comics use their first page.")
 
     # Archive / PDF page access for the comics module (cbz/cbr/cb7 pages).
     # Metadata writes for other modules (metasrc applies lookups through it).

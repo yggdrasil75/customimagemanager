@@ -27,6 +27,12 @@ list (dc:subject / Keywords / Genre). Only DB-only data stays out of the file:
 reading progress, bookmarks, text chunks, embeddings, triage decisions.
 
 write(abs_path, fmt, fields) -> {"written": bool, "target": str, "error": str}
+
+A generated cover (book_cover.py, for a book with none) goes into the format's
+own cover slot with write_cover(abs_path, fmt, jpeg): EPUB / OPF folder a manifest
+image item (EPUB 3 cover-image) + <meta name="cover">, FB2 <coverpage> + <binary>,
+DOCX the package thumbnail (docProps/thumbnail.jpeg). PDFs and comics have none to
+fill: their first page is their cover.
 """
 import os
 import re
@@ -574,6 +580,139 @@ def sidecar_patch(fields):
     if "subjects" in fields:
         p["prism.Genre"] = list(fields["subjects"] or []) or None
     return {k: v for k, v in p.items() if v is not None}
+
+
+# -- covers -------------------------------------------------------------------------
+## @brief Names a generated cover is stored under (also how a second run sees it is there).
+COVER_ID = "cim-cover"
+COVER_NAME = "cim-cover.jpg"
+## @brief Formats with a standard cover slot (others keep the cover in the app's cache only).
+COVER_FMTS = ("epub", "opf-folder", "fb2", "docx")
+_OPC_THUMB = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail"
+_OPC_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+_OPC_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+
+def _opf_with_cover(opf_bytes, href):
+    """! @brief The OPF with a cover image item (EPUB 3 `cover-image`) and the EPUB 2
+    `<meta name="cover">` that older readers look for; None when it already has ours."""
+    _register_ns()
+    root = ET.fromstring(opf_bytes)
+    manifest = root.find(_OPF + "manifest")
+    if manifest is None:
+        manifest = ET.SubElement(root, _OPF + "manifest")
+    if any(el.get("id") == COVER_ID for el in manifest):
+        return None
+    attrs = {"id": COVER_ID, "href": href, "media-type": "image/jpeg"}
+    if str(root.get("version") or "").startswith("3"):
+        attrs["properties"] = "cover-image"
+    ET.SubElement(manifest, _OPF + "item", attrs)
+    md = root.find(_OPF + "metadata")
+    if md is None:
+        md = ET.SubElement(root, _OPF + "metadata")
+    for el in list(md):  # a cover meta pointing at nothing would win over ours
+        if el.tag == _OPF + "meta" and (el.get("name") or "").lower() == "cover":
+            md.remove(el)
+    ET.SubElement(md, _OPF + "meta", {"name": "cover", "content": COVER_ID})
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _cover_epub(path, jpeg):
+    with zipfile.ZipFile(path) as z:
+        opf = opf_name(z)
+        if not opf:
+            raise ValueError("no OPF package document")
+        data = z.read(opf)
+        names = set(z.namelist())
+    base = os.path.dirname(opf)
+    member = (base + "/" if base else "") + COVER_NAME
+    new = _opf_with_cover(data, COVER_NAME)
+    if new is None or member in names:
+        return False
+    _rewrite_zip(path, {opf: new, member: jpeg})
+    return True
+
+
+def _cover_opf_folder(path, jpeg):
+    img = os.path.join(os.path.dirname(path), COVER_NAME)
+    with open(path, "rb") as f:
+        new = _opf_with_cover(f.read(), COVER_NAME)
+    if new is None or os.path.exists(img):
+        return False
+    _atomic_replace(img, lambda tmp: open(tmp, "wb").write(jpeg))
+    _atomic_replace(path, lambda tmp: open(tmp, "wb").write(new))
+    return True
+
+
+def _cover_fb2(path, jpeg):
+    import base64
+    XL = "http://www.w3.org/1999/xlink"
+    ET.register_namespace("", FB2_NS)
+    ET.register_namespace("l", XL)
+    tree = ET.parse(path)
+    root = tree.getroot()
+    n = "{%s}" % FB2_NS
+    if any(b.get("id") == COVER_NAME for b in root.findall(n + "binary")):
+        return False
+    desc = root.find(n + "description")
+    if desc is None:
+        desc = ET.Element(n + "description")
+        root.insert(0, desc)
+    ti = desc.find(n + "title-info")
+    if ti is None:
+        ti = ET.SubElement(desc, n + "title-info")
+    old = ti.find(n + "coverpage")
+    if old is not None:
+        ti.remove(old)
+    cp = ET.Element(n + "coverpage")
+    ET.SubElement(cp, n + "image", {"{%s}href" % XL: "#" + COVER_NAME})
+    # the schema puts coverpage before lang / src-lang / translator / sequence
+    pos = next((i for i, el in enumerate(ti) if el.tag in (n + "lang", n + "src-lang", n + "translator",
+                                                            n + "sequence")), len(ti))
+    ti.insert(pos, cp)
+    b = ET.SubElement(root, n + "binary", {"id": COVER_NAME, "content-type": "image/jpeg"})
+    b.text = base64.b64encode(jpeg).decode("ascii")
+    _atomic_replace(path, lambda tmp: tree.write(tmp, encoding="utf-8", xml_declaration=True))
+    return True
+
+
+def _cover_docx(path, jpeg):
+    """! @brief The package thumbnail (docProps/thumbnail.jpeg): Windows and Office show it."""
+    member = "docProps/thumbnail.jpeg"
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        if member in names:
+            return False
+        ct = ET.fromstring(z.read("[Content_Types].xml"))
+        rels = ET.fromstring(z.read("_rels/.rels"))
+    ET.register_namespace("", _OPC_CT)
+    if not any(el.get("Extension", "").lower() == "jpeg" for el in ct):
+        ET.SubElement(ct, "{%s}Default" % _OPC_CT, {"Extension": "jpeg", "ContentType": "image/jpeg"})
+    ct_bytes = ET.tostring(ct, encoding="utf-8", xml_declaration=True)
+    ET.register_namespace("", _OPC_REL)
+    for el in list(rels):
+        if el.get("Type") == _OPC_THUMB:
+            rels.remove(el)
+    ids = {el.get("Id") for el in rels}
+    rid = next("rId%d" % i for i in range(1, 10000) if "rId%d" % i not in ids)
+    ET.SubElement(rels, "{%s}Relationship" % _OPC_REL, {"Id": rid, "Type": _OPC_THUMB, "Target": member})
+    rels_bytes = ET.tostring(rels, encoding="utf-8", xml_declaration=True)
+    _rewrite_zip(path, {"[Content_Types].xml": ct_bytes, "_rels/.rels": rels_bytes, member: jpeg})
+    return True
+
+
+def write_cover(abs_path, fmt, jpeg):
+    """! @brief Put a cover image into the book's own cover slot.
+    @return {"written": bool, "error": str}: written False with no error when the format
+    has no cover slot or the book already holds a cover written here."""
+    try:
+        fn = {"epub": _cover_epub, "opf-folder": _cover_opf_folder, "fb2": _cover_fb2,
+              "docx": _cover_docx}.get(fmt)
+        if fn is None:
+            return {"written": False, "error": ""}
+        return {"written": bool(fn(abs_path, jpeg)), "error": ""}
+    except Exception as e:
+        return {"written": False, "error": f"{type(e).__name__}: {e}"}
 
 
 def write(abs_path, fmt, fields, comicinfo=None):

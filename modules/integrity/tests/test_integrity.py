@@ -136,6 +136,9 @@ def test_broken_sidecar_reported_and_untouched(client, host, upload):
 
 
 def test_decode_failure_reported(client, host, upload):
+    """A file that no longer decodes: the hash check reports it first (corrupt), and
+    the deep pass's health check rates the damage in Review -> Corrupt files (the old
+    shallow "decode" issue kind is no longer raised)."""
     fn = upload(seed=7107, name="ig_decode.png")
     fp = media_path(fn)
     st = os.stat(fp)
@@ -144,13 +147,15 @@ def test_decode_failure_reported(client, host, upload):
     os.utime(fp, ns=(st.st_atime_ns, st.st_mtime_ns))
     svc = _svc(host)
     svc["check_deep"](fn, {}, time.time(), mb_per_s=0, decode=True)
-    assert _issue(host, fn)["kind"] == "corrupt"          # outranks decode
-    # once the new content is accepted, the decode failure is what remains
+    assert _issue(host, fn)["kind"] == "corrupt"
+    row = host.db().execute("SELECT damage, level FROM corrupt_files WHERE rel_path=?", (fn,)).fetchone()
+    assert row is not None and (row["damage"] > 0 or row["level"] == "unknown")
     assert client.post("/api/integrity/accept", json={"rel_path": fn}).get_json()["success"]
     new = {}
     assert svc["check_deep"](fn, new, time.time(), mb_per_s=0, decode=True) == "ok"
-    i = _issue(host, fn)
-    assert new == {"decode": [fn]} and i["kind"] == "decode" and i["resolved"] is None
+    assert "decode" not in new
+    host.db().execute("DELETE FROM corrupt_files WHERE rel_path=?", (fn,))
+    host.db().commit()
 
 
 def test_plan_tick_interval_and_idle():

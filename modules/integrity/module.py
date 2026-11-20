@@ -1,5 +1,12 @@
 """! @file
-@brief Integrity checks: notice external changes and silent corruption without a Sync.
+@brief Integrity checks: notice external changes and silent corruption without a Sync,
+and (health.py) how damaged images and videos are, size metadata that disagrees with
+the pixels, and songs stored as videos.
+
+The deep pass, while the server is idle, re-hashes each file and runs health.py's
+checks on it (only the steps not done since the file last changed), so one scan
+covers both. Health findings are listed in the Review tab ("Corrupt files", "Wrong
+metadata"); integrity's own issues there too ("Library issues", admins).
 
 """
 import json
@@ -10,18 +17,19 @@ import time
 
 from flask import jsonify, request
 
-from . import checks
+from . import checks, health
 
 MANIFEST = {
     "id":          "integrity",
     "name":        "Integrity checks",
     "version":     "1.0.0",
-    "description": "Background checks for missing, changed and silently corrupted files "
-                   "and broken sidecars, without pressing Sync.",
+    "description": "Background checks for missing, changed, damaged and silently corrupted "
+                   "files, wrong size metadata and broken sidecars, without pressing Sync; "
+                   "findings are listed in the Review tab.",
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "assets":      ["integrity.js"],
+    "assets":      ["integrity.js", "health.js"],
 }
 
 TAB = "integrity"
@@ -30,8 +38,6 @@ FEATURE = "settings." + TAB
 FIRST_DELAY = 300.0
 ## @brief Seconds a deep-pass job may run before it hands its slot back.
 DEEP_JOB_SECONDS = 20.0
-## @brief A file is decoded / probed every this many deep cycles.
-DECODE_EVERY_CYCLES = 3
 ## @brief Resolved issues older than this many days are deleted.
 KEEP_RESOLVED_DAYS = 30
 ## @brief Directory entries the media walk looks at per tick.
@@ -113,6 +119,7 @@ def register(host):
     tm = host.thread_manager
     boot = {"at": time.time()}  # when this process registered; the first pass waits FIRST_DELAY
     run = {"running": None, "lock": threading.Lock(), "last": {}}
+    health_api = {}  # filled by health.register below (check_deep calls into it)
 
     host.add_table(_DDL_ISSUES, kind="state")
     host.add_table(_DDL_CACHE, kind="cache")
@@ -667,30 +674,20 @@ def register(host):
                 result = "corrupt"
             elif digest:
                 clear(rel, ["corrupt"], now)
-        seen = seen_row(rel) or {}
-        if decode is None:
-            gap = cfg("integrity_deep_days") * 86400 * DECODE_EVERY_CYCLES
-            decode = now - float(seen.get("decode_at") or 0) >= gap
         cols = {"deep_at": now}
-        if decode and (row["width"] or 0) > 0 and (abort is None or not abort()):
-            kind = row["media_kind"] or host.media.kind(rel)
-            err = ""
-            if kind == "video":
-                err = checks.video_error(fp)
-            elif kind == "image":
-                try:
-                    ok = core.read_image(fp) is not None
-                except Exception as e:
-                    ok, err = False, str(e)
-                if not ok:
-                    err = "could not decode the image" + (": " + err if err else "")
-            if kind in ("image", "video"):
-                if err:
-                    if flag(rel, "decode", err, now):
-                        new.setdefault("decode", []).append(rel)
-                else:
-                    clear(rel, ["decode"], now)
-                cols["decode_at"] = now
+        if decode is not False and (abort is None or not abort()):
+            # damage / size metadata / audio-only (health.py): decode=None runs only the
+            # steps not done since the file last changed, True runs them all now
+            try:
+                hres = health_api["check_file"](rel, abort=abort, stale_only=decode is None)
+            except Exception as e:
+                log.warning(f"integrity: health check {rel}: {e}")
+                hres = None
+            if hres and hres.get("aborted"):
+                return "aborted"
+            if hres and hres.get("converted"):
+                return result  # now an audio file under another name; its sidecar moved with it
+            cols["decode_at"] = now
         err = checks.sidecar_error(checks.sidecar_path(fp))
         if err:
             if flag(rel, "sidecar", err, now):
@@ -789,6 +786,21 @@ def register(host):
                                 (time.time() - KEEP_RESOLVED_DAYS * 86400,)),
                          remove=True, dont_write=True)
 
+    # -- health checks (health.py), run by the deep pass ---------------------------
+    def _deep_state():
+        st = sched_state()
+        return {"in_cycle": st["deep_cursor"] is not None, "started": st["deep_started"] or None,
+                "finished": st["deep_finished"] or None,
+                "enabled": bool(cfg("integrity_enabled") and cfg("integrity_deep_enabled"))}
+
+    def _deep_start():
+        meta_set({"deep_cursor": "", "deep_started": time.time()})
+        try:
+            tm.wake()
+        except Exception:
+            pass
+    health_api.update(health.register(host, TAB, {"state": _deep_state, "start": _deep_start}))
+
     # -- worker source -------------------------------------------------------------
     def settings_view():
         """! @brief The settings plan_tick reads."""
@@ -827,7 +839,20 @@ def register(host):
             with run["lock"]:
                 run["running"] = None
 
-    host.on_startup(lambda: host.add_worker_source("integrity", _claim, _handle))
+    def _startup():
+        """! @brief The worker source; one-time cleanups. The old shallow decode probe is
+        gone (the deep pass's health check replaces it): its open issues are resolved."""
+        try:
+            d = host.db()
+            d.execute("UPDATE integrity_issues SET resolved=? WHERE kind='decode' AND resolved IS NULL",
+                      (time.time(),))
+            d.commit()
+        except Exception as e:
+            log.warning(f"integrity: resolving old decode issues: {e}")
+        health_api["startup"]()
+        host.add_worker_source("integrity", _claim, _handle)
+
+    host.on_startup(_startup)
 
     # -- events --------------------------------------------------------------------
     def _on_changed(rel_path, abs_path=None, fields=()):
@@ -1043,5 +1068,5 @@ def register(host):
                                        "run_cheap": run_cheap, "run_deep": run_deep,
                                        "status": status, "claim": _claim, "scan": scan,
                                        "purge": purge_one, "walk_tick": walk_tick,
-                                       "walk_new": walk_new, "boot": boot})
+                                       "walk_new": walk_new, "boot": boot, "health": health_api})
     log.info("integrity module registered")

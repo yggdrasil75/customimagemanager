@@ -1491,6 +1491,11 @@ def _meta_mobi(path: str, meta: dict):
 def _meta_docx(path: str, meta: dict):
     try:
         with zipfile.ZipFile(path) as z:
+            # the package thumbnail (Office / Windows show it) is the document's cover
+            thumb = next((n for n in z.namelist() if n.lower().startswith('docprops/thumbnail.')
+                          and n.lower().rsplit('.', 1)[-1] in ('jpeg', 'jpg', 'png')), None)
+            if thumb:
+                meta['cover_bytes'] = z.read(thumb)
             core = z.read('docProps/core.xml')
     except Exception:
         return
