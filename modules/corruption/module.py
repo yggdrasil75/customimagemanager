@@ -18,7 +18,14 @@ audio is copied out losslessly into the matching audio file (.m4a / .mp3 / .opus
 file replaces the video under the same name (core move_file, so tags, albums,
 history and module rows follow). Setting corrupt_strip_audio turns this off.
 
-Routes: GET /api/corrupt/list?min=<level>&offset&limit&ignored=0|1,
+A check that did not finish (ffprobe killed by a restart, a timeout, out of memory,
+a reader that gave nothing back) says nothing about the file: it is listed as "?"
+(level unknown, damage stored as -1, no Delete button), never overwrites a real
+earlier measurement, and the next pass tries it again. Decoder messages from an
+audio stream are not picture damage; video decoder messages with every frame
+decoded score at most 1 % (minor).
+
+Routes: GET /api/corrupt/list?min=<level>|unknown&offset&limit&ignored=0|1,
 POST /api/corrupt/check {filenames}, POST /api/corrupt/ignore {filename, ignored},
 POST /api/corrupt/scan (admin: start a cycle now).
 """
@@ -50,6 +57,11 @@ FEATURE = "tab.review"
 FIRST_DELAY = 120.0
 ## @brief Hours between two background cycles (a cycle only decodes new / changed files).
 CYCLE_HOURS = 6.0
+## @brief damage stored for a check that did not finish (shown as "?", never deletable).
+UNKNOWN = -1.0
+## @brief Bump to have every listed file checked again once (the rules for what counts
+# as damage changed).
+RULES_VERSION = "2"
 ## @brief Files a /api/corrupt/check call checks inline.
 CHECK_MAX = 20
 
@@ -256,14 +268,29 @@ def register(host):
             res = measure(rel, fp, kind, abort)
         except Exception as e:
             log.warning(f"corruption: {rel}: {e}")
-            res = damage.result(None, "check failed: %s" % e, skipped=True)
+            res = damage.invalid("%s: %s" % (type(e).__name__, e))
         if res.get("aborted"):
             return res
         now = time.time()
+        if res.get("invalid"):
+            # the check broke, not (necessarily) the file: list it as "?" so nobody deletes
+            # it on a bad reading, keep any real earlier measurement, and leave it unseen so
+            # the next pass tries again
+            old = d.execute("SELECT damage FROM corrupt_files WHERE rel_path=?", (rel,)).fetchone()
+            if old is None or old["damage"] < 0:
+                d.execute("INSERT OR REPLACE INTO corrupt_files(rel_path, damage, level, detail, checked_at, "
+                          "ignored) VALUES(?,?,?,?,?,COALESCE((SELECT ignored FROM corrupt_files "
+                          "WHERE rel_path=?), 0))",
+                          (rel, UNKNOWN, "unknown", res["detail"][:1000], now, rel))
+            d.execute("DELETE FROM corrupt_seen WHERE rel_path=?", (rel,))
+            d.commit()
+            return res
         d.execute("INSERT OR REPLACE INTO corrupt_seen(rel_path, mtime, checked_at) VALUES(?,?,?)",
                   (rel, row["mtime"], now))
         if res["damage"]:
             old = d.execute("SELECT ignored, damage FROM corrupt_files WHERE rel_path=?", (rel,)).fetchone()
+            if old is not None and (old["damage"] or 0) < 0:
+                old = None  # an earlier "?" says nothing about getting worse
             # an ignored file stays ignored unless it got worse
             ign = 1 if old is not None and old["ignored"] and res["damage"] <= (old["damage"] or 0) else 0
             d.execute("INSERT OR REPLACE INTO corrupt_files(rel_path, damage, level, detail, checked_at, "
@@ -336,9 +363,23 @@ def register(host):
             with run["lock"]:
                 run["busy"] = False
 
+    def recheck_listed():
+        """! @brief Once per RULES_VERSION: every listed file is checked again on the next
+        pass (earlier versions counted a killed check or audio decoder errors as damage)."""
+        if meta_get("rules") == RULES_VERSION:
+            return 0
+        d = host.db()
+        n = d.execute("DELETE FROM corrupt_seen WHERE rel_path IN (SELECT rel_path FROM corrupt_files)").rowcount
+        d.commit()
+        meta_set("rules", RULES_VERSION)
+        if n:
+            log.info(f"corruption: {n} listed files will be checked again under the new rules")
+        return n
+
     def _startup():
         try:
             purge_uncheckable()
+            recheck_listed()
         except Exception as e:
             log.warning(f"corruption: cleanup failed: {e}")
         host.add_worker_source("corruption", _claim, _handle)
@@ -386,6 +427,13 @@ def register(host):
         d = host.db()
         lvl = (request.args.get("min") or "minor").strip().lower()
         floor = damage.level_floor(lvl)
+        # "?" rows (check did not finish) show with the default filter and on their own
+        if lvl == "unknown":
+            dmg = "c.damage < 0"
+        elif lvl == "minor":
+            dmg = "(c.damage > ? OR c.damage < 0)"
+        else:
+            dmg = "c.damage > ?"
         ignored = 1 if str(request.args.get("ignored", "0")) in ("1", "true") else 0
         try:
             offset = max(0, int(request.args.get("offset", 0)))
@@ -395,8 +443,8 @@ def register(host):
         vclauses, vp = host.files_clause("c.rel_path")
         vis = "".join(" AND " + c for c in vclauses)
         base = (f"FROM corrupt_files c JOIN files f ON f.rel_path=c.rel_path "
-                f"WHERE c.ignored=? AND c.damage > ?{vis}")
-        args = (ignored, floor, *vp)
+                f"WHERE c.ignored=? AND {dmg}{vis}")
+        args = (ignored, *(() if lvl == "unknown" else (floor,)), *vp)
         total = d.execute("SELECT COUNT(*) " + base, args).fetchone()[0]
         counts = {r["level"]: int(r["n"]) for r in d.execute(
             f"SELECT c.level AS level, COUNT(*) AS n FROM corrupt_files c JOIN files f ON "
@@ -405,7 +453,8 @@ def register(host):
                          "COALESCE(f.media_kind, 'image') AS kind " + base +
                          " ORDER BY c.damage DESC, c.rel_path LIMIT ? OFFSET ?",
                          (*args, limit, offset)).fetchall()
-        items = [{"filename": r["rel_path"], "damage": r["damage"], "level": r["level"],
+        items = [{"filename": r["rel_path"], "damage": None if r["damage"] < 0 else r["damage"],
+                  "level": r["level"],
                   "detail": r["detail"], "checked_at": r["checked_at"], "kind": r["kind"]} for r in rows]
         return jsonify({"success": True, "items": items, "total": int(total), "counts": counts,
                         "min": lvl, "offset": offset, "limit": limit, "progress": progress()})
@@ -464,5 +513,6 @@ def register(host):
                                         "next_pending": next_pending,
                                         "checkable": checkable, "purge_uncheckable": purge_uncheckable,
                                         "strip_audio": strip_audio,
+                                        "recheck_listed": recheck_listed,
                                         "claim": _claim, "handle": _handle})
     log.info("corruption module registered")

@@ -119,6 +119,8 @@ def test_video_damage(tmp_path):
 def test_routes_on_a_broken_library_file(client, host, upload):
     if not getattr(host.media, "_HAVE_IMAGECODECS", True):
         pytest.skip("imagecodecs not installed: stored JXL files cannot be decoded")
+    if shutil.which("djxl") is None:
+        pytest.skip("djxl not installed: a JXL the reader rejects reads as \"?\" without it")
     fn = upload(seed=8801, name="cf_broken.png")
     svc = host.get_service("corruption")
     assert svc["check_file"](fn)["damage"] == 0
@@ -231,3 +233,110 @@ def test_audio_only_video_becomes_its_audio_file(host):
             d.execute("DELETE FROM corrupt_seen WHERE rel_path=?", (r,))
         d.commit()
         shutil.rmtree(os.path.dirname(fp), ignore_errors=True)
+
+
+def test_audio_decoder_errors_are_not_video_damage():
+    errtext = ("[aac @ 0x6132031202c0] decode_pce: Input buffer exhausted before END element found\n"
+               "[h264 @ 0x55d0c1a2b3c0] error while decoding MB 3 4\n"
+               "plain line\n")
+    video, audio = damage.split_errors(errtext, {"aac"})
+    assert audio == ["aac: decode_pce: Input buffer exhausted before END element found"]
+    assert video == ["h264: error while decoding MB 3 4", "plain line"]
+
+
+def _fake_video(monkeypatch, frames_rc, errtext=""):
+    """video_damage with ffprobe replaced: 10 packets (keyframe first), all decoded."""
+    info = {"width": 64, "height": 64, "nb_frames": 10, "duration": 1.0, "fps": 10.0}
+    monkeypatch.setattr(damage, "_stream_info", lambda p: (info, ""))
+    monkeypatch.setattr(damage, "_audio_codecs", lambda p: {"aac"})
+    monkeypatch.setattr(damage.shutil, "which", lambda n: "/usr/bin/" + n)
+    pk = "\n".join("%d,%s" % (i, "K_" if i == 0 else "__") for i in range(10))
+    fr = "\n".join(str(i) for i in range(10))
+
+    def run(cmd, timeout, abort=None, poll=1.0):
+        if "packet=pos,flags" in cmd:
+            return 0, pk, ""
+        return frames_rc, (fr if frames_rc == 0 else fr.split("\n")[0]), errtext
+    monkeypatch.setattr(damage, "_run", run)
+    return damage.video_damage("x.mp4")
+
+
+def test_audio_errors_alone_score_zero(monkeypatch):
+    r = _fake_video(monkeypatch, 0, "[aac @ 0x61] decode_pce: Input buffer exhausted before END element found\n")
+    assert r["damage"] == 0 and r["level"] == "ok"
+
+
+def test_video_errors_without_lost_frames_are_minor_and_readable(monkeypatch):
+    r = _fake_video(monkeypatch, 0, "[h264 @ 0x55] error while decoding MB 3 4\n")
+    assert r["level"] == "minor" and r["damage"] <= 0.1
+    assert r["detail"].startswith("every frame decoded, but the video decoder reported 1 error -")
+    assert "0x55" not in r["detail"]
+
+
+@pytest.mark.parametrize("rc", [-15, -9, 1, None])
+def test_a_killed_or_failed_decode_is_unknown_not_100(monkeypatch, rc):
+    """A restart mid-check kills ffprobe: the half frame list must not read as lost frames."""
+    r = _fake_video(monkeypatch, rc)
+    assert r["damage"] is None and r["invalid"] and r["level"] == "unknown"
+    assert r["detail"].startswith("check did not finish")
+
+
+def test_stream_info_killed_is_unknown(monkeypatch):
+    monkeypatch.setattr(damage.shutil, "which", lambda n: "/usr/bin/" + n)
+    monkeypatch.setattr(damage, "_stream_info", lambda p: (None, damage.INVALID + "ffprobe timed out"))
+    r = damage.video_damage("x.mp4")
+    assert r["damage"] is None and r["invalid"]
+    monkeypatch.setattr(damage, "_stream_info", lambda p: (None, "moov atom not found"))
+    assert damage.video_damage("x.mp4")["damage"] == 1.0          # the file itself does not open
+
+
+def test_reader_failures_are_unknown(tmp_path):
+    def boom(p):
+        raise MemoryError()
+    for reader in (lambda p: None, boom):
+        r = damage.image_damage(str(tmp_path / "x.heic"), read_image=reader)
+        assert r["damage"] is None and r["invalid"]
+
+
+def test_unknown_result_is_listed_as_question_mark_and_keeps_a_real_finding(client, host, upload, monkeypatch):
+    fn = upload(seed=8802, name="cf_unknown.png")
+    svc = host.get_service("corruption")
+    d = host.db()
+    try:
+        monkeypatch.setattr(damage, "image_damage", lambda *a, **k: damage.invalid("killed"))
+        res = svc["check_file"](fn)
+        assert res["invalid"]
+        row = d.execute("SELECT damage, level FROM corrupt_files WHERE rel_path=?", (fn,)).fetchone()
+        assert row["damage"] < 0 and row["level"] == "unknown"
+        assert d.execute("SELECT 1 FROM corrupt_seen WHERE rel_path=?", (fn,)).fetchone() is None
+        j = client.get("/api/corrupt/list").get_json()
+        it = next(x for x in j["items"] if x["filename"] == fn)
+        assert it["damage"] is None and it["level"] == "unknown" and j["counts"].get("unknown")
+        j = client.get("/api/corrupt/list?min=unknown").get_json()
+        assert [x["filename"] for x in j["items"]] == [fn]
+        assert not any(x["filename"] == fn for x in client.get("/api/corrupt/list?min=major").get_json()["items"])
+        # a real measurement is never overwritten by a failed check
+        d.execute("UPDATE corrupt_files SET damage=0.3, level='major' WHERE rel_path=?", (fn,))
+        d.commit()
+        svc["check_file"](fn)
+        assert d.execute("SELECT damage FROM corrupt_files WHERE rel_path=?", (fn,)).fetchone()[0] == 0.3
+    finally:
+        d.execute("DELETE FROM corrupt_files WHERE rel_path=?", (fn,))
+        d.commit()
+
+
+def test_listed_files_are_rechecked_once_under_new_rules(host):
+    svc = host.get_service("corruption")
+    d = host.db()
+    d.execute("INSERT OR REPLACE INTO corrupt_files(rel_path, damage, level, detail, checked_at, ignored) "
+              "VALUES('cf_rules/a.mp4', 1.0, 'unreadable', 'x', 0, 0)")
+    d.execute("INSERT OR REPLACE INTO corrupt_seen(rel_path, mtime, checked_at) VALUES('cf_rules/a.mp4', 1, 1)")
+    d.execute("DELETE FROM corrupt_meta WHERE key='rules'")
+    d.commit()
+    try:
+        assert svc["recheck_listed"]() >= 1
+        assert d.execute("SELECT 1 FROM corrupt_seen WHERE rel_path='cf_rules/a.mp4'").fetchone() is None
+        assert svc["recheck_listed"]() == 0                              # only once
+    finally:
+        d.execute("DELETE FROM corrupt_files WHERE rel_path='cf_rules/a.mp4'")
+        d.commit()

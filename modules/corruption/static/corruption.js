@@ -4,7 +4,8 @@
 (function () {
   "use strict";
   const LEVELS = ["minor", "moderate", "major", "severe", "unreadable"];
-  const LEVEL_CLS = { minor: "#a3a3a3", moderate: "#facc15", major: "#fb923c", severe: "#ef4444",
+  // "unknown": the check did not finish (killed, timed out, reader failed) - "?", never deletable
+  const LEVEL_CLS = { unknown: "#60a5fa", minor: "#a3a3a3", moderate: "#facc15", major: "#fb923c", severe: "#ef4444",
                       unreadable: "#b91c1c" };
   const PAGE = 200;
   const esc = s => (typeof _esc === "function") ? _esc(s) : String(s ?? "").replace(/[&<>"']/g, c =>
@@ -23,6 +24,7 @@
   }
   function toast(t) { if (typeof showToast === "function") showToast(t); }
   const pct = d => {
+    if (d === null || d === undefined || Number(d) < 0) return "?%";
     const p = 100 * (Number(d) || 0);
     return p >= 10 ? p.toFixed(0) + "%" : p >= 1 ? p.toFixed(1) + "%" : p.toFixed(2) + "%";
   };
@@ -32,7 +34,8 @@
   function row(it) {
     const rel = esc(it.filename);
     const col = LEVEL_CLS[it.level] || "#a3a3a3";
-    const w = Math.max(2, Math.min(100, 100 * (Number(it.damage) || 0)));
+    const unknown = it.damage === null || it.damage === undefined || Number(it.damage) < 0;
+    const w = unknown ? 0 : Math.max(2, Math.min(100, 100 * (Number(it.damage) || 0)));
     return `<div class="flex items-center gap-2 py-1 border-b border-gray-700/60" data-cf-row="${rel}">
       <div class="flex-shrink-0 w-12 h-12 rounded bg-gray-900 bg-center bg-cover cursor-pointer"
            data-thumb="/api/thumb/${encodeURI(it.filename)}" data-cf-act="open" title="Open in the editor"></div>
@@ -53,7 +56,8 @@
         <button type="button" data-cf-act="check" class="bg-gray-700 hover:bg-gray-600 px-1.5 py-0.5 rounded" title="Decode it again">Re-check</button>
         <button type="button" data-cf-act="ignore" class="bg-gray-700 hover:bg-gray-600 px-1.5 py-0.5 rounded"
           title="${showIgnored ? "List it again" : "Hide it from this list (it comes back if it gets worse)"}">${showIgnored ? "Unignore" : "Ignore"}</button>
-        <button type="button" data-cf-act="delete" class="bg-red-800 hover:bg-red-700 px-1.5 py-0.5 rounded">Delete</button>
+        ${unknown ? '<span class="text-[10px] text-blue-300 px-1" title="The check did not finish, so nothing is known about this file yet. Re-check it before deciding.">re-check first</span>'
+          : '<button type="button" data-cf-act="delete" class="bg-red-800 hover:bg-red-700 px-1.5 py-0.5 rounded">Delete</button>'}
       </div>
     </div>`;
   }
@@ -74,12 +78,13 @@
     try { d = await fetch(q).then(r => r.json()); } catch (e) { return 0; }
     if (!d || !d.success) return 0;
     const counts = d.counts || {};
-    const all = LEVELS.reduce((n, l) => n + (counts[l] || 0), 0);
+    const all = LEVELS.reduce((n, l) => n + (counts[l] || 0), 0) + (counts.unknown || 0);
     if (!all && !showIgnored) return 0;
     box.className = "mb-3";
     const opts = LEVELS.map(l => `<option value="${l}"${l === minLevel ? " selected" : ""}>${l}${l === "unreadable" ? "" : " or worse"} (${
-      LEVELS.slice(LEVELS.indexOf(l)).reduce((n, x) => n + (counts[x] || 0), 0)})</option>`).join("");
-    const chips = LEVELS.filter(l => counts[l]).map(l =>
+      LEVELS.slice(LEVELS.indexOf(l)).reduce((n, x) => n + (counts[x] || 0), 0) + (l === "minor" ? (counts.unknown || 0) : 0)})</option>`).join("") +
+      `<option value="unknown"${minLevel === "unknown" ? " selected" : ""}>? check did not finish (${counts.unknown || 0})</option>`;
+    const chips = LEVELS.concat(["unknown"]).filter(l => counts[l]).map(l =>
       `<span class="text-[10px]" style="color:${LEVEL_CLS[l]}">${l} ${counts[l]}</span>`).join(" ");
     const more = d.total > d.items.length
       ? `<button type="button" data-cf-act="more" class="text-[11px] text-gray-400 hover:text-gray-200 mt-1">Show more (${d.total - d.items.length} left)</button>` : "";
@@ -125,7 +130,8 @@
         b.disabled = true; b.textContent = "...";
         const d = await post("/api/corrupt/check", { filenames: [rel] });
         const res = d.success && d.results ? d.results[rel] : null;
-        toast(res ? (res.damage ? `${res.level}: ${pct(res.damage)} damaged` : res.damage === 0 ? "Decodes cleanly now." : res.detail)
+        toast(res ? (res.damage ? `${res.level}: ${pct(res.damage)} damaged` : res.damage === 0 ? "Decodes cleanly now."
+                   : res.invalid ? "The check did not finish: " + res.detail : res.detail)
                   : "Re-check failed.");
       } else if (act === "ignore") {
         await post("/api/corrupt/ignore", { filename: rel, ignored: !showIgnored });

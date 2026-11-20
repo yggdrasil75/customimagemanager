@@ -34,16 +34,21 @@ PIL_EXTS = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".gif", ".bmp", "
 ## @brief Seconds per second of video a decode may take before it is given up (plus a floor).
 TIMEOUT_FLOOR = 300.0
 TIMEOUT_PER_SECOND = 2.0
+## @brief Most a video can score when every frame decoded and only decoder messages
+# were logged (the top of "minor").
+ERRORS_ONLY_CAP = 0.01
 ## @brief Weight of a decoded frame that predicts from a lost one.
 TAINT_WEIGHT = 0.5
 
+## @brief "[h264 @ 0x55d0c1a2b3c0] message" -> ("h264", "message").
+_LOG_PREFIX = re.compile(r"^\[([\w.,-]+) @ (?:0x)?[0-9a-fA-F]+\]\s*")
 _CONCEAL = re.compile(r"concealing (\d+) DC, (\d+) AC, (\d+) MV errors")
 _PIL_LOCK = threading.Lock()
 
 
 def level(damage):
-    """! @brief Level name of a damage fraction (None = not measured)."""
-    if damage is None:
+    """! @brief Level name of a damage fraction (None / negative = not measured)."""
+    if damage is None or float(damage) < 0:
         return "unknown"
     d = float(damage)
     if d <= 0:
@@ -65,7 +70,9 @@ def level_floor(name):
 
 
 def result(damage, detail, **extra):
-    """! @brief A check result: {damage, level, detail, ...}."""
+    """! @brief A check result: {damage, level, detail, ...}.
+    damage None with invalid=True: the check itself failed (killed, timed out, out of
+    memory, the reader gave up) - nothing is known about the file, it reads "?"."""
     d = None if damage is None else round(max(0.0, min(1.0, float(damage))), 6)
     out = {"damage": d, "level": level(d), "detail": detail}
     out.update(extra)
@@ -148,6 +155,46 @@ def jxl_partial_ok(path, timeout=120):
 JXL_PARTIAL_DAMAGE = 0.25
 
 
+def invalid(why, **extra):
+    """! @brief The result of a check that did not finish: the file's state is unknown."""
+    return result(None, "check did not finish: %s" % why, invalid=True, **extra)
+
+
+def _failed_check(e):
+    """! @brief The exception says the check failed, not the file: out of memory, a
+    decompression-bomb guard, a read error from the disk, the file vanishing."""
+    try:
+        from PIL import Image
+        bomb = (Image.DecompressionBombError,)
+    except Exception:
+        bomb = ()
+    if isinstance(e, (MemoryError,) + bomb):
+        return True
+    return isinstance(e, OSError) and getattr(e, "errno", None) is not None
+
+
+def jxl_strict_ok(path, timeout=300):
+    """! @brief djxl decodes the whole file (True), fails on it (False), or is not
+    installed / was cut off (None)."""
+    if shutil.which("djxl") is None:
+        return None
+    import tempfile
+    fd, out = tempfile.mkstemp(suffix=".ppm")
+    os.close(fd)
+    try:
+        p = subprocess.run(["djxl", path, out], capture_output=True, timeout=timeout)
+        if p.returncode < 0:
+            return None  # killed
+        return p.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    finally:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+
+
 def image_damage(path, read_image=None, can_decode=True):
     """! @brief Damage of an image file.
     @param read_image  fallback reader fn(path) -> array or None for formats Pillow
@@ -163,13 +210,23 @@ def image_damage(path, read_image=None, can_decode=True):
             arr = read_image(path)
             err = ""
         except Exception as e:
-            arr, err = None, str(e)
+            arr, err = None, str(e) or type(e).__name__
         if arr is not None:
             return _grey_result(arr)
-        if ext == ".jxl" and jxl_partial_ok(path):
-            return result(JXL_PARTIAL_DAMAGE, "truncated: only part of the image decodes, the rest "
-                                              "shows at low detail (extent not measurable for JXL)")
-        return result(1.0, "does not decode" + (": " + err[:200] if err else ""))
+        # the reader gave nothing back: that alone does not say the file is broken (it
+        # also happens out of memory, or when a decoder is missing or misbehaves)
+        if ext == ".jxl":
+            whole = jxl_strict_ok(path)
+            if whole is True:
+                return invalid("the app's reader failed, but djxl decodes the file" +
+                               (" (%s)" % err[:160] if err else ""))
+            if whole is False:
+                if jxl_partial_ok(path):
+                    return result(JXL_PARTIAL_DAMAGE, "truncated: only part of the image decodes, the rest "
+                                                      "shows at low detail (extent not measurable for JXL)")
+                return result(1.0, "does not decode (djxl fails on it)")
+        return invalid("the reader returned no image; it cannot tell whether the file or the "
+                       "reader is at fault" + (" (%s)" % err[:160] if err else ""))
     from PIL import Image, ImageFile
     try:
         with Image.open(path) as im:
@@ -185,6 +242,8 @@ def image_damage(path, read_image=None, can_decode=True):
             return _grey_result(np.asarray(first))
         return result(0.0, "")
     except Exception as first_err:
+        if _failed_check(first_err):
+            return invalid("%s: %s" % (type(first_err).__name__, str(first_err)[:160]))
         strict_err = "%s" % first_err
     with _PIL_LOCK:
         old = ImageFile.LOAD_TRUNCATED_IMAGES
@@ -195,6 +254,8 @@ def image_damage(path, read_image=None, can_decode=True):
                 h = im.height
                 arr = im.convert("RGB")
         except Exception as e:
+            if _failed_check(e):
+                return invalid("%s: %s" % (type(e).__name__, str(e)[:160]))
             return result(1.0, "does not decode: %s" % (str(e)[:200] or strict_err[:200]))
         finally:
             ImageFile.LOAD_TRUNCATED_IMAGES = old
@@ -240,6 +301,37 @@ def _run(cmd, timeout, abort=None, poll=1.0):
     return rc, "".join(out), "".join(err)
 
 
+## @brief Prefix of a _stream_info error that is about the check, not the file.
+INVALID = "invalid:"
+
+
+def _audio_codecs(path):
+    """! @brief Names of the file's audio decoders (their log lines are not video damage)."""
+    try:
+        p = subprocess.run(["ffprobe", "-v", "quiet", "-select_streams", "a", "-show_entries",
+                            "stream=codec_name", "-of", "csv=p=0", path], capture_output=True, text=True,
+                           timeout=60, errors="replace")
+        return {ln.strip().split(",")[0] for ln in (p.stdout or "").splitlines() if ln.strip()}
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+
+
+def split_errors(errtext, audio_codecs=()):
+    """! @brief ffprobe's error log as (video, audio) lists of "who: message" lines; lines
+    from an audio decoder (aac, mp3, opus, ...) say nothing about the picture."""
+    video, audio = [], []
+    for ln in errtext.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        m = _LOG_PREFIX.match(ln)
+        who = m.group(1) if m else ""
+        msg = ln[m.end():] if m else ln
+        line = ("%s: %s" % (who, msg)) if who and who != "NULL" else msg
+        (audio if who and who in audio_codecs else video).append(line)
+    return video, audio
+
+
 def _stream_info(path):
     """! @brief {width, height, nb_frames, duration, fps} of the first video stream, or None
     when the container does not open (the error text instead)."""
@@ -249,9 +341,11 @@ def _stream_info(path):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=60, errors="replace")
     except subprocess.TimeoutExpired:
-        return None, "ffprobe timed out"
+        return None, INVALID + "ffprobe timed out"
     except OSError as e:
-        return None, "ffprobe failed: %s" % e
+        return None, INVALID + "ffprobe failed to start: %s" % e
+    if p.returncode < 0:
+        return None, INVALID + "ffprobe was killed (signal %d)" % -p.returncode
     info = {}
     for line in (p.stdout or "").splitlines():
         if "=" in line:
@@ -312,6 +406,8 @@ def video_damage(path, abort=None):
         return result(None, "ffprobe not installed", skipped=True)
     info, err = _stream_info(path)
     if info is None:
+        if err.startswith(INVALID):
+            return invalid(err[len(INVALID):])
         return result(1.0, "does not open: %s" % err)
     expected = info["nb_frames"]
     if not expected and info["duration"] and info["fps"]:
@@ -321,6 +417,10 @@ def video_damage(path, abort=None):
                        "packet=pos,flags", "-of", "csv=p=0", path], timeout, abort)
     if rc == "aborted":
         return result(None, "aborted", aborted=True)
+    if rc is None:
+        return invalid("reading the packet list timed out")
+    if rc < 0:
+        return invalid("ffprobe was killed while reading packets (signal %d)" % -rc)
     packets = []
     for line in out.splitlines():
         parts = line.strip().split(",")
@@ -331,19 +431,27 @@ def video_damage(path, abort=None):
     if rc == "aborted":
         return result(None, "aborted", aborted=True)
     if rc is None:
-        return result(None, "decode timed out", skipped=True)
+        return invalid("the decode timed out")
+    if rc != 0:
+        # a damaged stream still decodes with exit 0; anything else (killed by a restart,
+        # out of memory, a crash) means the frame list is incomplete, not the file
+        why = ("ffprobe was killed (signal %d)" % -rc) if rc < 0 else ("ffprobe exited with %d" % rc)
+        return invalid(why + " part-way through the decode")
     decoded = {ln.strip().split(",")[0] for ln in out.splitlines() if ln.strip()}
     conceal = sum(int(m.group(1)) for m in _CONCEAL.finditer(errtext))
     mbs = ((info["width"] + 15) // 16) * ((info["height"] + 15) // 16)
-    errors = [ln for ln in errtext.splitlines() if ln.strip()]
+    errors, audio_errors = split_errors(errtext, _audio_codecs(path))
     if not packets:
         return result(1.0, "no video packets could be read", errors=len(errors))
     s = score_video(packets, decoded, expected, conceal, mbs)
     if s["damage"] <= 0 and errors:
-        # the decoder complained but every frame came out: a hair above zero
-        s["damage"] = min(1.0, 1.0 / s["expected"])
+        # the video decoder complained but every frame came out: never more than minor,
+        # whatever the clip length (one message in a 10-frame clip is not 10 % damage)
+        s["damage"] = min(ERRORS_ONLY_CAP, len(errors) / float(s["expected"]))
     if s["damage"] <= 0:
-        return result(0.0, "", frames=s["expected"])
+        # audio decoder errors alone are not picture damage
+        note = ("audio decoder: %s" % audio_errors[0][:160]) if audio_errors else ""
+        return result(0.0, note, frames=s["expected"], audio_errors=len(audio_errors))
     bits = []
     if s["lost"]:
         bits.append("%d of %d frames lost" % (s["lost"], s["expected"]))
@@ -354,9 +462,10 @@ def video_damage(path, abort=None):
     if s["concealed"]:
         bits.append("~%.1f frames' worth of blocks concealed" % s["concealed"])
     if not bits:
-        bits.append("%d decoder errors" % len(errors))
-    first = errors[0].strip()[:160] if errors else ""
-    return result(s["damage"], "; ".join(bits) + (" (%s)" % first if first else ""),
+        n = len(errors)
+        bits.append("every frame decoded, but the video decoder reported %d error%s" % (n, "" if n == 1 else "s"))
+    first = errors[0][:160] if errors else ""
+    return result(s["damage"], "; ".join(bits) + (" - %s" % first if first else ""),
                   frames=s["expected"], lost=s["lost"], tainted=s["tainted"], errors=len(errors))
 
 # -- audio in a video container ------------------------------------------------------
