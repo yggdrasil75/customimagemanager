@@ -358,3 +358,79 @@ def video_damage(path, abort=None):
     first = errors[0].strip()[:160] if errors else ""
     return result(s["damage"], "; ".join(bits) + (" (%s)" % first if first else ""),
                   frames=s["expected"], lost=s["lost"], tainted=s["tainted"], errors=len(errors))
+
+# -- audio in a video container ------------------------------------------------------
+## @brief Audio codec -> the audio file it is copied into without re-encoding.
+AUDIO_CONTAINER = {"aac": ".m4a", "alac": ".m4a", "mp3": ".mp3", "opus": ".opus", "vorbis": ".ogg",
+                   "flac": ".flac", "wmav1": ".wma", "wmav2": ".wma", "wmapro": ".wma"}
+## @brief Containers that can carry the cover picture along.
+COVER_EXTS = {".m4a", ".mp3", ".flac"}
+
+
+def audio_only(path):
+    """! @brief A video file that holds no real video, only audio (a song saved as a "music
+    video"). A still cover stored as an attached picture does not count as video.
+    @return {codec, ext, cover} for its first audio stream, or None (it has real video,
+    no audio, or ffprobe is missing / cannot read it).
+    """
+    if shutil.which("ffprobe") is None:
+        return None
+    import json
+    try:
+        p = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                            "stream=index,codec_type,codec_name:stream_disposition=attached_pic",
+                            "-of", "json", path], capture_output=True, text=True, timeout=60, errors="replace")
+        streams = json.loads(p.stdout or "{}").get("streams") or []
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    audio = [s for s in streams if s.get("codec_type") == "audio"]
+    video = [s for s in streams if s.get("codec_type") == "video"]
+    real = [s for s in video if not (s.get("disposition") or {}).get("attached_pic")]
+    if not audio or real:
+        return None
+    codec = (audio[0].get("codec_name") or "").lower()
+    if codec.startswith("pcm_"):
+        ext = ".wav"
+    else:
+        ext = AUDIO_CONTAINER.get(codec, ".flac")  # anything else: lossless FLAC of the decode
+    return {"codec": codec, "ext": ext, "cover": bool(video)}
+
+
+def extract_audio(path, out, info, timeout=600):
+    """! @brief Write the first audio stream of `path` to `out` (its extension from
+    audio_only), copied as is (re-encoded to FLAC only for codecs no audio file holds),
+    with the file's tags and, where the format allows, its cover.
+    @return "" on success, else the error text (`out` is then removed).
+    """
+    ext = os.path.splitext(out)[1].lower()
+    copy = info["ext"] != ".flac" or info["codec"] == "flac"
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", path, "-map", "0:a:0", "-map_metadata", "0"]
+    if info.get("cover") and ext in COVER_EXTS:
+        cmd += ["-map", "0:v:0?", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+    cmd += ["-c:a", "copy" if copy else "flac"]
+    if ext == ".m4a":
+        cmd += ["-f", "ipod"]
+    elif ext == ".wma":
+        cmd += ["-f", "asf"]
+    cmd.append(out)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, errors="replace")
+        err = "" if p.returncode == 0 else ((p.stderr or "").strip().splitlines() or ["ffmpeg failed"])[-1]
+    except (OSError, subprocess.TimeoutExpired) as e:
+        err = str(e) or "ffmpeg failed"
+    if not err:
+        # the result must open and hold the audio
+        try:
+            q = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                                "stream=codec_type", "-of", "csv=p=0", out], capture_output=True,
+                               text=True, timeout=60)
+            if "audio" not in (q.stdout or ""):
+                err = "the extracted file holds no audio"
+        except (OSError, subprocess.TimeoutExpired) as e:
+            err = str(e)
+    if err:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+    return err[:300]

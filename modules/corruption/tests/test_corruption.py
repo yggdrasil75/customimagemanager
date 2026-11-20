@@ -146,3 +146,88 @@ def test_routes_on_a_broken_library_file(client, host, upload):
         os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
     assert svc["check_file"](fn)["damage"] == 0
     assert host.db().execute("SELECT 1 FROM corrupt_files WHERE rel_path=?", (fn,)).fetchone() is None
+
+def test_pdfs_and_books_are_not_checked_and_old_findings_go(host):
+    """A PDF / EPUB without a cover used to read as "does not decode": documents are
+    skipped (marked seen so the scan moves on) and earlier findings for them are dropped."""
+    svc = host.get_service("corruption")
+    d = host.db()
+    rels = ["cf_docs/no_cover.pdf", "cf_docs/book.epub", "cf_docs/comic.cbz"]
+    os.makedirs(os.path.dirname(media_path(rels[0])), exist_ok=True)
+    try:
+        for rel in rels:
+            with open(media_path(rel), "wb") as f:
+                f.write(b"%PDF-1.4\n%%EOF\n")
+            d.execute("INSERT OR REPLACE INTO files(rel_path, mtime) VALUES(?, ?)", (rel, 1.0))
+            d.execute("INSERT OR REPLACE INTO corrupt_files(rel_path, damage, level, detail, checked_at, ignored) "
+                      "VALUES(?, 1.0, 'unreadable', 'does not decode', 0, 0)", (rel,))
+        d.commit()
+        assert svc["checkable"]("a.png", "image") and svc["checkable"]("a.mp4", "video")
+        assert not any(svc["checkable"](r, "image") for r in rels)
+        assert svc["purge_uncheckable"]() >= len(rels)
+        for rel in rels:
+            d.execute("INSERT OR REPLACE INTO corrupt_files(rel_path, damage, level, detail, checked_at, ignored) "
+                      "VALUES(?, 1.0, 'unreadable', 'does not decode', 0, 0)", (rel,))
+        d.commit()
+        for rel in rels:
+            assert svc["check_file"](rel) is None
+            assert d.execute("SELECT 1 FROM corrupt_files WHERE rel_path=?", (rel,)).fetchone() is None
+            assert d.execute("SELECT 1 FROM corrupt_seen WHERE rel_path=?", (rel,)).fetchone()
+        assert svc["next_pending"]("cf_docs/") is None or not svc["next_pending"]("cf_docs/").startswith("cf_docs/")
+    finally:
+        for rel in rels:
+            d.execute("DELETE FROM files WHERE rel_path=?", (rel,))
+            d.execute("DELETE FROM corrupt_seen WHERE rel_path=?", (rel,))
+        d.commit()
+        shutil.rmtree(os.path.dirname(media_path(rels[0])), ignore_errors=True)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+                    reason="ffmpeg not installed")
+def test_audio_only_helpers(tmp_path):
+    song = tmp_path / "song.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=2", "-c:a", "aac",
+                    "-metadata", "title=Song", str(song)], check=True)
+    info = damage.audio_only(str(song))
+    assert info == {"codec": "aac", "ext": ".m4a", "cover": False}
+    out = tmp_path / "song.m4a"
+    assert damage.extract_audio(str(song), str(out), info) == "" and out.stat().st_size > 0
+    p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags=title", "-of", "csv=p=0",
+                        str(out)], capture_output=True, text=True)
+    assert "Song" in p.stdout                                      # tags come along
+    vid = tmp_path / "vid.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=5", "-t", "1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(vid)], check=True)
+    assert damage.audio_only(str(vid)) is None                     # real video: left alone
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+                    reason="ffmpeg not installed")
+def test_audio_only_video_becomes_its_audio_file(host):
+    svc = host.get_service("corruption")
+    core = host.core
+    d = host.db()
+    rel = "cf_songs/Track One.mp4"
+    fp = media_path(rel)
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
+    try:
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=330:d=2", "-c:a", "aac",
+                        "-metadata", "title=Track One", fp], check=True)
+        core.index_file(rel, force=True)
+        if d.execute("SELECT 1 FROM files WHERE rel_path=?", (rel,)).fetchone() is None:
+            pytest.skip("the video was not indexed")
+        d.execute("INSERT OR REPLACE INTO corrupt_files(rel_path, damage, level, detail, checked_at, ignored) "
+                  "VALUES(?, 1.0, 'unreadable', 'does not open: no video stream', 0, 0)", (rel,))
+        d.commit()
+        res = svc["check_file"](rel)
+        assert res["damage"] == 0 and res["converted"] == "cf_songs/Track One.m4a"
+        assert not os.path.exists(fp) and os.path.exists(media_path("cf_songs/Track One.m4a"))
+        assert d.execute("SELECT 1 FROM corrupt_files WHERE rel_path LIKE 'cf_songs/%'").fetchone() is None
+        assert d.execute("SELECT 1 FROM files WHERE rel_path=?", (rel,)).fetchone() is None
+        assert d.execute("SELECT 1 FROM files WHERE rel_path=?", ("cf_songs/Track One.m4a",)).fetchone()
+    finally:
+        for r in ("cf_songs/Track One.mp4", "cf_songs/Track One.m4a"):
+            d.execute("DELETE FROM files WHERE rel_path=?", (r,))
+            d.execute("DELETE FROM corrupt_seen WHERE rel_path=?", (r,))
+        d.commit()
+        shutil.rmtree(os.path.dirname(fp), ignore_errors=True)
