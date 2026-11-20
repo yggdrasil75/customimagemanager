@@ -700,9 +700,9 @@ function _gdlQueueRow(it) {
   </div>`;
 }
 
-function _esc(s) {
-  return String(s).replace(/[&<>"]/g, c =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+if (typeof window._esc !== 'function') {
+  window._esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 async function gdlQueueCancel(id) {

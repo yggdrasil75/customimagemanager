@@ -7,7 +7,10 @@ if (window.registerFileMetaHook) registerFileMetaHook((meta) => {
   window.currentAnalysis = (meta && meta.analysis) || null;
   renderAnalysis();
 });
-function _esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+if (typeof window._esc !== 'function') {
+  window._esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 async function runPipeline(){
   if(!window.currentFile){ alert('Select an image first.'); return; }
   const btn=document.getElementById('btn_smarttag'); const og=btn.innerText;

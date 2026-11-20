@@ -20,10 +20,9 @@ const BOOKS_PER_PAGE = 120;
 
 function _bq(id) { return document.getElementById(id); }
 
-function _esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-  ));
+if (typeof window._esc !== 'function') {
+  window._esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function _fmtBytes(n) {
