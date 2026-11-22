@@ -318,7 +318,7 @@ later registration. Consumers `get_service(name)` and must handle `None` (the
 provider is off). Current services (`comicinfo` - ComicInfo.xml read / write from the comics
 module - is used by books for comic archives; the metadata ones - `metadata_write`, `exif.write`, `xmp.write`,
 `music.write_meta`, `books.update_meta` - are thin wrappers over `update_file`;
-new code calls `host.update_file` directly): `metadata_write`, `exif` (`read`/`write`), `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`, `sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music` (`write_meta`), `books` (`update_meta`), `xmp` (`write`; `read_gps(abs)` -> (lat, lon) or None from sidecar / EXIF / embedded XMP; `gps(lat, lon, alt=None)` and `date(dt)` format values as XMP write tokens; `capture(abs)` a source file's EXIF capture date + GPS as XMP tokens), `exiv2` (`open(abs)`: use `with open(p) as img:` instead of `pyexiv2.Image(p)` to read a file - it survives malformed XMP, reading a cleaned copy; the handle is read-only then), `metasrc` (metadata source registry: `register(source)`, `http_json`, `http_multipart` - see `metasrc/module.py` for the source contract; each site is its own `metasrc_<site>` module), `llm` (the vlm module's OpenAI-compatible client: `call`, `request`, `encode_image`), `stacks` (`stack_of(rel)`, `create(kind, members, cover=, auto=)`, `match_raw_for(rel)`, `rescan(raw, burst)`), `metadata` (`set_date(rel, dt, offset, fields=None, tz_mode="keep_local", from_offset=None)` writes a taken date into EXIF DateTimeOriginal + OffsetTimeOriginal and the XMP date homes, then re-indexes the d_* buckets; `read_date(abs_path)`; `set_date` is also published alone as `metadata.set_date`), `meta_editor` (`write_location(rel, abs, (lat, lon) | None)`, `write_date(rel, abs, dt, offset)`, `turn(rel, abs, orientation_op)`, `write_crop(rel, abs, crop | None)`, `original_date(rel, abs)`), `geo` (the map module: `refresh(rel)` -> (lat, lon) or None, `rescan()`, `place_of(rel)` -> {city, admin2, admin1, cc, country, continent, source} or None (source "approx": placed from a typed city, no GPS), `resolve([(lat, lon)])` offline place names, `forward([{city, state, country, cc}])` offline approximate positions, `locate(rel)` refresh one file's position and place), `integrity` (`recheck(rel)`, `status()`, `scan(folder)`, `purge(rel)`), `encoding` (the core encoding module: `stored_name(filename)`, `target_ext`, `animation_ext`, `encode_jxl(src, out, jpeg_source, threads)`, `convert_image(src, out)`, `convert_av`, `convert_book`, `develop_raw`, `transcode_animation_to_video`, `cjxl_cmd`, `media_prefs()` / `set_media_prefs`, `thumb_params()`).
+new code calls `host.update_file` directly): `metadata_write`, `exif` (`read`/`write`), `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`, `sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music` (`write_meta`), `books` (`update_meta`), `xmp` (`write`; `read_gps(abs)` -> (lat, lon) or None from sidecar / EXIF / embedded XMP; `gps(lat, lon, alt=None)` and `date(dt)` format values as XMP write tokens; `capture(abs)` a source file's EXIF capture date + GPS as XMP tokens), `exiv2` (`open(abs)`: use `with open(p) as img:` instead of `pyexiv2.Image(p)` to read a file - it survives malformed XMP, reading a cleaned copy; the handle is read-only then), `metasrc` (metadata source registry: `register(source)`, `http_json`, `http_multipart` - see `metasrc/module.py` for the source contract; each site is its own `metasrc_<site>` module), `llm` (the vlm module's OpenAI-compatible client: `call`, `request`, `encode_image`), `stacks` (`stack_of(rel)`, `create(kind, members, cover=, auto=)`, `match_raw_for(rel)`, `rescan(raw, burst)`), `metadata` (`set_date(rel, dt, offset, fields=None, tz_mode="keep_local", from_offset=None)` writes a taken date into EXIF DateTimeOriginal + OffsetTimeOriginal and the XMP date homes, then re-indexes the d_* buckets; `read_date(abs_path)`; `set_date` is also published alone as `metadata.set_date`), `meta_editor` (`write_location(rel, abs, (lat, lon) | None)`, `write_date(rel, abs, dt, offset)`, `turn(rel, abs, orientation_op)`, `write_crop(rel, abs, crop | None)`, `original_date(rel, abs)`), `geo` (the map module: `refresh(rel)` -> (lat, lon) or None, `rescan()`, `place_of(rel)` -> {city, admin2, admin1, cc, country, continent, source} or None (source "approx": placed from a typed city, no GPS), `resolve([(lat, lon)])` offline place names, `forward([{city, state, country, cc}])` offline approximate positions, `locate(rel)` refresh one file's position and place), `integrity` (`recheck(rel)`, `status()`, `scan(folder)`, `purge(rel)`, `health`), `integrity.health` (`check_file(rel, stale_only=False)`, `check_meta`, `fix_meta(rel)`, `strip_audio`, `progress()`), `encoding` (the core encoding module: `stored_name(filename)`, `target_ext`, `animation_ext`, `encode_jxl(src, out, jpeg_source, threads)`, `convert_image(src, out)`, `convert_av`, `convert_book`, `develop_raw`, `transcode_animation_to_video`, `cjxl_cmd`, `media_prefs()` / `set_media_prefs`, `thumb_params()`).
 
 Hierarchical tags: the flat `tags` (dc:subject) hold each keyword's leaf; the path lives in `lr:hierarchicalSubject` ("A|B|C", also read from `digiKam:TagsList` and `mwg-kw`). A tag set as `a/b/c` (or `a|b|c`) is split on save into the leaf tag + the path. The `tag_tree(path, rel_path)` table (mirrored) indexes the paths, `tagpath:a/b` searches a node and everything below it.
 
@@ -474,6 +474,31 @@ host.register_pipeline_stage("pose", lambda img_bgr: estimate(img_bgr), label="P
 ```
 
 The editor offers the node only while the module is enabled. See `pose/`.
+
+### Task pipelines
+
+A batch job made of steps the user can rewire, switch off and configure (the
+person pipeline: load -> detect faces -> ... -> finish) registers its steps and
+a default order on the `task_pipeline` service (see `task_pipeline/engine.py`
+for the step and option shapes):
+
+```python
+svc = host.get_service("task_pipeline")
+svc["register_step"]({"id": "mine.detect", "label": "Detect", "run": fn(items, opts, env),
+                      "options": [{"key": "conf", "kind": "number", "default": 0.3}],
+                      "status": lambda: {"ok": have_model(), "reason": "no model installed"}})
+svc["register_pipeline"]("mine", label="My pipeline", steps=["mine.load", "mine.detect"])
+svc["run"]("mine", items)                  # the user's graph, else the default
+svc["step_enabled"]("mine", "mine.detect"); svc["step_option"]("mine", "mine.detect", "conf")
+```
+
+The pipeline runs as a graph (schema `task/1`, the graph/1 wire format) on the
+same evaluator as the per-photo pipeline (`dataflow.py`, with its gate / switch /
+const nodes), and is edited on the same node editor (Settings > Pipeline, the
+picker's "Task pipelines" group): every wire carries the batch, each step node
+has its options as params plus `enabled`, and a step that cannot run here says
+why on its node. The graphs are the `task_pipelines` setting, saved through
+`/api/update_settings`.
 
 ## Models: capabilities, providers, the Models tab
 

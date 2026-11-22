@@ -289,7 +289,7 @@ FIELDS = [
        expert=False),
     _f("keep_raws", "raw", "Keep the original raw", "toggle", False,
        "Keep the raw file in the hidden raw store next to the developed image.",
-       expert=False, store="keep_raws"),
+       expert=False),  # a declared key like the rest (saved with the pane, kept in the config)
     _f("enc_raw_wb", "raw", "White balance", "select", "camera",
        "Use the camera's white balance or estimate one.",
        options=[_opt("camera", "As shot (camera)"), _opt("auto", "Automatic")]),

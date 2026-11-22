@@ -38,7 +38,7 @@ MANIFEST = {
 
 def register(host):
     # -- settings this module owns -----------------------------------------
-    # Bodies run as part of the person pipeline (Settings > Task pipelines;
+    # Bodies run as part of the person pipeline (Settings > Pipeline, Person pipeline graph;
     # Models tab -> People pipeline -> "Run in background"), not a toggle of
     # their own. The legacy body_enabled toggle folds into that switch once.
     host.add_config_key("body_cluster_eps", default=0.0,
@@ -54,19 +54,19 @@ def register(host):
 
     # -- capabilities ------------------------------------------------------
     host.declare_capability(
-        "embed.bodies", label="Body identity",
+        "embed.bodies", label="Body identity", group="people",
         summary="Identity embedding per person box, robust to outfit and viewpoint; "
                 "binds to the face found inside the same box.",
         input="embed(img_bgr, boxes) - normalized center-form person boxes",
         output="(vectors: list[np.ndarray|None], mode: backbone id | 'appearance')")
     host.declare_capability(
-        "body.shape", label="Body 3D shape",
+        "body.shape", label="Body 3D shape", group="people",
         summary="Fuse a person's crops into a neutral-pose body mesh (ANNY, SHAPY, "
                 "ATLAS, SMPLest-X modules provide; this module owns the fusion).",
         input="estimate_shape(crops: list[(img_bgr, box)])",
         output="(vertices, faces) mesh or None when too few clean fits")
     host.declare_capability(
-        "body.mesh", label="Body mesh (from parameters)",
+        "body.mesh", label="Body mesh (from parameters)", group="people",
         summary="Parametric body model: shape parameters -> neutral-pose mesh "
                 "(SMPL-X, ANNY).",
         input="mesh(betas: ndarray) - the model's shape vector",

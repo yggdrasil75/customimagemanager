@@ -288,29 +288,34 @@ class Jobs:
         raise RuntimeError("storing the result timed out")
 
     def _replace(self, job, fp, rel, pixels, info):
+        """! @brief The upscaled pixels replace the original, stored like any picture: in
+        Settings -> Media's image format and quality (encoding module), so a JPEG becomes
+        the library's format (JXL by default) under the same name stem."""
         host, core, cfg = self.host, self.host.core, self.cfg()
         ext = os.path.splitext(rel)[1].lower()
         if ext not in REPLACE_EXTS:
             raise RuntimeError("replacing %s files is not supported; make a copy instead" % ext)
+        enc = host.get_service("encoding")
+        if not enc:
+            raise RuntimeError("the encoding module is off: the result can't be stored")
+        target = enc.target_ext(rel, fp) or ext
+        if target in (".jpg", ".jpeg") and ext in (".jpg", ".jpeg"):
+            target = ext
+        new_rel = os.path.splitext(rel)[0] + target
         tmp = self._tmp_dir()
-        out = os.path.join(tmp, uuid.uuid4().hex + ext)
+        out = os.path.join(tmp, uuid.uuid4().hex + target)
         png = os.path.join(tmp, uuid.uuid4().hex + ".png")
         w, h = pixels.shape[1], pixels.shape[0]
         try:
-            if ext == ".jxl":
-                Image.fromarray(pixels).save(png, "PNG", compress_level=1)
-                enc = host.get_service("encoding")
-                if not enc:
-                    raise RuntimeError("the encoding module is off: JXL can't be written")
+            Image.fromarray(pixels).save(png, "PNG", compress_level=1)
+            if target == ".jxl":
                 err = enc.encode_jxl(png, out, False, int(host.config.get("cjxl_threads") or 1))
-                if err:
-                    raise RuntimeError(err)
             else:
-                im = Image.fromarray(pixels)
-                kw = {"quality": int(cfg["upscale_jpeg_quality"])} if _PIL_FORMAT[ext] in ("JPEG", "WEBP") else {}
-                if _PIL_FORMAT[ext] == "JPEG" and im.mode == "RGBA":
-                    im = im.convert("RGB")
-                im.save(out, _PIL_FORMAT[ext], **kw)
+                err = enc.convert_image(png, out)
+            if err:
+                raise RuntimeError(err)
+            if new_rel != rel and os.path.exists(host.safe_path(host.media_dir, new_rel) or ""):
+                raise RuntimeError(f"{new_rel} already exists")
             copy_metadata(fp, out, w, h, xmp=True, log=host.logger, opener=self._opener())
             if cfg["upscale_keep_originals"]:
                 bak = os.path.join(host.media_dir, ".cim", "upscale_originals", rel)
@@ -319,9 +324,10 @@ class Jobs:
                     bak = "%s.%d%s" % (b, int(time.time()), e)
                 os.makedirs(os.path.dirname(bak), exist_ok=True)
                 shutil.copy2(fp, bak)
-            ok, err = core.move_file(rel, rel, content=out)
+            ok, err = core.move_file(rel, new_rel, content=out)
             if not ok:
                 raise RuntimeError(err or "replacing the file failed")
+            rel, fp = new_rel, host.safe_path(host.media_dir, new_rel)
         finally:
             for p in (out, png):
                 with contextlib.suppress(OSError):

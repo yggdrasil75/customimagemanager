@@ -374,14 +374,12 @@
     window._mediaLoaded = true;
   };
 
-  /** @brief The buffered edits as an /api/update_settings body (+ keep_raws apart). */
+  /** @brief The buffered edits as an /api/update_settings body. */
   S.payload = function () {
     const body = {};
-    let keepRaws;
     const kinds = new Set();
     for (const k of S.dirty) {
       if (k.startsWith('media_storage.')) kinds.add(k.split('.')[1]);
-      else if (k === 'keep_raws') keepRaws = !!S.values[k];
       else body[k] = S.values[k];
     }
     if (kinds.size) {
@@ -390,12 +388,12 @@
         ms[kind] = { target: S.values[`media_storage.${kind}.target`], mode: S.values[`media_storage.${kind}.mode`] };
       body.media_storage = ms;
     }
-    return { body, keepRaws };
+    return { body };
   };
 
   async function persistMediaSettings() {
     if (!window._mediaLoaded) return { ok: true };
-    const { body, keepRaws } = S.payload();
+    const { body } = S.payload();
     const el = id => document.getElementById(id);
     if (el('fn_clean_bad')) body.filename_cleanup = {
       bad: el('fn_clean_bad').checked, web: el('fn_clean_web').checked, storage: el('fn_clean_storage').value };
@@ -403,10 +401,6 @@
     if (!res.ok) return { ok: false, error: 'Media settings: ' + res.error };
     const errs = Object.fromEntries(Object.entries((res.data && res.data.errors) || {})
       .filter(([, e]) => !String(e).startsWith('applied')));
-    if (keepRaws !== undefined) {
-      await fetch('/api/keep_raws', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: keepRaws }) }).catch(() => {});
-    }
     S.dirty = new Set();
     window._mediaLoaded = false;   // reload the pane (new defaults, simple values) next time
     if (Object.keys(errs).length) return { ok: false, error: 'Media settings: ' + Object.entries(errs).map(([k, e]) => `${k}: ${e}`).join('; ') };

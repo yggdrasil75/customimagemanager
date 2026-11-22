@@ -117,10 +117,9 @@ test("simple slider maps through the server and the save payload is complete", a
   const p = b.val("CIMMediaSettings.payload()");
   assert.equal(p.body.enc_image_mode, "lossy");
   assert.equal(p.body.thumb_size, 384);
-  assert.equal(p.keepRaws, true);
+  assert.equal(p.body.keep_raws, true);   // saved like every other setting
   assert.equal(p.body.media_storage.image.mode, "all");
   assert.ok(p.body.media_storage.video && p.body.media_storage.book, "every kind sent");
-  assert.ok(!("keep_raws" in p.body));
 });
 
 test("re-encode 'keep originals' is a saved setting per kind, not reset on every open", async () => {

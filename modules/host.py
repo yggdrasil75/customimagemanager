@@ -726,13 +726,14 @@ class Host:
                                                 self._sweep_handle, key_of=lambda j: j["key"])
 
     def declare_capability(self, cap_id, *, summary, input, output, label=None,
-                           background=False):
+                           background=False, group=None):
         """! @brief Declare a new capability contract (first declarer owns it).
         Only for capabilities the core doesn't declare already.
+        @param group  a Models-tab subsection to list it in ("people"), else the main list.
         """
         return self.broker.declare(cap_id, summary=summary, input=input,
                                    output=output, owner=self._current_module,
-                                   label=label, background=background)
+                                   label=label, background=background, group=group)
 
     def provide_model(self, cap_id, provider_id, *, label, loader,
                       transform=None, available=None, reason="",

@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 
-from .convert import convert_av, convert_image, encode_jxl, needs_browser_convert
+from .convert import audio_only, convert_av, convert_image, encode_jxl, needs_browser_convert
 
 ## @brief Kinds the re-encode job handles (audio and books live in their modules' own indexes).
 REENCODE_KINDS = ("image", "video")
@@ -229,6 +229,10 @@ class Jobs:
         e = os.path.splitext(rel)[1].lower()
         if kind == "image" and media.jxl_anim_info(ap).get("animated"):
             return False  # animations follow their own output setting
+        if kind == "video" and audio_only(ap):
+            # a song stored as a video: not re-encoded into another picture-less video
+            # (Integrity's repair turns it into the audio file it is)
+            return False
         if same_container and kind == "video" and e != target:
             # "convert only what browsers can't show" kept this container (.mov): convert it
             # to the target only when its codecs don't play

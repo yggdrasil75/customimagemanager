@@ -180,3 +180,29 @@ def test_feature_blocked_for_non_admin_roles(app):
 
 def test_runs_table_is_state(host):
     assert host.table_kinds()["backup_runs"] == {"kind": "state", "module_id": "backup"}
+
+def test_overdue_backup_runs_on_a_server_that_is_never_idle():
+    """Due backups wait for an idle moment; one still waiting `max_wait` hours later runs anyway."""
+    h = 3600
+    # last good copy 25 h ago, daily interval, 6 h grace: due but not overdue
+    assert not bm.is_overdue(25 * h, 0, 24, 6, since=0)
+    assert bm.is_overdue(30 * h, 0, 24, 6, since=0)
+    # never backed up: overdue max_wait hours after the scheduler started
+    assert not bm.is_overdue(5 * h, None, 24, 6, since=0)
+    assert bm.is_overdue(6 * h, None, 24, 6, since=0)
+    assert not bm.is_overdue(30 * h, 0, 24, 6, since=0, running=True)
+    assert not bm.is_overdue(30 * h, 0, 24, 6, since=0, enabled=False)
+
+
+def test_one_step_copy_is_not_restarted_by_live_writes(tmp_path):
+    src = str(tmp_path / "live.db")
+    c = sqlite3.connect(src)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("CREATE TABLE files(rel_path TEXT)")
+    c.executemany("INSERT INTO files VALUES(?)", [("f%d" % i,) for i in range(5000)])
+    c.commit()
+    res = bm.make_backup(src, str(tmp_path / "out"), "20260102-030409", restart_limit=1, one_step=True)
+    c.close()
+    assert res["ok"] and res["verified"], res
+    with sqlite3.connect(res["path"]) as b:
+        assert b.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 5000

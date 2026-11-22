@@ -159,55 +159,18 @@
       box = document.createElement("div");
       box.id = "ups_tools";
       box.className = "mt-4 border-t border-gray-700 pt-3 text-xs text-gray-300";
+      // the model, its weights and run settings are on the Upscale card in Settings -> Models
       box.innerHTML = `
-        <div class="font-semibold text-sm mb-1">Models</div>
-        <p class="text-[11px] text-gray-500 mb-2">Pick the model in Settings -> Models -> Upscale. Stock weights download on first use;
-          your own ESRGAN / Real-ESRGAN checkpoints (.pth .pt .ckpt .safetensors) go here or in <span id="ups_folder"></span>.</p>
-        <div id="ups_weights"></div>
-        <div class="flex flex-wrap items-center gap-2 mt-2">
-          <input type="file" id="ups_file" accept=".pth,.pt,.ckpt,.safetensors" class="text-xs">
-          ${btn({ id: "ups_upload", label: "Add weights", variant: "secondary", size: "sm" })}
-          <span id="ups_msg" class="text-gray-400"></span>
-        </div>
-        <div class="font-semibold text-sm mt-4 mb-1">Recent jobs</div>
+        <p class="text-[11px] text-gray-500 mb-2">The model, custom weights (files in models/esrgan/upscale), tile size and
+          precision: Settings &rarr; Models &rarr; Upscale. Results are stored in Settings &rarr; Media's image format.</p>
+        <div class="font-semibold text-sm mb-1">Recent jobs</div>
         <div id="ups_recent"></div>`;
       pane.appendChild(box);
-      $("ups_upload").addEventListener("click", upload);
-      box.addEventListener("click", async e => {
-        const b = e.target.closest(".ups-del");
-        if (!b || !confirm("Delete " + b.dataset.name + "?")) return;
-        const d = await postJSON("/api/upscale/weights/delete", { name: b.dataset.name });
-        if (!d.success) toast(d.error || "delete failed");
-        refreshSettings();
-      });
     }
-    refreshSettings();
-  }
-
-  async function upload() {
-    const f = $("ups_file").files[0];
-    if (!f) { $("ups_msg").textContent = "Choose a file first."; return; }
-    $("ups_msg").textContent = "Uploading and checking...";
-    const fd = new FormData();
-    fd.append("file", f);
-    const d = await getJSON("/api/upscale/weights/upload", { method: "POST", body: fd });
-    $("ups_msg").textContent = d.success ? `Added ${d.name}: ${d.arch}, x${d.scale}.` : (d.error || "failed");
-    $("ups_file").value = "";
     refreshSettings();
   }
 
   async function refreshSettings() {
-    const w = await getJSON("/api/upscale/weights");
-    if (w.success && $("ups_weights")) {
-      $("ups_folder").textContent = w.folder;
-      const stock = (w.stock || []).map(s => `<li>${esc(s.label)} <span class="text-gray-500">x${s.factor}, ${s.downloaded ? "downloaded" : "downloads on first use"}</span></li>`).join("");
-      const custom = (w.custom || []).length
-        ? (w.custom || []).map(c => `<li class="flex items-center gap-2">${esc(c.name)} <span class="text-gray-500">${(c.size / 1048576).toFixed(1)} MB${c.selected ? ", in use" : ""}</span>
-            <button type="button" class="ups-del text-red-400 hover:text-red-300" data-name="${esc(c.name)}" title="Delete">delete</button></li>`).join("")
-        : `<li class="text-gray-500">none yet</li>`;
-      $("ups_weights").innerHTML = `<div class="text-gray-400">Stock</div><ul class="mb-2">${stock}</ul>
-        <div class="text-gray-400">Your weights${w.spandrel ? " (spandrel installed: other architectures load too)" : ""}</div><ul>${custom}</ul>`;
-    }
     const j = await getJSON("/api/upscale/jobs");
     if (j.success && $("ups_recent")) {
       $("ups_recent").innerHTML = (j.jobs || []).length

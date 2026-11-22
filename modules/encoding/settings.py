@@ -117,8 +117,9 @@ def thumb_params():
 
 
 def stream_info(path):
-    """! @brief ffprobe a file's streams: {video: {codec, width, height, fps}, audio: n, subs: n}
-    or None without ffprobe / on failure.
+    """! @brief ffprobe a file's streams: {video: {codec, width, height, fps}, audio: n, subs: n,
+    audio_codec: first audio codec, cover: an attached picture (album art) is there}
+    or None without ffprobe / on failure. A cover picture is never the "video".
     """
     if not probe.has("ffprobe"):
         return None
@@ -129,10 +130,12 @@ def stream_info(path):
         streams = json.loads(p.stdout or "{}").get("streams") or []
     except Exception:
         return None
-    out = {"video": None, "audio": 0, "subs": 0}
+    out = {"video": None, "audio": 0, "subs": 0, "audio_codec": None, "cover": False}
     for s in streams:
         t = s.get("codec_type")
-        if t == "video" and out["video"] is None and not (s.get("disposition") or {}).get("attached_pic"):
+        if t == "video" and (s.get("disposition") or {}).get("attached_pic"):
+            out["cover"] = True  # album art, not a picture stream
+        elif t == "video" and out["video"] is None:
             fps = None
             try:
                 n, d = str(s.get("avg_frame_rate") or "0/0").split("/")
@@ -143,6 +146,7 @@ def stream_info(path):
                             "height": s.get("height"), "fps": fps}
         elif t == "audio":
             out["audio"] += 1
+            out["audio_codec"] = out["audio_codec"] or (s.get("codec_name") or "").lower()
         elif t == "subtitle":
             out["subs"] += 1
     return out

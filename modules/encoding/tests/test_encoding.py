@@ -224,7 +224,9 @@ def test_simple_view_maps_to_expert_settings(client):
 # -- registration and routes --------------------------------------------------
 def test_settings_are_registered_and_validated(app, host, client, settings):
     assert set(schema.CONFIG_KEYS) <= set(app.state)
-    assert not [f for f in host.settings_fields if f["pane"] == "media"]   # the pane draws itself
+    # the encoding module draws its part of the pane itself; other modules' fields go in
+    # the pane's named sections (books, libraries)
+    assert not [f for f in host.settings_fields if f["pane"] == "media" and not f.get("section")]
     assert all(host.config_tabs.get(k) == "media" for k in schema.CONFIG_KEYS)
     r = client.post("/api/update_settings", json={"enc_video_codec": "vp9", "enc_image_effort": 99,
                                                   "thumb_size": 5000, "enc_video_bits": 10})
@@ -384,3 +386,45 @@ def test_reencode_job(app, client, upload, settings):
         client.post("/api/delete", json={"filename": new})
         shutil.rmtree(os.path.join(app.MEDIA_DIR, ".cim", "reencoded"), ignore_errors=True)
         upload.made.remove(fn)
+
+@needs_ffmpeg
+def test_a_song_in_a_video_container_follows_the_audio_settings(tmp_path, settings):
+    """A song saved as .mp4 / .webm (no picture, maybe album art) is audio: it is never
+    turned into a picture-less video, and goes to an audio file per Settings > Media."""
+    song = str(tmp_path / "song.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=2", "-c:a", "aac",
+                    "-metadata", "title=Song", song], check=True)
+    art = str(tmp_path / "art.png")
+    from PIL import Image
+    Image.new("RGB", (32, 32), (200, 10, 10)).save(art)
+    with_art = str(tmp_path / "with_art.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", song, "-i", art, "-map", "0", "-map", "1",
+                    "-c:a", "copy", "-c:v", "mjpeg", "-disposition:v", "attached_pic", with_art], check=True)
+    video = str(tmp_path / "clip.mp4")
+    _make_video(video, size="64x48")
+
+    settings(media_storage={"video": {"mode": "all", "target": ".mkv"}, "audio": {"mode": "none", "target": ".flac"}})
+    assert C.target_ext(song, song) == ".m4a"            # kept as is: AAC copied into .m4a
+    assert C.target_ext(with_art, with_art) == ".m4a"    # album art is not a video
+    assert C.target_ext(video, video) == ".mkv"          # a real video still follows the video target
+    out = str(tmp_path / "out.m4a")
+    assert C.convert_av(with_art, out) is None
+    assert [c[0] for c in _codecs(out)] == ["aac", "mjpeg"]   # sound copied, art kept
+    tags = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags=title", "-of", "csv=p=0", out],
+                          capture_output=True, text=True).stdout
+    assert "Song" in tags
+
+    settings(media_storage={"audio": {"mode": "all", "target": ".flac"}})
+    assert C.target_ext(song, song) == ".flac"           # converted per the audio target
+    out = str(tmp_path / "out.flac")
+    assert C.convert_av(song, out) is None
+    assert [c[0] for c in _codecs(out)] == ["flac"]
+
+
+def test_keep_raws_saves_through_the_settings_route(client):
+    """The raw "keep the original" toggle is a declared setting: /api/update_settings
+    stores it and it reads back (it used to be posted to a route that did not exist)."""
+    for want in (True, False):
+        r = client.post("/api/update_settings", json={"keep_raws": want}).get_json()
+        assert r["success"] and not r["errors"]
+        assert client.post("/api/raw/keep", json={}).get_json()["enabled"] is want

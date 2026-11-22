@@ -74,6 +74,8 @@ def register(host):
 
     # Front-end: assets + templates. The reader + triage are top-level modals;
     # the shelf pane and book controls are their own partials (server-rendered).
+    host.register_library_section("books", label="Books", kinds={"book", "image"},
+                                  sidecars={".opf", ".nfo"})
     host.add_asset("books.js")
     host.add_asset("reader.js")
     host.register_centre_pane("book_reader.html")     # swaps in for the image viewer (media mode 'book')
@@ -119,10 +121,9 @@ def register(host):
     host.add_config_key("books_generate_covers", default=True,
                         validate=lambda v: str(v).strip().lower() not in ("0", "false", "no", "off", ""))
     host.add_settings_field(key="books_generate_covers", label="Make covers for books without one",
-                            kind="toggle",
-                            help="A book whose file has no cover gets one with its title and author, "
-                                 "written into the file's own cover slot (EPUB, FB2, DOCX); other "
-                                 "formats keep it in the app only. PDFs and comics use their first page.")
+                            kind="toggle", pane="media", section="books",
+                            help="Title and author on a plain cover, written into the book's own "
+                                 "cover slot (EPUB, FB2, DOCX). PDFs and comics use their first page.")
 
     # Archive / PDF page access for the comics module (cbz/cbr/cb7 pages).
     # Metadata writes for other modules (metasrc applies lookups through it).

@@ -19,6 +19,11 @@ copied. Admins list, verify, delete and restore copies in Settings -> Database
 backups; a restore verifies the copy and writes it to `<DB_PATH>.restore`,
 which the core swaps in at the next start (followed by a full sync).
 Every run is recorded in the `backup_runs` table.
+
+A server that always has background work (deep checks, embeddings, autotag) is
+never idle: a backup still due `backup_max_wait_hours` after it became due runs
+anyway, copying the DB in a single backup step (not restartable by live writes;
+under WAL the app keeps reading and writing meanwhile).
 """
 import os
 import re
@@ -63,6 +68,7 @@ DEFAULTS = {
     "backup_keep": 7,
     "backup_dir": "",
     "backup_idle_seconds": 120,
+    "backup_max_wait_hours": 6,
 }
 
 
@@ -201,9 +207,12 @@ class _Stepper:
         _step_pause(status, remaining, total)
 
 
-def make_backup(src_path, folder, name_stamp, restart_limit=RESTART_LIMIT):
+def make_backup(src_path, folder, name_stamp, restart_limit=RESTART_LIMIT, one_step=False):
     """! @brief Copy, verify and rename one backup.
     @param restart_limit  give up after this many copy restarts caused by live writes.
+    @param one_step       copy the whole DB in one backup step (an overdue backup on a server
+                          that is never idle): live writes cannot restart it, and under WAL
+                          the app keeps reading and writing meanwhile.
     @return {path, bytes, ok, error, verified, restarted}; on a failed copy / verify the temp is removed.
     """
     os.makedirs(folder, exist_ok=True)
@@ -223,7 +232,10 @@ def make_backup(src_path, folder, name_stamp, restart_limit=RESTART_LIMIT):
         try:
             dst = sqlite3.connect(tmp)
             try:
-                src.backup(dst, pages=STEP_PAGES, progress=_Stepper(restart_limit))
+                if one_step:
+                    src.backup(dst, pages=-1)
+                else:
+                    src.backup(dst, pages=STEP_PAGES, progress=_Stepper(restart_limit))
                 # a self-contained single file: no -wal / -shm needed to read it
                 dst.execute("PRAGMA journal_mode=DELETE")
                 dst.commit()
@@ -294,6 +306,20 @@ def is_due(now, last_ok, interval_hours, idle_for, idle_seconds, enabled=True, r
     return now - float(last_ok) >= max(0.0, float(interval_hours)) * 3600
 
 
+def is_overdue(now, last_ok, interval_hours, max_wait_hours, since, enabled=True, running=False):
+    """! @brief Whether a backup has waited too long for the server to go idle and must run
+    anyway (a busy server is never idle: without this it would never back up).
+    @param since  when the scheduler started (counts as the last backup when there is none).
+    """
+    if not enabled or running:
+        return False
+    base = float(last_ok) if last_ok is not None else float(since)
+    wait = max(0.0, float(interval_hours)) * 3600 + max(0.0, float(max_wait_hours)) * 3600
+    if last_ok is None:
+        wait = max(0.0, float(max_wait_hours)) * 3600
+    return now - base >= wait
+
+
 def _num(lo, cast):
     """! @brief Validator: a number of type `cast`, at least `lo`."""
     def v(x):
@@ -313,6 +339,7 @@ def register(host):
     validators = {
         "backup_enabled": lambda v: bool(v),
         "backup_interval_hours": _num(1, float),
+        "backup_max_wait_hours": _num(0, float),
         "backup_keep": _num(1, int),
         "backup_dir": lambda v: str(v or "").strip(),
         "backup_idle_seconds": _num(0, int),
@@ -327,6 +354,10 @@ def register(host):
                             help="The oldest copies beyond this many are deleted (at least 1).")
     host.add_settings_field(key="backup_dir", label="Backup folder", kind="text", pane=TAB,
                             help="Blank: .backups in the media folder. Relative paths are under the media folder.")
+    host.add_settings_field(key="backup_max_wait_hours", label="Run anyway after waiting (hours)",
+                            kind="number", pane=TAB,
+                            help="A due backup that found no idle moment for this long runs while the "
+                                 "server works (one-step copy, safe under live writes).")
     host.add_settings_field(key="backup_idle_seconds", label="Wait for this many idle seconds",
                             kind="number", pane=TAB,
                             help="A scheduled backup only starts after the server has been quiet this long: "
@@ -463,8 +494,9 @@ def register(host):
         return max(first, last + cfg("backup_interval_hours") * 3600)
 
     # -- one run ----------------------------------------------------------------------
-    def run_backup():
+    def run_backup(one_step=False):
         """! @brief Make one backup now unless one is running.
+        @param one_step  the overdue path: one backup step, not restartable by live writes.
         @return the run record, or None when another run holds the lock.
         """
         if not lock.acquire(blocking=False):
@@ -474,7 +506,7 @@ def register(host):
             d = folder()
             clean_stale_temps(d)
             host.set_status("Backing up the database...")
-            res = make_backup(db_path(host.media_dir), d, stamp())
+            res = make_backup(db_path(host.media_dir), d, stamp(), one_step=one_step)
             if res["ok"]:
                 removed = prune(d, cfg("backup_keep"))
                 if removed:
@@ -502,9 +534,14 @@ def register(host):
     # -- scheduler --------------------------------------------------------------------
     def tick():
         """! @brief One scheduler check: run a backup when one is due and the server is idle."""
-        if is_due(time.time(), last_ok_epoch(), cfg("backup_interval_hours"), idle_for(),
+        now, last = time.time(), last_ok_epoch()
+        if is_due(now, last, cfg("backup_interval_hours"), idle_for(),
                   cfg("backup_idle_seconds"), enabled=cfg("backup_enabled"), running=lock.locked()):
             run_backup()
+        elif is_overdue(now, last, cfg("backup_interval_hours"), cfg("backup_max_wait_hours"),
+                        started_at, enabled=cfg("backup_enabled"), running=lock.locked()):
+            log.info("backup: overdue and the server has not been idle; backing up while it works")
+            run_backup(one_step=True)
 
     def loop():
         """! @brief First check 10 minutes after start, then every few seconds: the sampling

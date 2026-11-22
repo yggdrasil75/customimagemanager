@@ -9,25 +9,27 @@ Adds the `upscale` capability (Settings -> Models) with one provider, ESRGAN:
   custom    any ESRGAN (old "model.N" layout, any factor), BasicSR / Real-ESRGAN
             RRDBNet (x1 / x2 unshuffle variants included) or compact SRVGG
             checkpoint (.pth .pt .ckpt .safetensors) dropped in
-            models/esrgan/upscale/ or uploaded in Settings -> Upscale, picked as
-            "Custom weights"; with spandrel installed, every architecture it
-            knows (SwinIR, HAT, DAT, OmniSR, ...) loads too.
+            models/esrgan/upscale/ (like every other model's own weights), picked
+            as "Custom weights" on the Upscale card in Settings -> Models; with
+            spandrel installed, every architecture it knows (SwinIR, HAT, DAT,
+            OmniSR, ...) loads too.
 
 An "Upscale" button in the viewer's AI tools and the gallery bulk bar runs the
 picked model on the open file or the selection: a new file next to the original
 (default) or, with the "Replace originals" permission, the original replaced in
 place (kept under .cim/upscale_originals/ unless turned off). See jobs.py.
 
-Settings -> Upscale: default factor and output, tile size, half precision,
-largest result, JPEG / WebP quality for replaced files, the weight files and
-the recent jobs. Permissions: "Upscale pictures" and "Upscale: replace originals".
+Settings -> Models -> Upscale: the model, custom weights, tile size, half precision
+and the largest result. Settings -> Upscale: default factor and output, keeping
+replaced originals, and the recent jobs. A result is stored like any other picture:
+in Settings -> Media's image format and quality (a replaced original too).
+Permissions: "Upscale pictures" and "Upscale: replace originals".
 """
 import os
 import threading
 
 import requests
 from flask import g, jsonify, request
-from werkzeug.utils import secure_filename
 
 import model_registry
 from modules.model_broker import NoProviderError
@@ -85,8 +87,10 @@ DEFAULTS = {
     "upscale_tile": 512,
     "upscale_half": True,
     "upscale_max_mp": 200,
-    "upscale_jpeg_quality": 95,
 }
+## @brief Settings of the model run itself: on the Upscale card in Settings -> Models
+# (provider settings), not on the Upscale tab.
+MODEL_KEYS = ("upscale_tile", "upscale_half", "upscale_max_mp")
 
 
 def _int(lo, hi):
@@ -181,21 +185,17 @@ def register(host):
         "upscale_tile": _int(0, 4096),
         "upscale_half": bool,
         "upscale_max_mp": _int(1, 2000),
-        "upscale_jpeg_quality": _int(50, 100),
     }
     for key, dflt in DEFAULTS.items():
-        host.add_config_key(key, default=dflt, validate=validators[key], tab=TAB)
+        # the model-run keys belong to the Models tab (their widgets are on its Upscale card)
+        host.add_config_key(key, default=dflt, validate=validators[key],
+                            tab=None if key in MODEL_KEYS else TAB)
     fields = [
         ("upscale_factor", "Default factor", "select", {"options": FACTORS,
          "help": "Above the model's own the model runs again; the result is then resized to the exact factor."}),
         ("upscale_mode", "Default output", "select", {"options": MODES,
          "help": "Replacing needs the \"Upscale: replace originals\" permission."}),
         ("upscale_keep_originals", "Keep replaced originals in .cim/upscale_originals", "toggle", {}),
-        ("upscale_tile", "Tile size (pixels, 0 = whole picture)", "number",
-         {"help": "Smaller tiles use less memory; a tile that runs out of GPU memory is retried smaller."}),
-        ("upscale_half", "Half precision on the GPU", "toggle", {"help": "Faster and lighter; off if results look broken."}),
-        ("upscale_max_mp", "Largest result (megapixels)", "number", {}),
-        ("upscale_jpeg_quality", "JPEG / WebP quality when replacing", "number", {}),
     ]
     for key, label, kind, extra in fields:
         host.add_settings_field(key=key, label=label, kind=kind, pane=TAB, **extra)
@@ -239,8 +239,13 @@ def register(host):
         types=[{"value": k, "label": v[0]} for k, v in STOCK.items()],
         settings=[{"key": "upscale_esrgan_weights", "label": "Custom weights", "kind": "select",
                    "options": _weights_options,
-                   "help": "ESRGAN-family .pth / .safetensors in models/esrgan/upscale "
-                           "(or uploaded in Settings -> Upscale). Blank = the stock type."}],
+                   "help": "ESRGAN-family .pth / .safetensors placed in models/esrgan/upscale. "
+                           "Blank = the stock type."},
+                  {"key": "upscale_tile", "label": "Tile size (px, 0 = whole)", "kind": "number",
+                   "help": "Smaller tiles use less memory; a tile that runs out of GPU memory is retried smaller."},
+                  {"key": "upscale_half", "label": "Half precision on the GPU", "kind": "toggle",
+                   "help": "Faster and lighter; off if results look broken."},
+                  {"key": "upscale_max_mp", "label": "Largest result (MP)", "kind": "number"}],
         note="Stock weights download on first use; your own ESRGAN checkpoints work too.",
         loader=_load, available=lambda: HAVE_TORCH, reason=UNAVAILABLE_REASON,
         cost_mb=300, gpu=model_registry.on_gpu())
@@ -366,54 +371,12 @@ def register(host):
         return jsonify({"success": True, "custom": out, "stock": stock, "folder": custom_dir(),
                         "spandrel": bool(HAVE_TORCH and upscaler.HAVE_SPANDREL)})
 
-    def api_weights_upload():
-        f = request.files.get("file")
-        name = secure_filename(os.path.basename(f.filename or "")) if f else ""
-        if not name or not name.lower().endswith(WEIGHT_EXTS):
-            return jsonify({"success": False, "error": "a .pth, .pt, .ckpt or .safetensors file is needed"}), 400
-        dest = os.path.join(custom_dir(), name)
-        if os.path.exists(dest):
-            return jsonify({"success": False, "error": "%s already exists" % name}), 409
-        tmp = dest + ".part"
-        f.save(tmp)
-        try:
-            # the suffix decides the reader: check under the final name's extension
-            check = tmp + os.path.splitext(name)[1]
-            os.replace(tmp, check)
-            up = upscaler.load_model(check, "cpu")
-            info = {"arch": up.arch, "scale": up.scale}
-            del up
-            os.replace(check, dest)
-        except Exception as e:
-            for p in (tmp, tmp + os.path.splitext(name)[1]):
-                if os.path.exists(p):
-                    os.remove(p)
-            return jsonify({"success": False, "error": "not a usable upscaling model: %s" % e}), 400
-        core.audit("upscale_weights_add", f"file={name!r}")
-        return jsonify({"success": True, "name": name, "path": dest, **info})
-
-    def api_weights_delete():
-        name = os.path.basename(str((request.get_json(silent=True) or {}).get("name") or ""))
-        p = os.path.join(custom_dir(), name)
-        if not name or not os.path.isfile(p):
-            return jsonify({"success": False, "error": "no such file"}), 404
-        if host.config.get("upscale_esrgan_weights") == p:
-            host.set_config("upscale_esrgan_weights", "")
-        model_registry.clear(f"esrgan:{p}:")
-        os.remove(p)
-        core.audit("upscale_weights_delete", f"file={name!r}")
-        return jsonify({"success": True})
-
     host.add_route("/api/upscale", api_run, methods=["POST"], feature=FEATURE, level="write",
                    action="upscale", fields=("filename", "filenames", "mode", "factor"))
     host.add_route("/api/upscale/jobs", api_jobs, feature=FEATURE)
     host.add_route("/api/upscale/cancel", api_cancel, methods=["POST"], feature=FEATURE, level="write")
     host.add_route("/api/upscale/info", api_info, feature=FEATURE)
     host.add_route("/api/upscale/weights", api_weights, feature="settings." + TAB)
-    host.add_route("/api/upscale/weights/upload", api_weights_upload, methods=["POST"],
-                   feature="settings." + TAB, level="write", admin=True)
-    host.add_route("/api/upscale/weights/delete", api_weights_delete, methods=["POST"],
-                   feature="settings." + TAB, level="write", admin=True)
 
     host.add_asset("upscale.js")
     host.add_asset("upscale.css", kind="css")

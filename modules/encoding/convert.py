@@ -106,6 +106,43 @@ def _browser_unsafe(e, k, src):
     return e not in mt.SAFE_EXTS[k]
 
 
+## @brief Audio codec -> the audio file it is copied into without re-encoding.
+AUDIO_COPY_EXT = {'aac': '.m4a', 'alac': '.m4a', 'mp3': '.mp3', 'opus': '.opus', 'vorbis': '.ogg',
+                  'flac': '.flac', 'wmav1': '.wma', 'wmav2': '.wma', 'wmapro': '.wma'}
+## @brief Audio containers that can carry album art along.
+_COVER_EXTS = ('.m4a', '.mp3', '.flac')
+
+
+def audio_only(src: str | None):
+    """! @brief The stream info of a video file that holds only audio (a song saved as
+    .mp4 / .webm / .mkv; album art does not count as video), else None."""
+    if not src or not os.path.exists(src):
+        return None
+    info = S.stream_info(src)
+    if info and info.get('video') is None and info.get('audio'):
+        return info
+    return None
+
+
+def _audio_copy_ext(info) -> str:
+    """! @brief Where an audio-only video's sound goes unchanged (codecs no audio file
+    holds go to FLAC, lossless)."""
+    c = (info or {}).get('audio_codec') or ''
+    if c.startswith('pcm_'):
+        return '.wav'
+    return AUDIO_COPY_EXT.get(c, '.flac')
+
+
+def audio_only_target(info) -> str:
+    """! @brief The extension an audio-only video is stored under: Settings > Media's audio
+    target when audio is converted, else its own sound copied into an audio file."""
+    p = _MEDIA_PREFS['audio']
+    copy = _audio_copy_ext(info)
+    if p['mode'] == 'all' or (p['mode'] == 'unsafe' and copy not in mt.SAFE_EXTS.get('audio', ())):
+        return p['target']
+    return copy
+
+
 def target_ext(path: str, src: str | None = None) -> str:
     """! @brief The extension `path` is stored under.
     @param src  the uploaded file itself, when it is at hand: videos are then judged by
@@ -114,6 +151,12 @@ def target_ext(path: str, src: str | None = None) -> str:
     k = mt.input_kind(path)
     if k is None:  # unknown: treated as an image
         return _MEDIA_PREFS['image']['target']
+    if k == 'video':
+        info = audio_only(src)
+        if info:
+            # a song in a video container is audio: it follows the audio settings and
+            # never becomes a picture-less video
+            return audio_only_target(info)
     p = _MEDIA_PREFS[k]
     t, mode = p['target'], p['mode']
     if k == 'book':
@@ -383,7 +426,23 @@ def convert_av(src: str, out: str) -> str | None:
     """
     if not mt._have('ffmpeg'):
         return "ffmpeg not installed"
-    attempts = S.av_attempts(_ext(out))
+    oe = _ext(out)
+    info = audio_only(src) if oe not in mt.VIDEO_EXTS else None
+    if info and _audio_copy_ext(info) == oe:
+        # the sound goes over unchanged (with its tags, and its album art where it fits)
+        cmd = ['ffmpeg', '-y', '-loglevel', 'error', '-i', src, '-map', '0:a:0', '-map_metadata', '0']
+        if info.get('cover') and oe in _COVER_EXTS:
+            cmd += ['-map', '0:v:0?', '-c:v', 'copy', '-disposition:v:0', 'attached_pic']
+        cmd += ['-c:a', 'copy'] + (['-f', 'ipod'] if oe == '.m4a' else ['-f', 'asf'] if oe == '.wma' else [])
+        try:
+            p = subprocess.run(cmd + [out], capture_output=True, text=True, timeout=6 * 3600)
+            if p.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
+                return None
+        except Exception:
+            pass
+    attempts = S.av_attempts(oe)
+    if info and not attempts and oe == '.flac':
+        attempts = [([], ['-map', '0:a:0', '-map_metadata', '0', '-c:a', 'flac'])]
     err = "unsupported target"
     for pre, args in attempts:
         cmd = ['ffmpeg', '-y', '-loglevel', 'error', *pre, '-i', src, *args, out]

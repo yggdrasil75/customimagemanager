@@ -61,14 +61,14 @@ def register(host):
 
     # -- capabilities ------------------------------------------------------
     host.declare_capability(
-        "embed.faces", label="Face identity",
+        "embed.faces", label="Face identity", group="people",
         summary="Identity embedding per face box (ArcFace-style); vectors in one "
                 "space cluster by person.",
         input="embed(img_bgr, boxes, want_shape=False) - normalized center-form boxes",
         output="(vectors: list[np.ndarray|None], mode: 'arcface'|'appearance', "
                "shapes: list[np.ndarray|None] when want_shape)")
     host.declare_capability(
-        "face.shape", label="Face 3D shape",
+        "face.shape", label="Face 3D shape", group="people",
         summary="Aggregate a person's face crops into a neutral 3D face mesh.",
         input="estimate_shape(crops: list[(img_bgr, box)]) - several views",
         output="{vertices, faces, ...} mesh dict or None when too few clean fits")

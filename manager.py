@@ -1351,6 +1351,28 @@ def get_safe_path(base_dir: str, user_path: str) -> str | None:
             return None
     return abs_target
 
+## @brief Videos already logged as having no poster frame (once per file and mtime, not
+# on every thumbnail / embedding request).
+_NO_POSTER_LOGGED: dict = {}
+
+
+def _log_no_poster(path: str):
+    """! @brief Say why a video gives no picture: it holds only audio (a song saved as a
+    video: Review -> Corrupt files repairs it into its audio file), or its frames don't
+    decode."""
+    key = (path, _getmtime_loose(path))
+    if key in _NO_POSTER_LOGGED:
+        return
+    if len(_NO_POSTER_LOGGED) > 5000:
+        _NO_POSTER_LOGGED.clear()
+    _NO_POSTER_LOGGED[key] = True
+    info = mt.video_probe(path)
+    if info is not None and not info.get("width"):
+        access_logger.info(f"video has no picture, only audio (no thumbnail): {path}")
+    else:
+        access_logger.warning(f"video: could not decode a poster frame for the thumbnail: {path}")
+
+
 def read_jxl(path: str, cache: bool = True) -> np.ndarray | None:
     """! @brief Decode a stored image (or a video's poster frame), cached on mtime.
     @param cache  False for one-pass library sweeps (embedding): their full-res decodes
@@ -1362,7 +1384,7 @@ def read_jxl(path: str, cache: bool = True) -> np.ndarray | None:
     if mt.is_video(path):
         frame = mt.video_poster_frame(path)
         if frame is None:
-            access_logger.warning(f"read_jxl: could not extract video frame: {path}")
+            _log_no_poster(path)
         return frame
     try:
         mtime = _getmtime_loose(path)  # 0.0 = missing

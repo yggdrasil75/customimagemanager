@@ -228,17 +228,38 @@ def test_replace_needs_its_permission(app, client, custom, upload):
     assert not d["success"] and d["refused"][0]["error"] == "you may not replace originals"
 
 
-def test_weights_upload_and_delete(client, host, tiny_model):
-    with open(tiny_model, "rb") as fh:
-        data = fh.read()
-    r = client.post("/api/upscale/weights/upload",
-                    data={"file": (io.BytesIO(data), "cim_test_up.pth")}, content_type="multipart/form-data")
-    j = r.get_json()
-    assert j["success"] and j["scale"] == 2, j
-    names = [c["name"] for c in client.get("/api/upscale/weights").get_json()["custom"]]
-    assert "cim_test_up.pth" in names
-    r = client.post("/api/upscale/weights/upload",
-                    data={"file": (io.BytesIO(b"not a model"), "junk.pth")}, content_type="multipart/form-data")
-    assert r.status_code == 400 and not os.path.exists(os.path.join(um.custom_dir(), "junk.pth"))
-    assert client.post("/api/upscale/weights/delete", json={"name": "cim_test_up.pth"}).get_json()["success"]
-    assert not os.path.exists(os.path.join(um.custom_dir(), "cim_test_up.pth"))
+def test_weights_are_files_like_every_model(client, host, tiny_model):
+    """Custom weights live in models/esrgan/upscale like any model's own weights and are
+    picked on the Upscale card in Settings -> Models (no upload of its own); the model-run
+    settings sit on that card too."""
+    import shutil
+    dest = os.path.join(um.custom_dir(), "cim_test_up.pth")
+    shutil.copy(tiny_model, dest)
+    try:
+        caps = client.get("/api/models").get_json()["capabilities"]
+        card = next(c for c in caps if c["id"] == um.CAP)
+        prov = next(p for p in card["providers"] if p["id"] == "esrgan")
+        keys = [f["key"] for f in prov["settings"]]
+        assert keys == ["upscale_esrgan_weights", "upscale_tile", "upscale_half", "upscale_max_mp"]
+        assert client.post("/api/upscale/weights/upload", data={}).status_code in (404, 405)
+        assert "upscale_jpeg_quality" not in host.config
+    finally:
+        os.remove(dest)
+
+
+def test_replace_stores_in_the_media_format(client, host, custom, runner, upload):
+    """A replaced original is stored like any picture: Settings -> Media's image target."""
+    import shutil
+    from PIL import Image
+    rel = "ups_fmt/plain.png"
+    fp = media_path(rel)
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
+    Image.new("RGB", (24, 16), (10, 120, 200)).save(fp)
+    host.core.index_file(rel, force=True)
+    try:
+        want = host.get_service("encoding").target_ext(rel, fp)
+        out = _job(runner, rel, mode="replace")
+        assert out == os.path.splitext(rel)[0] + want
+        assert os.path.exists(media_path(out))
+    finally:
+        shutil.rmtree(os.path.dirname(fp), ignore_errors=True)
