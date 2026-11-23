@@ -187,3 +187,10 @@ def test_automation_leaves_faces_the_user_decided(client, upload, app, ungated):
         hint, cid = db.execute("SELECT COALESCE(name_hint,''), cluster_id FROM face_regions WHERE id=?",
                                (fid,)).fetchone()
         assert hint == "" and cid == cols["cluster_id"], flags
+
+def test_handed_detectors_run_without_any_installed_model(client, upload, host, monkeypatch):
+    """No face / person model installed (a CI runner): the detect steps' checks say they
+    can't run, but detectors handed to the batch (run_batch's face_run / person_run) count."""
+    from modules.people.tests import test_people as T
+    monkeypatch.setattr(host.broker, "providers_for", lambda *a, **k: [])
+    T.test_detection_writes_person_and_face_regions(client, upload)

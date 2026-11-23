@@ -173,3 +173,16 @@ def test_api_graph_and_save_through_settings(client, host):
     assert client.post("/api/update_settings", json={"task_pipelines": rest}).get_json()["success"]
     assert PID not in host.config["task_pipelines"] and svc["step_enabled"](PID, "tp.c")
     assert client.get("/api/task_pipelines/graph?id=nope").status_code == 404
+
+
+def test_a_status_check_sees_the_run_env():
+    log = []
+    engine.register_step({"id": "tp.env", "label": "E", "run": lambda items, o, env: log.append("ran"),
+                          "status": lambda env=None: {"ok": bool((env or {}).get("handle")),
+                                                      "reason": "no handle"}})
+    engine.register_pipeline("tp_env", label="E", steps=["tp.env"])
+    assert engine.catalog("tp_env")["tp.env"]["note"].startswith("Can't run here: no handle")
+    rep = engine.run("tp_env", [{"n": 1}], {}, env={})
+    assert log == [] and rep["steps"][0]["skipped"] == "no handle"
+    engine.run("tp_env", [{"n": 1}], {}, env={"handle": object()})
+    assert log == ["ran"]

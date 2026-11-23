@@ -584,6 +584,12 @@ def step_pose(items, o, env):
 
 # -- can a step run here ----------------------------------------------------------
 
+def _given(env, key):
+    """! @brief ok when the run was handed this detector (run_batch's face_run / person_run):
+    then no installed model is needed."""
+    return {"ok": True, "reason": ""} if (env or {}).get(key) else None
+
+
 def _cap_status(cap, what):
     """! @brief {"ok", "reason"}: a capability has at least one provider that can run."""
     try:
@@ -640,14 +646,14 @@ STEPS = [
     {"id": "people.detect_faces", "label": "Detect faces", "run": step_detect_faces,
      "summary": "Face boxes. SCRFD and YuNet also give 5 landmarks, so recognition needs no "
                 "second detection. Drawn faces are filtered (Faces settings).",
-     "status": lambda: _cap_status("detect.faces", "face detection"),
+     "status": lambda env=None: _given(env, "face_run") or _cap_status("detect.faces", "face detection"),
      "options": [{"key": "backend", "label": "Detector", "kind": "select", "default": "picked",
                   "choices": lambda: _provider_choices("detect.faces")}, _CONF]},
     {"id": "people.detect_persons", "label": "Detect people", "run": step_detect_persons,
      "summary": "Person boxes for body identity. Cheetah brings a body vector with each "
                 "person and binds it to the face found in it (runs on the app's own runtime, "
                 "AMD included: Faces settings > Cheetah runtime).",
-     "status": lambda: _cap_status("detect.persons", "people detection"),
+     "status": lambda env=None: _given(env, "person_run") or _cap_status("detect.persons", "people detection"),
      "options": [{"key": "backend", "label": "Detector", "kind": "select", "default": "picked",
                   "choices": lambda: _provider_choices("detect.persons")}, _CONF]},
     {"id": "people.background", "label": "Background regions", "run": step_background,

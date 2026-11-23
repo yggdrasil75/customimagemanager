@@ -35,7 +35,7 @@ A step is
      "run": fn(items, opts, env), "options": [OPT, ...],
      "locked": False,   # True: always on, cannot be switched off or removed
      "always": False,   # True: runs for items an earlier step stopped too (finish)
-     "status": fn() -> {"ok": bool, "reason": str},   # optional: can it run here; the
+     "status": fn(env=None) -> {"ok": bool, "reason": str},   # optional: can it run here; the
                         #   node shows the reason and the run skips it when not ok
      "off_note": "..."} # optional: why the default has it off (shown on the node)
 
@@ -50,6 +50,7 @@ bad step must not sink it - the person pipeline still has to mark its files done
 """
 
 import copy
+import inspect
 import threading
 import time
 
@@ -156,14 +157,19 @@ def step_options(step, given):
     return {o["key"]: coerce_option(o, given.get(o["key"])) for o in step.get("options") or []}
 
 
-def step_status(st):
+def step_status(st, env=None):
     """! @brief {"ok", "reason"} of a step (ok when it has no status check; a check that
-    raises is not ok, with the error as the reason)."""
+    raises is not ok, with the error as the reason). A check that takes an argument gets
+    the run's env, so what a caller hands the run (a detector) counts."""
     fn = st.get("status")
     if not callable(fn):
         return {"ok": True, "reason": ""}
     try:
-        r = fn() or {}
+        try:
+            takes_env = len(inspect.signature(fn).parameters) > 0
+        except (TypeError, ValueError):
+            takes_env = False
+        r = (fn(env) if takes_env else fn()) or {}
         return {"ok": bool(r.get("ok", True)), "reason": str(r.get("reason") or "")}
     except Exception as e:
         return {"ok": False, "reason": f"{type(e).__name__}: {e}"}
@@ -550,7 +556,7 @@ def run(pid, items, overrides=None, env=None, log=None):
         if not batch:
             return out()
         row = {"step": t, "node": n["id"], "items": len(batch)}
-        stat = step_status(st)
+        stat = step_status(st, env)
         if not stat["ok"] and not st["locked"]:
             # it cannot run here (its model / module is missing): skipped, said why
             report.append({**row, "ms": 0.0, "skipped": stat["reason"] or "unavailable"})
