@@ -139,7 +139,21 @@ def decode_svg(path: str, size: int = SVG_RASTER_SIZE):
 
 # stored with their own extension
 VIDEO_EXTS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
-              '.mpeg', '.wmv', '.flv', '.ts', '.ogv'}
+              '.mpeg', '.wmv', '.flv', '.ts', '.ogv',
+              # raw video streams: a video stored as separate streams (encoding module,
+              # "Store as separate streams") is indexed by its picture stream
+              '.avc', '.hevc', '.ivf', '.obu', '.m2v'}
+
+# -- videos stored as separate streams ------------------------------------------
+# Movie.avc (the picture, the library item) beside Movie.m3u8 (the manifest, HLS
+# syntax) and the parts it lists: "Movie - english.aac", "Movie - english.srt",
+# "Movie.timestamps.txt", ... The parts move and delete with the item and are
+# never indexed on their own; the encoding module writes and reads the manifest.
+STREAM_EXTS = ('.avc', '.hevc', '.ivf', '.obu', '.m2v')
+STREAM_MANIFEST_EXT = '.m3u8'
+# the manifest's mark: its EXT-X-SESSION-DATA DATA-ID (or the first format's tag)
+STREAM_MANIFEST_TAGS = ('DATA-ID="com.github.yggdrasil75.cim.streams"', '#EXT-X-CIM-STREAMS')
+_STREAM_URI = re.compile(r'(?<![A-Z0-9-])(?:URI|X-URI|X-TIMESTAMPS|CIM-TIMESTAMPS)="([^"]*)"')
 
 # Kinds registered by modules (audio, book). Book extensions are only
 # candidates: .txt, .html and .pdb are ambiguous, so the books module classifies
@@ -981,9 +995,65 @@ def reconcile_ext(path: str, filename: str):
     base = os.path.splitext(filename)[0] if declared else filename
     return (base or 'upload') + sniffed, sniffed, 'corrected'
 
+def stream_manifest_files(manifest_path: str) -> list[str]:
+    """! @brief The file names a separate-streams manifest lists (the picture stream and
+    every part), or [] when the file is not such a manifest."""
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            text = f.read(1 << 20)
+    except (OSError, UnicodeDecodeError):
+        return []
+    if not any(t in text for t in STREAM_MANIFEST_TAGS):
+        return []
+    names = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('#'):
+            if line.startswith('#EXT-X-SESSION-DATA') and 'com.github.yggdrasil75.cim.' not in line:
+                continue                      # someone else's data
+            names += _STREAM_URI.findall(line)
+        else:
+            names.append(line)
+    return [n for n in names if n and '/' not in n and '\\' not in n]
+
+
+def stream_part_suffixes(primary_path: str) -> list[str]:
+    """! @brief For a video stored as separate streams, what follows its stem in the names
+    of its manifest and parts (".m3u8", " - english.aac", ".timestamps.txt"); [] otherwise."""
+    if _ext(primary_path) not in STREAM_EXTS:
+        return []
+    base = os.path.splitext(primary_path)[0]
+    stem = os.path.basename(base)
+    own = os.path.basename(primary_path)
+    out = [STREAM_MANIFEST_EXT] if os.path.exists(base + STREAM_MANIFEST_EXT) else []
+    for n in stream_manifest_files(base + STREAM_MANIFEST_EXT):
+        if n != own and n.startswith(stem) and len(n) > len(stem):
+            out.append(n[len(stem):])
+    return out
+
+
+def is_stream_part(path: str) -> bool:
+    """! @brief True for a file that is a part of a video stored as separate streams (an
+    audio or subtitle track beside Movie.avc): never a library item of its own."""
+    d, name = os.path.split(path)
+    for m in re.finditer(r' - |\.', name):
+        stem = name[:m.start()]
+        if not stem:
+            continue
+        man = os.path.join(d, stem + STREAM_MANIFEST_EXT)
+        if os.path.exists(man) and name in stream_manifest_files(man) \
+                and not any(name == stem + e for e in STREAM_EXTS):
+            return True
+    return False
+
+
 def related_exts(primary_path: str) -> list[str]:
-    """! @brief Extensions that move and delete with an asset: its own plus the sidecars."""
-    exts = {_ext(primary_path)} | set(SIDECAR_EXTS) | {'.jxl'}
+    """! @brief Extensions that move and delete with an asset: its own plus the sidecars,
+    and for a video stored as separate streams its manifest and parts (as the suffixes
+    after its stem)."""
+    exts = {_ext(primary_path)} | set(SIDECAR_EXTS) | {'.jxl'} | set(stream_part_suffixes(primary_path))
     return [e for e in exts if e]
 
 def _have(tool: str) -> bool:

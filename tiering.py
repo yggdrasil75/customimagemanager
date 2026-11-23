@@ -136,8 +136,20 @@ def current_tier_of(abs_path, cfg):
             return i
     return None
 
+def _shared(obj, but=None):
+    """! @brief Other library links (from the last scan) that still point at `obj`."""
+    media_dir = _state.get("media_dir") or ""
+    out = []
+    for rel in (_state.get("links") or {}).get(obj, []):
+        p = os.path.join(media_dir, rel)
+        if p != but and os.path.islink(p) and os.path.realpath(p) == obj:
+            out.append(rel)
+    return out
+
 def safe_remove(path):
-    """! @brief os.remove that also deletes the tier object a symlink points at."""
+    """! @brief os.remove that also deletes the tier object a symlink points at - unless
+    another library link (a copy made with the symlink kept) still uses it; gc_orphans
+    removes such an object once nothing points at it."""
     if os.path.islink(path):
         target = os.path.realpath(path)
         try:
@@ -146,8 +158,9 @@ def safe_remove(path):
             cfg = _state["cfg"] or load_cfg()
             for root in _tier_roots(cfg):
                 if target.startswith(_object_root(root) + os.sep):
-                    try: os.remove(target)
-                    except FileNotFoundError: pass
+                    if not _shared(target, but=os.path.abspath(path)):
+                        try: os.remove(target)
+                        except FileNotFoundError: pass
                     break
         return
     os.remove(path)
@@ -413,57 +426,121 @@ _usage_cache = {"at": 0.0, "value": None}
 _usage_lock = threading.Lock()
 
 
-def usage(max_age=60.0):
+## @brief A full measurement walks media/ and every tier's objects (hours on big pools):
+# never more often than this, unless space was used / freed (usage_stale).
+USAGE_MIN_INTERVAL = 600.0
+_usage_bg = {"running": False}
+
+
+def _usage_file():
+    """! @brief Where the last measurement is kept across restarts (media/.cim)."""
+    return os.path.join(_state.get("media_dir") or ".", ".cim", "storage_usage.json")
+
+
+def _load_usage_file():
+    try:
+        with open(_usage_file()) as f:
+            v = json.load(f)
+        if isinstance(v, dict) and "total" in v:
+            _usage_cache.update(at=float(v.get("at") or 0.0), value=v)
+    except (OSError, ValueError):
+        pass
+
+
+def _measure_usage():
+    """! @brief Walk everything and store the result (cache + file). The slow part."""
+    cfg = _state["cfg"] or load_cfg()
+    parts = {}
+    m_files, m_bytes = _media_usage(cfg, parts)
+    media_dir = _state["media_dir"] or "."
+    try:
+        media_dev = os.stat(media_dir).st_dev
+    except OSError:
+        media_dev = None
+    tiers, on_media_drive = [], m_bytes
+    for t in cfg["tiers"]:
+        root = _object_root(t["path"])
+        n, b = _walk_usage(root)
+        tiers.append({"name": t["name"], "path": t["path"], "files": n, "bytes": b})
+        try:
+            if os.path.exists(root) and os.stat(root).st_dev == media_dev:
+                on_media_drive += b
+        except OSError:
+            pass
+    try:
+        du = shutil.disk_usage(media_dir)
+        drive = {"path": media_dir, "total": du.total, "used": du.total - du.free, "free": du.free}
+    except OSError:
+        drive = {"path": media_dir, "total": 0, "used": 0, "free": 0}
+    tier_bytes = sum(t["bytes"] for t in tiers)
+    lib = parts.get("library", [0, 0])
+    v = {"at": time.time(), "total": m_bytes + tier_bytes, "files": m_files + sum(t["files"] for t in tiers),
+         "library": lib[1] + tier_bytes,
+         "parts": [{"id": k, "label": _PART_LABELS.get(k, k), "files": f, "bytes": b}
+                   for k, (f, b) in sorted(parts.items(), key=lambda kv: -kv[1][1])],
+         "tiers": tiers, "drive": drive,
+         "outside": max(0, drive["used"] - on_media_drive)}
+    _usage_cache.update(at=v["at"], value=v)
+    try:
+        os.makedirs(os.path.dirname(_usage_file()), exist_ok=True)
+        tmp = _usage_file() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(v, f)
+        os.replace(tmp, _usage_file())
+    except OSError:
+        pass
+    return v
+
+
+def _refresh_usage_bg():
+    """! @brief Measure again in a daemon thread (one at a time)."""
+    with _usage_lock:
+        if _usage_bg["running"]:
+            return
+        _usage_bg["running"] = True
+
+    def run():
+        try:
+            _measure_usage()
+        except Exception as e:
+            log.error(f"storage usage: {e}")
+        finally:
+            _usage_bg["running"] = False
+    threading.Thread(target=run, name="storage-usage", daemon=True).start()
+
+
+def usage(max_age=USAGE_MIN_INTERVAL):
     """! @brief Everything this app stores, measured by walking media/ and every tier's
-    objects (cached for max_age seconds, one walk at a time). The limits use it
-    (Settings -> Storage: max total size) instead of the drive's free space, which
-    counts whatever else lives on the drive.
+    objects. The limits use it (Settings -> Storage: max total size) instead of the
+    drive's free space, which counts whatever else lives on the drive.
+    Never waits for a walk once one has been made (this run or a previous one: it is
+    kept in media/.cim/storage_usage.json): an older value is returned at once and a
+    background walk brings it up to date (at most every USAGE_MIN_INTERVAL seconds).
     @return {"at", "total": bytes the app stores, "library": library files (media/ + tiers),
              "parts": [{id, label, files, bytes}], "tiers": [{name, path, files, bytes}],
              "drive": {path, total, used, free}, "outside": bytes on media's drive that aren't
-             this app's}."""
+             this app's, "refreshing": a walk is under way}."""
+    if _usage_cache["value"] is None:
+        _load_usage_file()
+    v = _usage_cache["value"]
+    if v is None:
+        with _usage_lock:  # the very first measurement: nothing to show yet
+            v = _usage_cache["value"] or _measure_usage()
+    elif time.time() - _usage_cache["at"] >= max(float(max_age), USAGE_MIN_INTERVAL) or _usage_cache.get("stale"):
+        _usage_cache["stale"] = False
+        _refresh_usage_bg()
+    return dict(v, refreshing=_usage_bg["running"])
+
+
+def usage_reset():
+    """! @brief Forget the measurement (another media folder: tests, a changed setting)."""
     with _usage_lock:
-        v = _usage_cache["value"]
-        if v is not None and time.time() - _usage_cache["at"] < max_age:
-            return v
-        cfg = _state["cfg"] or load_cfg()
-        parts = {}
-        m_files, m_bytes = _media_usage(cfg, parts)
-        media_dir = _state["media_dir"] or "."
-        try:
-            media_dev = os.stat(media_dir).st_dev
-        except OSError:
-            media_dev = None
-        tiers, on_media_drive = [], m_bytes
-        for t in cfg["tiers"]:
-            root = _object_root(t["path"])
-            n, b = _walk_usage(root)
-            tiers.append({"name": t["name"], "path": t["path"], "files": n, "bytes": b})
-            try:
-                if os.path.exists(root) and os.stat(root).st_dev == media_dev:
-                    on_media_drive += b
-            except OSError:
-                pass
-        try:
-            du = shutil.disk_usage(media_dir)
-            drive = {"path": media_dir, "total": du.total, "used": du.total - du.free, "free": du.free}
-        except OSError:
-            drive = {"path": media_dir, "total": 0, "used": 0, "free": 0}
-        tier_bytes = sum(t["bytes"] for t in tiers)
-        lib = parts.get("library", [0, 0])
-        v = {"at": time.time(), "total": m_bytes + tier_bytes, "files": m_files + sum(t["files"] for t in tiers),
-             "library": lib[1] + tier_bytes,
-             "parts": [{"id": k, "label": _PART_LABELS.get(k, k), "files": f, "bytes": b}
-                       for k, (f, b) in sorted(parts.items(), key=lambda kv: -kv[1][1])],
-             "tiers": tiers, "drive": drive,
-             "outside": max(0, drive["used"] - on_media_drive)}
-        _usage_cache.update(at=time.time(), value=v)
-        return v
+        _usage_cache.update(at=0.0, value=None, stale=False)
 
 
 def usage_stale():
-    """! @brief Measure again on the next usage() call (space was freed or used)."""
-    _usage_cache["at"] = 0.0
+    """! @brief Measure again (in the background) on the next usage() call: space was freed or used."""
+    _usage_cache["stale"] = True
 
 def _key(doc_id):
     """! @brief A DocumentID in comparable form: alphanumerics, lower case ("xmp.did:AB-12" == "ab12")."""
@@ -502,16 +579,100 @@ def _store_objects(cfg):
                     continue
                 yield os.path.join(dirpath, n)
 
-def _referenced_objects(media_dir):
-    """! @brief {realpath(object): rel_path} for every symlink in the library."""
+def _links_by_object(media_dir):
+    """! @brief {realpath(object): [rel_path, ...]} for every symlink in the library - more
+    than one when a file was copied with its symlink kept (cp -a, rsync -l): every one of
+    them must follow when the object is renamed or moved. Also remembered in
+    _state["links"] for safe_remove."""
     out = {}
     for dirpath, dirs, names in os.walk(media_dir):
         dirs[:] = [d for d in dirs if d != OBJECT_DIR and not d.startswith(".")]
         for n in names:
             p = os.path.join(dirpath, n)
             if os.path.islink(p):
-                out[os.path.realpath(p)] = os.path.relpath(p, media_dir).replace("\\", "/")
+                out.setdefault(os.path.realpath(p), []).append(
+                    os.path.relpath(p, media_dir).replace("\\", "/"))
+    _state["links"] = out
     return out
+
+def _referenced_objects(media_dir):
+    """! @brief {realpath(object): rel_path} for every symlink in the library (the first
+    link of an object several share)."""
+    return {obj: rels[0] for obj, rels in _links_by_object(media_dir).items()}
+
+def _relink(link, target):
+    """! @brief Point a library symlink at `target`, atomically."""
+    ltmp = link + f".tierswap-{uuid.uuid4().hex[:8]}"
+    os.symlink(target, ltmp)
+    os.replace(ltmp, link)
+
+def _repoint(old_obj, new_obj, links=None, skip=None):
+    """! @brief Every library link still pointing at old_obj now points at new_obj.
+    @return how many were repointed."""
+    media_dir = _state["media_dir"]
+    links = links if links is not None else (_state.get("links") or {})
+    n = 0
+    for rel in links.get(old_obj, []):
+        p = os.path.join(media_dir, rel)
+        if p == skip or not os.path.islink(p) or os.path.realpath(p) != old_obj:
+            continue
+        _relink(p, new_obj)
+        n += 1
+    if old_obj in links:
+        links.setdefault(new_obj, []).extend(r for r in links.pop(old_obj) if r not in links.get(new_obj, []))
+    return n
+
+def repair_dangling(cfg=None):
+    """! @brief Relink library symlinks whose tier object is gone from where they point but
+    exists elsewhere: under the name their sidecar's DocumentID gives (renamed by
+    adopt_ids while another copy of the link pointed at it), or under the same name on
+    another tier (moved while another copy pointed at it).
+    @return (repaired rel_paths, [(rel, reason)] still broken)."""
+    cfg = cfg or _state["cfg"] or load_cfg()
+    media_dir = _state["media_dir"]
+    read_id = _state.get("read_document_id")
+    roots = [_object_root(r) for r in _tier_roots(cfg)]
+    fixed, broken = [], []
+    for dirpath, dirs, names in os.walk(media_dir):
+        dirs[:] = [d for d in dirs if d != OBJECT_DIR and not d.startswith(".")]
+        for n in names:
+            p = os.path.join(dirpath, n)
+            if not os.path.islink(p) or os.path.exists(p):
+                continue
+            target = os.path.realpath(p)
+            if not any(target.startswith(r + os.sep) for r in roots):
+                continue                      # not a tier link: not ours to touch
+            rel = os.path.relpath(p, media_dir).replace("\\", "/")
+            ext = os.path.splitext(n)[1].lower()
+            names_to_try = []
+            k = _key(read_id(p)) if read_id else ""
+            if k:
+                names_to_try.append(k + ext)
+            names_to_try.append(os.path.basename(target))
+            hit = None
+            for root in roots:
+                for name in names_to_try:
+                    cand = os.path.join(root, name[:2], name)
+                    if os.path.isfile(cand):
+                        hit = cand
+                        break
+                if hit:
+                    break
+            if hit:
+                try:
+                    _relink(p, hit)
+                    fixed.append(rel)
+                except OSError as e:
+                    broken.append((rel, str(e)))
+            else:
+                broken.append((rel, f"its tier object {target} is missing"))
+    if fixed:
+        log.info(f"repair: relinked {len(fixed)} library links to their moved / renamed tier objects")
+    if broken:
+        log.warning(f"repair: {len(broken)} library links point at missing tier objects "
+                    f"(first: {broken[0][0]}: {broken[0][1]}); a tier that isn't mounted, or "
+                    "objects lost outside the app")
+    return fixed, broken
 
 def _homeless_sidecars(media_dir):
     """! @brief {DocumentID key: sidecar stem} for sidecars whose media is missing."""
@@ -536,9 +697,13 @@ def adopt_ids(cfg=None):
         return 0
     media_dir = _state["media_dir"]
     n = 0
-    for obj, rel in _referenced_objects(media_dir).items():
+    links = _links_by_object(media_dir)
+    for obj, rels in list(links.items()):
         if not any(obj.startswith(_object_root(r) + os.sep) for r in _tier_roots(cfg)):
             continue
+        if not os.path.exists(obj):
+            continue                          # a dangling link: repair_dangling's job
+        rel = rels[0]
         stem, ext = os.path.splitext(os.path.basename(obj))
         link = os.path.join(media_dir, rel)
         have = _key(read_id(link))
@@ -549,9 +714,13 @@ def adopt_ids(cfg=None):
             elif have != stem:
                 new = os.path.join(os.path.dirname(os.path.dirname(obj)), have[:2], have + ext)
                 os.makedirs(os.path.dirname(new), exist_ok=True)
+                if os.path.exists(new):
+                    # another object already has this id (a copy of the file): keep both
+                    # as they are rather than overwrite it
+                    continue
                 os.rename(obj, new)
-                ltmp = link + f".tierswap-{uuid.uuid4().hex[:8]}"
-                os.symlink(new, ltmp); os.replace(ltmp, link)
+                # every link to the object follows, not just the first (copies of a link)
+                _repoint(obj, new, links)
                 n += 1
         except Exception as e:
             # one bad file (a sidecar exiv2 can't parse, a read-only dir) must not stop
@@ -653,10 +822,10 @@ def _execute_move(mv, cfg, mbps=None):
             raise IOError("size mismatch after copy")
         os.replace(tmp, dst)
         # atomic swap: build the new link beside the old one
-        ltmp = link_path + f".tierswap-{uuid.uuid4().hex[:8]}"
-        os.symlink(dst, ltmp)
-        os.replace(ltmp, link_path)
+        _relink(link_path, dst)
         if src_real != dst and os.path.abspath(src_real) != os.path.abspath(link_path):
+            # other copies of the link (cp -a) follow the object before the old copy goes
+            _repoint(src_real, dst, skip=link_path)
             try: os.remove(src_real)
             except OSError: pass
         return True
@@ -723,6 +892,7 @@ def rebalance(block=False, aggressive=False, manual=False):
             if cfg["tiers"]:
                 # Relink lost objects first, even with tiering off: the objects exist.
                 run["phase"] = "restore"
+                repair_dangling(cfg)
                 adopt_ids(cfg)
                 restore_orphans(cfg)
             if not cfg["enabled"] or not cfg["tiers"]:
@@ -823,24 +993,29 @@ def _status_stats(max_age=30.0):
         return _status_cache["stats"]
     if not _status_lock.acquire(blocking=False):
         return _status_cache["stats"]  # another poll is computing it: serve the last one
-    try:
-        _, stats = plan()
-        _status_cache.update(at=time.time(), stats=stats)
-    except Exception as e:
-        log.error(f"status plan failed: {e}")
-        _status_cache["at"] = time.time()
-    finally:
-        _status_lock.release()
+
+    def run():
+        try:
+            _, stats = plan()
+            _status_cache.update(at=time.time(), stats=stats)
+        except Exception as e:
+            log.error(f"status plan failed: {e}")
+            _status_cache["at"] = time.time()
+        finally:
+            _status_lock.release()
+    # the plan loads every file row and walks the tiers: never in the request
+    threading.Thread(target=run, name="storage-plan", daemon=True).start()
     return _status_cache["stats"]
 
 
 def status():
     cfg = _state["cfg"] or load_cfg()
-    stats = _status_stats()
-    # the Storage tab polls this every few seconds: the walk is shared and cached
-    u = usage(max_age=15.0)
+    stats = _status_stats(max_age=USAGE_MIN_INTERVAL)
+    # the Storage tab polls this every few seconds: it gets the last measurement at once
+    u = usage()
     media_bytes = u["total"] - sum(t["bytes"] for t in u["tiers"])
     media = {"path": _state.get("media_dir"), "files": u["files"] - sum(t["files"] for t in u["tiers"]),
              "bytes": media_bytes, "parts": u["parts"]}
     return {"config": cfg, "tiers": stats, "media": media, "run": dict(_state["run"]),
-            "usage": {k: u[k] for k in ("total", "library", "drive", "outside", "at")}}
+            "usage": {k: u[k] for k in ("total", "library", "drive", "outside", "at", "refreshing")},
+            "tiers_measuring": _status_lock.locked()}

@@ -1,7 +1,8 @@
 """! @file
 @brief Background jobs of Settings -> Media: re-encode existing library files to
-the current output format, and regenerate thumbnails. One job at a time, run
-by the thread manager, cancellable, with progress for the pane to poll.
+the current output format, regenerate thumbnails, and split existing videos into
+separate streams (or put them back together). One job at a time, run by the
+thread manager, cancellable, with progress for the pane to poll.
 """
 import os
 import shutil
@@ -10,6 +11,7 @@ import time
 import uuid
 
 from .convert import audio_only, convert_av, convert_image, encode_jxl, needs_browser_convert
+from .demux import ES_EXTS, DemuxError, is_demuxed
 
 ## @brief Kinds the re-encode job handles (audio and books live in their modules' own indexes).
 REENCODE_KINDS = ("image", "video")
@@ -26,6 +28,7 @@ class Jobs:
                                    still needs work under the current settings."""
         self.host = host
         self.needs_av_work = needs_av_work
+        self.demuxer = None          # demux.Demuxer, set by register()
         self.lock = threading.Lock()
         self.want = None
         self.state = {"running": False, "kind": None, "action": None, "done": 0, "total": 0,
@@ -65,6 +68,9 @@ class Jobs:
         convert, check, skip = [], [], 0
         for rel in self._rows(kind, folder):
             e = os.path.splitext(rel)[1].lower()
+            if kind == "video" and e in ES_EXTS:
+                skip += 1            # stored as separate streams: "Put back together" first
+                continue
             if kind == "image" and e not in STILL_EXTS:
                 skip += 1
                 continue
@@ -134,6 +140,8 @@ class Jobs:
         try:
             if w["action"] == "thumbs":
                 self._run_thumbs()
+            elif w["action"] in ("demux", "mux"):
+                self._run_streams(w["action"], w.get("keep", False), w.get("folder", ""))
             else:
                 self._run_reencode(w["kind"], w.get("keep", True), w.get("folder", ""))
         except Exception as e:
@@ -195,6 +203,54 @@ class Jobs:
             except Exception as e:
                 self._err(rel, e)
             self._tick("Thumbnails")
+
+    def streams_plan(self, action, folder=""):
+        """! @brief The videos a split ("demux") or a put-back ("mux") would handle.
+        @return {"todo": [rel], "skip": n}"""
+        todo, skip = [], 0
+        dm = self.demuxer
+        for rel in self._rows("video", folder):
+            ap = self.host.safe_path(self.host.media_dir, rel)
+            split = bool(ap) and os.path.splitext(rel)[1].lower() in ES_EXTS and is_demuxed(ap)
+            if action == "mux":
+                if split:
+                    todo.append(rel)
+                else:
+                    skip += 1
+            elif split or not ap or (dm is not None and not dm.in_scope(rel)):
+                skip += 1                    # only the libraries chosen in the setting
+            else:
+                todo.append(rel)
+        return {"todo": todo, "skip": skip}
+
+    def _run_streams(self, action, keep, folder=""):
+        """! @brief Split every video (under `folder`) into separate streams, or put every
+        split one back together as an .mkv."""
+        plan = self.streams_plan(action, folder)
+        with self.lock:
+            self.state["total"] = len(plan["todo"])
+            self.state["skipped"] = plan["skip"]
+        label = "Separate streams" if action == "demux" else "Put back together"
+        for rel in plan["todo"]:
+            if self.state["cancel"]:
+                break
+            ap = self.host.safe_path(self.host.media_dir, rel)
+            try:
+                if action == "demux" and ap and audio_only(ap):
+                    raise DemuxError("no picture (a song in a video file)")
+                if action == "demux":
+                    self.demuxer.demux_rel(rel, keep_original=keep)
+                else:
+                    self.demuxer.mux_rel(rel)
+                with self.lock:
+                    self.state["converted"] += 1
+            except DemuxError as e:
+                with self.lock:
+                    self.state["skipped"] += 1
+                self._err(rel, e)
+            except Exception as e:
+                self._err(rel, e)
+            self._tick(label)
 
     def _run_reencode(self, kind, keep, folder=""):
         """! @brief Convert every file of `kind` (under `folder`) not in the target format yet."""

@@ -88,6 +88,14 @@
       input.type = 'checkbox';
       input.className = 'accent-amber-500';
       input.addEventListener('change', () => setValue(f.key, input.checked));
+    } else if (f.kind === 'checks') {
+      // several choices at once (the libraries a setting applies to)
+      input = document.createElement('span');
+      input.className = 'flex flex-wrap gap-x-3 gap-y-1 text-xs';
+      input.innerHTML = (f.options || []).map(o => `<label class="inline-flex items-center gap-1" title="${esc(o.hint || '')}">
+        <input type="checkbox" class="accent-amber-500" value="${esc(o.value)}"> ${esc(o.label)}</label>`).join('');
+      input.addEventListener('change', () => setValue(f.key,
+        [...input.querySelectorAll('input:checked')].map(x => x.value)));
     } else {
       input = document.createElement('input');
       input.type = 'number';
@@ -113,6 +121,14 @@
       na.textContent = `(${f.unavailable.length} unavailable)`;
       na.title = f.unavailable.map(u => `${u.label}: ${u.reason}`).join('\n');
       row.appendChild(na);
+    }
+    if (f.notice) {
+      // always shown, not only on hover: a consequence to know before turning it on
+      const w = document.createElement('span');
+      w.className = 'basis-full text-[11px] text-amber-400 media-notice';
+      w.textContent = '\u26a0 ' + f.notice;
+      row.classList.add('flex-wrap');
+      row.appendChild(w);
     }
     if (f.warn) {
       const w = document.createElement('span');
@@ -145,6 +161,9 @@
       input.value = String(S.values[f.key]);
     } else if (f.kind === 'toggle') {
       input.checked = !!v;
+    } else if (f.kind === 'checks') {
+      const on = new Set(Array.isArray(v) ? v.map(String) : []);
+      input.querySelectorAll('input[type=checkbox]').forEach(c => { c.checked = on.has(c.value); });
     } else if (document.activeElement !== input) {
       input.value = v;
     }
@@ -194,6 +213,15 @@
       keep.checked = S.values[keepKey(g.id)] !== false;
       keep.addEventListener('change', () => setValue(keepKey(g.id), keep.checked));
       box.querySelector('.media-reencode').addEventListener('click', () => reencode(g.id, box));
+      if (g.id === 'video' && S.schema.streams_available) {
+        box.insertAdjacentHTML('beforeend',
+          cimButton({ label: 'Split existing videos...', variant: 'neutral', size: 'xs', cls: 'media-split',
+            title: 'Store library videos as separate streams (picture, one file per audio / subtitle track) - only where the parts rebuild the file exactly. Public movies / tv / music folders stay single files.' }) +
+          cimButton({ label: 'Put back together...', variant: 'neutral', size: 'xs', cls: 'media-join',
+            title: 'Rebuild every split video as one .mkv (before turning separate streams off).' }));
+        box.querySelector('.media-split').addEventListener('click', () => streams('demux'));
+        box.querySelector('.media-join').addEventListener('click', () => streams('mux'));
+      }
     } else if (g.id === 'thumb') {
       box.innerHTML = cimButton({ label: 'Regenerate thumbnails now', variant: 'neutral', size: 'xs', cls: 'media-regen',
         title: 'Rebuild every thumbnail at the saved settings in the background (otherwise they are rebuilt as they are viewed).' });
@@ -219,6 +247,29 @@
     watchJob();
   }
 
+  /** @brief Count, confirm, then queue splitting existing videos (demux) or putting them back (mux). */
+  async function streams(action) {
+    if ([...S.dirty].some(k => !k.startsWith(KEEP))) { window.showToast && showToast('Save the media settings first.'); return; }
+    const post = body => fetch('/api/encoding/streams', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+    const d = await post({ action, dry_run: true }).catch(() => null);
+    if (!d || !d.success) { window.showToast && showToast((d && d.error) || 'Check failed'); return; }
+    if (!d.todo) {
+      window.showToast && showToast(action === 'demux'
+        ? ((S.values.enc_video_demux || []).length ? 'No video to split in the chosen libraries.'
+          : 'Choose the libraries under "Store as separate streams" first.') : 'No split video.');
+      return;
+    }
+    const msg = action === 'demux'
+      ? `${d.todo} video(s) in the libraries chosen under "Store as separate streams" will be split where the parts rebuild them exactly; ${d.skip} skipped.\n\n` +
+        'Plex, Jellyfin, Kodi and other players can\'t play split videos (a picture without sound, loose track files). Public library folders are never split.\n\nThis runs in the background. Continue?'
+      : `${d.todo} split video(s) will be put back together as .mkv files. Continue?`;
+    if (!window.confirm(msg)) return;
+    const r = await post({ action, dry_run: false, keep_originals: action === 'demux' && S.values[keepKey('video')] !== false }).catch(() => null);
+    if (!r || !r.success) { window.showToast && showToast((r && r.error) || 'Could not start'); return; }
+    watchJob();
+  }
+
   /** @brief Queue a thumbnail regeneration. */
   async function regenThumbs() {
     if (S.dirty.size) { window.showToast && showToast('Save the media settings first.'); return; }
@@ -235,7 +286,8 @@
     const active = job && (job.running || job.queued);
     el.classList.toggle('hidden', !active && !(job && job.finished));
     if (!job) return;
-    const what = job.action === 'thumbs' ? 'Thumbnails' : `Re-encode ${job.kind || ''}`;
+    const what = job.action === 'thumbs' ? 'Thumbnails' : job.action === 'demux' ? 'Split into streams'
+      : job.action === 'mux' ? 'Put back together' : `Re-encode ${job.kind || ''}`;
     el.querySelector('.media-job-text').textContent = active
       ? `${what}: ${job.done} / ${job.total} (${job.converted} done, ${job.skipped} skipped, ${job.errors.length} errors)`
       : `${what} finished: ${job.converted} done, ${job.skipped} skipped, ${job.errors.length} errors${job.cancel ? ' (cancelled)' : ''}`;

@@ -63,14 +63,14 @@ def _opt(value, label, hint="", needs=None, show=()):
 
 def _f(key, group, label, kind, default, hint, *, options=None, lo=None, hi=None, step=None,
        expert=True, show=(), needs=None, long_hint=None, store="config", warn_above=None,
-       warn=None):
+       warn=None, notice=None):
     """! @brief One field descriptor."""
     d = {"key": key, "group": group, "label": label, "kind": kind, "default": default,
          "hint": hint, "expert": bool(expert), "show": [list(c) for c in show],
          "store": store}
     for k, v in (("options", options), ("min", lo), ("max", hi), ("step", step),
                  ("needs", needs), ("long_hint", long_hint), ("warn_above", warn_above),
-                 ("warn", warn)):
+                 ("warn", warn), ("notice", notice)):
         if v is not None:
             d[k] = v
     return d
@@ -257,6 +257,24 @@ FIELDS = [
     _f("enc_video_metadata", "video", "Keep metadata", "toggle", True,
        "Carry title / date / location tags over. The XMP sidecar is always written.",
        show=[_conv("video")]),
+    _f("enc_video_demux", "video", "Store as separate streams", "checks", [],
+       "Split new videos in these libraries into their raw streams: the picture, one file per "
+       "audio and subtitle track named by its language, chapters and attachments, beside an "
+       ".m3u8 manifest. Manage tracks one by one from the viewer (Tracks).",
+       options=[_opt("music", "Music", "Music videos, lyric videos, concerts in music folders."),
+                _opt("tv", "TV", "Series and anime: dubs and subtitle tracks per language."),
+                _opt("movies", "Movies", "Movie folders (private ones)."),
+                _opt("other", "Other folders", "Everything outside a library section: family "
+                                               "videos, phone clips.")],
+       long_hint="The picture stays as Movie.avc (.hevc / .ivf / .obu / .m2v); tracks become "
+                 "Movie - english.aac, Movie - english.srt, ... A video is only split when the "
+                 "parts rebuild it exactly; otherwise it stays one file. Playing, downloading and "
+                 "publishing use a file rebuilt from the parts. Public movies / tv / music "
+                 "folders are never split. Needs mkvtoolnix.",
+       notice="Other players can't use split videos: Plex, Jellyfin, Kodi or a file manager "
+              "find a picture without sound and loose track files. Only for folders this app "
+              "serves; public library folders stay single files.",
+       expert=False, needs="mkvtoolnix"),
 
     # -- audio --------------------------------------------------------------
     _f("media_storage.audio.mode", "audio", "Output", "select", "none",
@@ -363,6 +381,17 @@ def clean(key, value):
             if str(o["value"]) == str(value):
                 return o["value"]
         raise ValueError(f"{key}: unknown option {value!r}")
+    if f["kind"] == "checks":
+        allowed = [o["value"] for o in f["options"]]
+        if value is True or (isinstance(value, str) and value.strip().lower() in ("1", "true", "yes", "on")):
+            return list(allowed)              # an early on / off value: on = everywhere
+        if not value or value is False:
+            return []
+        vals = [value] if isinstance(value, str) else list(value)
+        bad = [v for v in vals if v not in allowed]
+        if bad:
+            raise ValueError(f"{key}: unknown option {bad[0]!r}")
+        return [v for v in allowed if v in vals]
     return value
 
 

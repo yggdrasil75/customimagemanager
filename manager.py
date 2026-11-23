@@ -1599,6 +1599,9 @@ def _index_file(rel_path: str, force: bool = False,
         return False
     if not force and row and row['mtime'] is not None and abs(row['mtime'] - mtime) < 0.01:
         return False
+    # a track of a video stored as separate streams belongs to that video: no row of its own
+    if mt.is_stream_part(abs_path):
+        return True
     # kinds a module owns (audio) are indexed by the module
     if module_host.emit("file.index", rel_path=rel_path, abs_path=abs_path, force=force):
         return True
@@ -1732,6 +1735,8 @@ def _enumerate_library():
                 continue
             if not mt.is_library_file(f):  # module kinds included
                 continue
+            if mt.is_stream_part(os.path.join(root, f)):  # a track of a separate-streams video
+                continue
             rel = _rel(os.path.join(root, f))
             if rel not in seen:
                 seen.add(rel)
@@ -1857,12 +1862,21 @@ def _ensure_document_id(filepath, doc_id=None):
     cur = _document_id(filepath)
     if cur:
         return cur
+    if not _present(filepath):
+        # a dangling tier link (its object moved or missing) with no sidecar: nothing to
+        # write into - say so instead of a bare "write failed"
+        why = "its tier object is missing" if os.path.islink(filepath) else "the file is missing"
+        raise ValueError(f"DocumentID for {filepath}: {why}")
     if not os.path.exists(os.path.splitext(filepath)[0] + '.xmp'):
-        update_file(filepath, force=True)
+        made = update_file(filepath, force=True)
+        if not made.get("success"):
+            raise ValueError(f"DocumentID for {filepath}: no sidecar ({made.get('error') or 'write failed'})")
     doc_id = doc_id or uuid.uuid4().hex
-    res = update_file(filepath, xmp={"Xmp.xmpMM.DocumentID": doc_id}).get("xmp") or {"success": False, "skipped": "write failed"}
-    if not res["success"]:
-        raise ValueError(f"DocumentID for {filepath}: {res.get('skipped') or res.get('error') or 'write failed'}")
+    out = update_file(filepath, xmp={"Xmp.xmpMM.DocumentID": doc_id})
+    res = out.get("xmp") or {}
+    if not out.get("success") or not res.get("success"):
+        reasons = "; ".join(str(x.get("reason")) for x in res.get("skipped") or [] if isinstance(x, dict))
+        raise ValueError(f"DocumentID for {filepath}: {out.get('error') or reasons or 'write failed'}")
     return doc_id
 
 def _read_analysis_from_xmp(xmp_path):
@@ -6824,6 +6838,13 @@ def api_file(filename):
                 return jsonify({"success": False, "preparing": True, **(extra or {})}), 202
             if path != fp:
                 return send_file(path, mimetype=extra, conditional=True)
+        if (mt.is_video(fp) and os.path.splitext(fp)[1].lower() in mt.STREAM_EXTS
+                and media_encoding is not None and hasattr(media_encoding, "video_original_path")):
+            # stored as separate streams: the original is the file rebuilt from its parts
+            whole = media_encoding.video_original_path(filename, fp)
+            if whole and whole != fp:
+                return send_file(whole, mimetype="video/x-matroska", conditional=True,
+                                 download_name=os.path.splitext(os.path.basename(fp))[0] + ".mkv")
         # conditional=True: Range requests, so <video> can seek
         resp = send_file(fp, mimetype=mt.mime_for(filename), conditional=True)
         if mt.is_svg(fp):

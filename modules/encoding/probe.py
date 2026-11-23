@@ -101,7 +101,7 @@ def capabilities(refresh=False):
     """! @brief Everything the settings depend on, as {capability: bool}.
 
     Keys: ffmpeg, ffprobe, cjxl, djxl, ebook_convert, pil, pil_webp, pil_avif,
-    pil_avif_anim, pil_webp_anim, heif, rawpy, imagecodecs, thumb_webp, and
+    pil_avif_anim, pil_webp_anim, heif, rawpy, imagecodecs, thumb_webp, mkvtoolnix, and
     enc:<name> for every KNOWN_ENCODERS entry ffmpeg has.
     """
     with _lock:
@@ -119,6 +119,7 @@ def capabilities(refresh=False):
         "pil_png": "PNG" in save, "pil_jpeg": "JPEG" in save,
         "heif": _HAVE_HEIF, "rawpy": _HAVE_RAWPY, "imagecodecs": _HAVE_IMAGECODECS,
         "thumb_webp": _cv2_webp(),
+        "mkvtoolnix": _which("mkvmerge") and _which("mkvextract"),
     }
     encs = ffmpeg_encoders()
     for name in KNOWN_ENCODERS:

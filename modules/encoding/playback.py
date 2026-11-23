@@ -14,6 +14,9 @@ AAC plays, but is served as video/quicktime, which Firefox refuses. So:
     transcode  the video codec doesn't play (HEVC, ProRes, MPEG-2/4, 10-bit H.264...):
                H.264 + AAC MP4 (VP9 + Opus WebM without libx264), long side capped
 
+A video stored as separate streams (demux.py) is judged and copied from the
+file rebuilt from its parts (`source`), never from its raw picture stream.
+
 The original is never touched: the copy lives in <media>/.cim/play/, keyed by
 the file's path and mtime, and /api/file serves it in place of the original
 (?original=1 still sends the original). Remuxes run on request; transcodes run
@@ -95,6 +98,7 @@ class Playback:
         self.jobs = OrderedDict()       # copy path -> {"rel", "abs", "progress", "error", "state"}
         self.wake = threading.Event()
         self.worker = None
+        self.source = lambda abs_path: abs_path   # what to read for a video (demux: its rebuild)
 
     # -- the check -------------------------------------------------------------------
     def check(self, abs_path):
@@ -109,8 +113,9 @@ class Playback:
             if hit:
                 self.cache.move_to_end(key)
                 return hit
-        info = probe(abs_path)
-        out = verdict(info, os.path.splitext(abs_path)[1].lower()) + (info,)
+        src = self.source(abs_path)
+        info = probe(src)
+        out = verdict(info, os.path.splitext(src)[1].lower()) + (info,)
         with self.lock:
             self.cache[key] = out
             while len(self.cache) > PROBE_CACHE:
@@ -250,7 +255,7 @@ class Playback:
         os.makedirs(self.dir, exist_ok=True)
         _v, _r, info = self.check(abs_path)
         tmp = out + ".part"
-        cmd = ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1", "-i", abs_path,
+        cmd = ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1", "-i", self.source(abs_path),
                *self._args(kind, info), tmp]
         dur = (info or {}).get("duration") or 0
         try:

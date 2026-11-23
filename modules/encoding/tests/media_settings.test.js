@@ -155,3 +155,15 @@ test("re-encode 'keep originals' is a saved setting per kind, not reset on every
   await b.tick(10);
   assert.ok(b.api.last("/api/encoding/reencode", "POST"), "re-encode ran without saving first");
 });
+test("separate streams: one box per library and a warning shown without hovering", async () => {
+  const b = await open();
+  const r = row(b, "enc_video_demux");
+  if (!r) return;                          // mkvtoolnix missing on this machine: the field is hidden
+  const boxes = [...r.querySelectorAll('input[type="checkbox"]')];
+  assert.deepEqual(boxes.map(x => x.value), ["music", "tv", "movies", "other"]);
+  const notice = r.querySelector(".media-notice");
+  assert.ok(notice && !notice.classList.contains("hidden") && /Plex/.test(notice.textContent));
+  boxes[0].checked = true; boxes[1].checked = true;
+  boxes[1].dispatchEvent(new b.window.Event("change", { bubbles: true }));
+  assert.deepEqual(b.val("CIMMediaSettings.values.enc_video_demux"), ["music", "tv"]);
+});
