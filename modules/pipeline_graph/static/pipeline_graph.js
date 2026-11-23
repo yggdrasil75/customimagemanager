@@ -8,8 +8,10 @@
 // One editor, several graphs ("sources"): the per-photo Smart Tag pipeline is
 // built in (saves pipeline_tree through /api/update_settings, the key the
 // raw-JSON box writes); other modules add theirs with
-//   CIMPipelineGraph.register({id, label, load() -> {graph, catalog},
+//   CIMPipelineGraph.register({id, label, group?, hint?, load() -> {graph, catalog},
 //                              save(graph) -> {ok, error}, panel(el, api)})
+// (`group` names the picker's option group, "Other" without one; a catalog entry's
+// `note` - why a node can't run here - shows on the node and in the inspector)
 // (or push the same object onto window.CIMPipelineGraphSources before this
 // file loads). A switch above the canvas picks the graph; `panel` fills the
 // strip under the inspector (the library pipeline's preview / apply).
@@ -66,7 +68,9 @@
     if (n.type === 'meta_get' || n.type === 'meta_set') sub = s.label + (n.field ? ' | ' + n.field : '');
     if (n.type === 'regex') sub = 'regex ' + (n.pattern || '');
     if (n.type === 'for_each') sub = `for each | ${((n.graph || {}).nodes || []).length} inner node(s) | dbl-click to open`;
-    return `<div class="plg-title" title="${esc(n.id)}">${esc(n.label || n.id)}</div><div class="plg-type" title="${esc(sub)}">${esc(sub)}</div>`;
+    if (n.enabled === false) sub = 'off | ' + sub;
+    const note = s.note ? `<div class="plg-type text-amber-300" title="${esc(s.note)}">${esc(s.note)}</div>` : '';
+    return `<div class="plg-title" title="${esc(n.id)}">${esc(n.label || n.id)}</div><div class="plg-type" title="${esc(sub)}">${esc(sub)}</div>${note}`;
   }
 
   function decorate(dfId, n) {
@@ -211,6 +215,7 @@
     const s = spec(n), fixed = ['start', 'end', '_inner_start', '_inner_end'].includes(n.type);
     let h = `<div class="flex items-center justify-between mb-1"><span class="text-xs font-bold text-sky-300">${esc(s.label)}</span>
       ${fixed ? '' : '<button id="plg_del" class="text-[10px] bg-red-800 hover:bg-red-700 px-2 py-0.5 rounded">Delete</button>'}</div>`;
+    if (s.note) h += `<p class="text-[10px] text-amber-300 mb-1">${esc(s.note)}</p>`;
     if (s.help) h += `<p class="text-[10px] text-gray-500 mb-1">${esc(s.help)}</p>`;
     if (!fixed) { h += field('Id', `<input id="plg_id" value="${esc(n.id)}">`); h += field('Label', `<input id="plg_label" value="${esc(n.label || '')}">`); }
     const params = s.params || {};
@@ -332,11 +337,15 @@
   function renderSwitch() {
     const el = $('plg_sources'); if (!el) return;
     const ids = Object.keys(sources);
-    const photo = ids.filter(id => sources[id].photo), other = ids.filter(id => !sources[id].photo);
+    const photo = ids.filter(id => sources[id].photo), groups = {};
+    for (const id of ids) if (!sources[id].photo) (groups[sources[id].group || 'Other'] = groups[sources[id].group || 'Other'] || []).push(id);
     const opt = id => `<option value="${esc(id)}"${id === srcId ? ' selected' : ''}>${esc(sources[id].label)}</option>`;
+    // the task pipelines (person pipeline, ...) head the list, then the per-photo ones, then the rest
+    const grouped = g => groups[g] ? `<optgroup label="${esc(g)}">${groups[g].map(opt).join('')}</optgroup>` : '';
     el.innerHTML = `<select id="plg_src_pick" data-gate-keep class="bg-gray-900 border border-sky-700 rounded px-2 py-1 text-sky-200 font-bold">
+        ${grouped('Task pipelines')}
         <optgroup label="Per-photo pipelines">${photo.map(opt).join('')}</optgroup>
-        ${other.length ? `<optgroup label="Other">${other.map(opt).join('')}</optgroup>` : ''}
+        ${Object.keys(groups).filter(g => g !== 'Task pipelines').map(grouped).join('')}
         ${window.CIMPipelines ? '<option value="__new">+ New per-photo pipeline...</option>' : ''}
       </select>`;
     el.classList.remove('hidden');

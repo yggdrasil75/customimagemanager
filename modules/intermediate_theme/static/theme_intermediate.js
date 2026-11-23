@@ -1,6 +1,6 @@
 /* theme_intermediate.js - activates the Simple theme's shared viewer for the
  * "intermediate" layout: Meta shows the controls pane (Editor +
- * EXIF / IPTC / XMP), no albums strip, Timeline / Albums / People / Music.
+ * EXIF / IPTC / XMP), no albums strip, Timeline / Albums / People / Music / Books.
  *
  * People in the picture: the shared viewer already lists them in its side
  * panel (#sv_people, one chip per person built from the picture's regions).
@@ -19,7 +19,7 @@
     if (!window.CIMTheme || !window.CIMSimpleViewer) return;
     if (window.CIMTheme.layout === LAYOUT) {
       CIMSimpleViewer.activate(LAYOUT, { metaMode: "controls", albumsStrip: false,
-                                         panes: ["gallery", "albums", "faces", "music"] });
+                                         panes: ["gallery", "albums", "faces", "music", "books"] });
       watchPeople();
       decorate();
     } else CIMSimpleViewer.release(LAYOUT);

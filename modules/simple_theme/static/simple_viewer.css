@@ -40,3 +40,16 @@
 .sv-nocover { width: 100%; aspect-ratio: 1; background: #111827; display: grid; place-items: center; color: #4b5563; font-size: 32px; }
 .sv-label { display: block; padding: 6px 8px; font-size: 13px; color: #f3f4f6; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sv-label i { margin-left: 4px; }
+/* a book open in a layout that hides the centre region: its reader, full screen
+   (simple_viewer.js syncReading); the controls pane stays hidden */
+body[data-layout].sv-reading #editor_region {
+  display: flex !important; position: fixed; inset: 0; z-index: 1000;   /* above the user badge */
+}
+/* the floating user badge would cover the reader's header: out of the way while reading */
+body[data-layout].sv-reading #cim-user-badge { display: none !important; }
+/* room for the Close button at the right end of the reader's header */
+body[data-layout].sv-reading #book_reader > div:first-child { padding-right: 120px; }
+body[data-layout].sv-reading #editor_region > #controls_splitter,
+body[data-layout].sv-reading #editor_region > #controls_pane { display: none !important; }
+#sv_reading_close { display: none; }
+body.sv-reading #sv_reading_close { display: block; position: fixed; top: 6px; right: 12px; z-index: 1001; }

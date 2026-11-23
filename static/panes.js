@@ -104,7 +104,12 @@ function _layoutLeftTabs() {
   const moreBtn = document.getElementById('left_tabs_more_btn');
   const menu = document.getElementById('left_tabs_more_menu');
   if (!bar || !more || !moreBtn || !menu) return;
-  const usable = _leftTabButtons().filter(b => !b.classList.contains('cim-feature-hidden'));
+  // a tab a layout hides (its stylesheet: display none !important) is not offered under More either
+  const usable = _leftTabButtons().filter(b => {
+    if (b.classList.contains('cim-feature-hidden')) return false;
+    b.style.display = '';
+    return getComputedStyle(b).display !== 'none';
+  });
   const isTool = b => { const t = window._leftTabs && window._leftTabs[_leftTabId(b)]; return !!(t && t.group === 'tools'); };
   const inBar = usable.filter(b => !isTool(b)), tools = usable.filter(isTool);
   // measure every candidate at its natural width in one pass
@@ -115,7 +120,9 @@ function _layoutLeftTabs() {
   for (const b of inBar) { b.style.flex = ''; b.style.whiteSpace = ''; }
   const total = bar.clientWidth || 0;
   let fit = inBar.length;
-  if (total > 0) {
+  // a bar a layout stacks vertically has room for every tab: width says nothing there
+  const vertical = (getComputedStyle(bar).flexDirection || '').startsWith('column');
+  if (total > 0 && !vertical) {
     let sum = widths.reduce((a, w) => a + w, 0);
     if (sum > total || tools.length) {
       // the More button takes a slot of its own

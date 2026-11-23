@@ -2,7 +2,7 @@
 @brief Layout: Intermediate.
 
 Like Simple (one full-screen pane, pictures open full screen), but Timeline /
-Albums / People / Music are tabs down the left, and the viewer's Meta button
+Albums / People / Music / Books are tabs down the left, and the viewer's Meta button
 shows the Editor and EXIF / IPTC / XMP tabs (the controls pane moves into the
 viewer while it is open). Reuses the Simple layout's viewer; its "people in
 this photo" chips become avatar chips that, with the People module on, show
@@ -12,7 +12,7 @@ MANIFEST = {
     "id":          "intermediate_theme",
     "name":        "Layout: Intermediate",
     "version":     "1.1.1",
-    "description": "Timeline / Albums / People / Music tabs down the left; pictures open "
+    "description": "Timeline / Albums / People / Music / Books tabs down the left; pictures open "
                    "full screen with the editor and metadata tabs behind a Meta button.",
     "core":        False,
     "requires":    ["theming", "simple_theme"],
@@ -26,7 +26,7 @@ def register(host):
     if theming is None:
         return
     theming.register("layout", "intermediate", "Intermediate",
-                     description="Timeline / Albums / People / Music tabs on the left; pictures "
+                     description="Timeline / Albums / People / Music / Books tabs on the left; pictures "
                                  "open full screen with the editor and metadata tabs behind Meta.")
     host.add_asset("theme_intermediate.js")
     host.add_asset("theme_intermediate.css", kind="css")

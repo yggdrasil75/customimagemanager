@@ -123,6 +123,7 @@
     restoreControlsPane();
     $("popout_modal")?.classList.remove("sv-active");
     $("sv_albums_strip")?.classList.add("hidden");
+    document.body.classList.remove("sv-reading");
     if (popoutIsOpen() && typeof closePopout === "function") closePopout();
     refreshMedia();
     syncSide();
@@ -162,6 +163,8 @@
       const orig = window.selectFile;
       const wrapped = async function (fn, opts) {
         const r = await orig.apply(this, arguments);
+        // a book (or a track) opened its own reader / player instead: not the picture viewer
+        if (typeof mediaMode !== "undefined" && mediaMode !== "image") { syncReading(); return r; }
         if (active() && fn && window.currentFile === fn && !(opts && opts.keepCentre)) {
           if (!popoutIsOpen()) { if (typeof openPopout === "function") openPopout(); }
           else refreshMedia();
@@ -173,6 +176,7 @@
       window.selectFile = wrapped;
     };
     hookSelect();
+    wrapGlobal("setMediaMode", r => { syncReading(); return r; });
     wrapGlobal("openPopout", r => { if (active() && popoutIsOpen()) { syncChrome(); refreshMedia(); fillPanels(); } return r; });
     wrapGlobal("closePopout", r => { restoreControlsPane(); refreshMedia(); return r; });
     wrapGlobal("renderAlbumChips", r => { if (active() && popoutIsOpen()) fillPanels(); return r; });
@@ -185,6 +189,30 @@
       wrapped.__svHooked = true;
       window.popoutBoxesEditable = wrapped;
     }
+  }
+
+  // -- reading: a book's reader full screen --------------------------------
+  /** @brief The layouts using this viewer hide the centre region (where the book reader
+   *  lives); while a book is open it comes back full screen, with a Close button. */
+  function syncReading() {
+    const on = active() && typeof mediaMode !== "undefined" && mediaMode !== "image";
+    document.body.classList.toggle("sv-reading", on);
+    let btn = $("sv_reading_close");
+    if (on && !btn) {
+      btn = document.createElement("button");
+      btn.id = "sv_reading_close";
+      btn.type = "button";
+      btn.className = "sv-btn bg-gray-700 hover:bg-gray-600 text-white rounded";
+      btn.textContent = "\u2715 Close";
+      btn.title = "Back to the library (Esc)";
+      btn.addEventListener("click", closeReading);
+      document.body.appendChild(btn);
+    }
+  }
+  function closeReading() {
+    if (typeof mediaMode !== "undefined" && mediaMode === "book" && typeof closeBook === "function") closeBook();
+    else if (typeof setMediaMode === "function") setMediaMode("image");
+    syncReading();
   }
 
   // -- media: video swap -------------------------------------------------

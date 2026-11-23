@@ -6,7 +6,10 @@ body[data-layout="simple"] #left_splitter { display: none !important; }
 body[data-layout="simple"] #left_pane {
   width: 100% !important; max-width: 100vw !important; border-right: 0; padding-bottom: 0 !important;
 }
-body[data-layout="simple"] #left_tabs_bar,
+/* tabs: the timeline and, with the books module, Books - nothing else */
+body[data-layout="simple"] #tab_albums, body[data-layout="simple"] #tab_review,
+body[data-layout="simple"] [data-ltab]:not([data-ltab="books"]) { display: none !important; }
+body[data-layout="simple"] #left_tabs_bar button { flex: 0 0 auto; padding: 10px 20px; font-size: 15px; }
 body[data-layout="simple"] #gallery_pane > div:first-child,     /* folder / search / view switch */
 body[data-layout="simple"] #gallery_pane #dropzone,
 body[data-layout="simple"] #gallery_pane #bulk_bar,

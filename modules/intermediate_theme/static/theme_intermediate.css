@@ -1,6 +1,7 @@
 /* theme_intermediate.css - the "intermediate" functional theme: one
-   full-screen pane with Timeline / Albums / People / Music tabs down the
-   left. Keyed on body[data-functional="intermediate"]; hides and lays out
+   full-screen pane with Timeline / Albums / People / Music / Books tabs down
+   the left, every one listed (panes.js leaves a vertical bar's tabs in place
+   rather than folding them into More). Keyed on body[data-functional="intermediate"]; hides and lays out
    only, never un-hides a gated element. */
 body[data-layout="intermediate"] #editor_region,
 body[data-layout="intermediate"] #left_splitter { display: none !important; }
@@ -19,18 +20,20 @@ body[data-layout="intermediate"] #left_tabs_bar {
   grid-column: 1; grid-row: 2; flex-direction: column; border-bottom: 0;
   border-right: 1px solid var(--cim-gray-700, #374151); align-items: stretch; padding-top: 8px;
 }
-body[data-layout="intermediate"] #left_tabs_bar > button {
+body[data-layout="intermediate"] #left_tabs_bar button {
   flex: 0 0 auto; text-align: left; border-bottom: 0; border-left: 4px solid transparent;
   padding: 10px 12px; font-size: 14px;
 }
-body[data-layout="intermediate"] #left_tabs_bar > button.border-blue-500 { border-left-color: var(--cim-accent-500, #3b82f6); }
+body[data-layout="intermediate"] #left_tabs_bar button.border-blue-500 { border-left-color: var(--cim-accent-500, #3b82f6); }
 body[data-layout="intermediate"] #left_tabs_bar > span[data-ext-area] { display: contents; }
 body[data-layout="intermediate"] #left_pane > :not(:first-child):not(#left_tabs_bar) {
   grid-column: 2; grid-row: 2; min-height: 0; height: 100%;
 }
-/* only Timeline (gallery) / Albums / People / Music */
+/* only Timeline (gallery) / Albums / People / Music / Books */
 body[data-layout="intermediate"] #tab_review,
-body[data-layout="intermediate"] [data-ltab]:not([data-ltab="faces"]):not([data-ltab="music"]) { display: none !important; }
+body[data-layout="intermediate"] [data-ltab]:not([data-ltab="faces"]):not([data-ltab="music"]):not([data-ltab="books"]) { display: none !important; }
+/* a vertical list holds every tab: no More menu */
+body[data-layout="intermediate"] #left_tabs_more { display: none !important; }
 body[data-layout="intermediate"] #gallery_pane #dropzone,
 body[data-layout="intermediate"] #gallery_pane #bulk_bar,
 body[data-layout="intermediate"] #btn_dedup, body[data-layout="intermediate"] #dedup_cache_badge,
