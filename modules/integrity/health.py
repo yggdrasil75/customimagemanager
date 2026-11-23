@@ -41,7 +41,9 @@ POST /api/corrupt/meta/fix {filenames | all}, POST /api/corrupt/meta/ignore.
 import json
 import os
 import shutil
+import subprocess
 import tempfile
+import threading
 import time
 
 from flask import jsonify, request
@@ -208,6 +210,15 @@ def register(host, tab, deep):
         """! @brief Replace an audio-only video with its audio (core move_file with content:
         the files row, tags, albums, history and module rows follow the new name).
         @return the check result for the old name (damage 0, `converted` = new rel)."""
+        enc = host.get_service("encoding")
+        if enc is not None:
+            # the audio settings decide the format (kept as is = the sound copied unchanged)
+            try:
+                ext = enc.target_ext(rel, fp)
+                if ext and not host.media.is_video("x" + ext):
+                    info = dict(info, ext=ext)
+            except Exception:
+                pass
         if not host.media.is_audio("x" + info["ext"]):
             # without the music module the library does not index audio: the song would vanish
             return damage.result(None, "audio only (no video stream); %s files are not part of the library "
@@ -219,7 +230,7 @@ def register(host, tab, deep):
         tmpdir = tempfile.mkdtemp(prefix="cim-audio-")
         out = os.path.join(tmpdir, "audio" + info["ext"])
         try:
-            err = damage.extract_audio(fp, out, info)
+            err = enc.convert_av(fp, out) if enc is not None else damage.extract_audio(fp, out, info)
             if err:
                 return damage.result(None, "audio only (no video stream); extracting it failed: " + err,
                                      skipped=True)
@@ -234,6 +245,168 @@ def register(host, tab, deep):
         d.commit()
         log.info(f"integrity: {rel} held only audio ({info['codec']}); saved as {new_rel}")
         return damage.result(0.0, "audio only: saved as " + new_rel, converted=new_rel)
+
+    # -- repair --------------------------------------------------------------------------
+    repairs = {}  # rel -> {"state": running|done|failed, "detail", "at"}
+
+    def _backup(rel, fp):
+        """! @brief Keep the original before a repair replaces it (media/.cim/repaired/<rel>)."""
+        bak = os.path.join(host.media_dir, ".cim", "repaired", rel)
+        os.makedirs(os.path.dirname(bak), exist_ok=True)
+        shutil.copy2(fp, bak)
+        return bak
+
+    def _replace(rel, new_rel, out):
+        """! @brief Swap the repaired bytes in (core move_file: rows, tags, albums follow)."""
+        ok, err = core.move_file(rel, new_rel, content=out)
+        if not ok:
+            raise RuntimeError(err or "replacing the file failed")
+
+    def _repair_video(rel, fp, before, tmpdir):
+        """! @brief Lossless remux first (a rebuilt index / timestamps); if that is no better,
+        a re-encode to Settings > Media's video target, which drops what cannot be decoded.
+        The result is kept only when it measures better. @return (new_rel, after, how)."""
+        ext = os.path.splitext(rel)[1].lower()
+        tries = [("remuxed", ext, ["ffmpeg", "-nostdin", "-v", "error", "-y", "-err_detect", "ignore_err",
+                                   "-fflags", "+genpts+discardcorrupt", "-i", fp, "-map", "0", "-c", "copy",
+                                   "-ignore_unknown"])]
+        enc = host.get_service("encoding")
+        if enc is not None:
+            target = (enc.media_prefs().get("video") or {}).get("target") or ".mp4"
+            tries.append(("re-encoded", target, None))
+        best = None
+        for how, oext, cmd in tries:
+            out = os.path.join(tmpdir, how + oext)
+            if cmd is not None:
+                p = subprocess.run(cmd + [out], capture_output=True, text=True, timeout=6 * 3600)
+                if p.returncode != 0 or not os.path.exists(out) or not os.path.getsize(out):
+                    continue
+            else:
+                if enc.convert_av(fp, out) or not os.path.exists(out):
+                    continue
+            after = damage.video_damage(out)
+            if after.get("damage") is None:
+                continue
+            if after["damage"] < before and (best is None or after["damage"] < best[1]["damage"]):
+                best = (out, after, how)
+            if after["damage"] == 0:
+                break
+        if best is None:
+            raise RuntimeError("neither a remux nor a re-encode came out better; the lost frames "
+                               "are not in the file to recover")
+        out, after, how = best
+        new_rel = os.path.splitext(rel)[0] + os.path.splitext(out)[1]
+        return out, new_rel, after, how
+
+    def _repair_image(rel, fp, tmpdir):
+        """! @brief The part that decodes, without the rows lost at the bottom, stored per
+        Settings > Media's image target. @return (out, new_rel, after, how)."""
+        from PIL import Image, ImageFile
+        import numpy as np
+        ext = os.path.splitext(rel)[1].lower()
+        png = os.path.join(tmpdir, "decoded.png")
+        if ext == ".jxl":
+            p = subprocess.run(["djxl", "--allow_partial_files", fp, png], capture_output=True, timeout=600)
+            if p.returncode != 0 or not os.path.exists(png):
+                raise RuntimeError("djxl cannot render any of it")
+            how = "re-encoded from what still decodes"
+            with Image.open(png) as im:
+                im.load()
+                img = im.copy()
+        else:
+            with damage._PIL_LOCK:
+                old = ImageFile.LOAD_TRUNCATED_IMAGES
+                ImageFile.LOAD_TRUNCATED_IMAGES = True
+                try:
+                    with Image.open(fp) as im:
+                        im.load()
+                        img = im.convert("RGBA" if "A" in im.getbands() else "RGB")
+                finally:
+                    ImageFile.LOAD_TRUNCATED_IMAGES = old
+            rows = damage.trailing_uniform_rows(np.asarray(img))
+            if 0 < rows < img.height:
+                img = img.crop((0, 0, img.width, img.height - rows))
+            how = "cropped the %d lost rows" % rows if rows else "re-encoded"
+        img.save(png)
+        enc = host.get_service("encoding")
+        target = enc.target_ext(rel, fp) if enc is not None else ext
+        if target in (".jpg", ".jpeg") and ext in (".jpg", ".jpeg"):
+            target = ext
+        out = os.path.join(tmpdir, "repaired" + target)
+        if enc is None:
+            img.save(out)
+        elif target == ".jxl":
+            err = enc.encode_jxl(png, out)
+            if err:
+                raise RuntimeError(err)
+        else:
+            err = enc.convert_image(png, out)
+            if err:
+                raise RuntimeError(err)
+        after = damage.image_damage(out, read_image=getattr(core, "read_image", None))
+        return out, os.path.splitext(rel)[0] + target, after, how
+
+    def repair(rel):
+        """! @brief Attempt a repair of one listed file (the original is kept in .cim/repaired).
+        @return {repaired, before, after, detail, new_rel}."""
+        d = host.db()
+        row = d.execute("SELECT rel_path, mtime, media_kind FROM files WHERE rel_path=?", (rel,)).fetchone()
+        fp = host.safe_path(host.media_dir, rel)
+        if row is None or not fp or not os.path.exists(fp):
+            return {"repaired": False, "detail": "not found"}
+        kind = row["media_kind"] or host.media.kind(rel)
+        if kind == "video":
+            info = damage.audio_only(fp)
+            if info is not None:
+                res = strip_audio(rel, fp, info)
+                if res.get("converted"):
+                    return {"repaired": True, "before": None, "after": 0.0, "new_rel": res["converted"],
+                            "detail": res["detail"]}
+                return {"repaired": False, "detail": res["detail"]}
+        cur = check_damage(rel, row, kind)
+        before = (cur or {}).get("damage")
+        if not before:
+            return {"repaired": False, "before": before, "detail": "nothing to repair: it decodes cleanly"
+                    if before == 0 else "the check did not finish; re-check it first"}
+        tmpdir = tempfile.mkdtemp(prefix="cim-repair-")
+        try:
+            if kind == "video":
+                out, new_rel, after, how = _repair_video(rel, fp, before, tmpdir)
+            else:
+                out, new_rel, after, how = _repair_image(rel, fp, tmpdir)
+            if after.get("damage") is None or after["damage"] >= before:
+                raise RuntimeError("the repaired file is no better (%s)" % (after.get("detail") or "?"))
+            if new_rel != rel and os.path.exists(host.safe_path(host.media_dir, new_rel) or ""):
+                raise RuntimeError(new_rel + " already exists")
+            _backup(rel, fp)
+            _replace(rel, new_rel, out)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        check_file(new_rel)
+        log.info(f"integrity: repaired {rel} ({how}): damage {before:.4f} -> {after['damage']:.4f}")
+        return {"repaired": True, "before": before, "after": after["damage"], "new_rel": new_rel,
+                "detail": "%s; damage %s -> %s; original kept in .cim/repaired" % (
+                    how, _pct(before), _pct(after["damage"]))}
+
+    def _pct(x):
+        return "%.2f%%" % (100 * x) if x is not None else "?"
+
+    def repair_async(rel):
+        """! @brief Run repair(rel) in a thread (a video re-encode takes a while)."""
+        if (repairs.get(rel) or {}).get("state") == "running":
+            return False
+        repairs[rel] = {"state": "running", "detail": "", "at": time.time()}
+
+        def run():
+            try:
+                r = repair(rel)
+                repairs[rel] = {"state": "done" if r.get("repaired") else "failed",
+                                "detail": r.get("detail", ""), "at": time.time(), "new_rel": r.get("new_rel")}
+            except Exception as e:
+                log.warning(f"integrity: repair of {rel} failed: {e}")
+                repairs[rel] = {"state": "failed", "detail": str(e)[:300], "at": time.time()}
+        threading.Thread(target=run, name="integrity-repair", daemon=True).start()
+        return True
 
     def _rel_of(path):
         """! @brief A path under the media dir as a rel path (the holder of a tag)."""
@@ -500,6 +673,7 @@ def register(host, tab, deep):
                          " ORDER BY c.damage DESC, c.rel_path LIMIT ? OFFSET ?",
                          (*args, limit, offset)).fetchall()
         items = [{"filename": r["rel_path"], "damage": None if r["damage"] < 0 else r["damage"],
+                  "repair": repairs.get(r["rel_path"]),
                   "level": r["level"],
                   "detail": r["detail"], "checked_at": r["checked_at"], "kind": r["kind"]} for r in rows]
         return jsonify({"success": True, "items": items, "total": int(total), "counts": counts,
@@ -648,6 +822,18 @@ def register(host, tab, deep):
                    action="corrupt_meta_fix", fields=("filenames", "all"))
     host.add_route("/api/corrupt/meta/ignore", health_api_meta_ignore, methods=["POST"], feature=FEATURE,
                    level="write", action="corrupt_meta_ignore", fields=("filename", "ignored"))
+    def health_api_repair():
+        """! @brief Attempt a repair: {filename}. Runs in the background; the list shows
+        its state (running / done / failed with why)."""
+        body = request.get_json(silent=True) or {}
+        rel = str(body.get("filename") or "")
+        if not rel:
+            return jsonify({"success": False, "error": "filename required"}), 400
+        started = repair_async(rel)
+        return jsonify({"success": True, "started": started, "repair": repairs.get(rel)})
+
+    host.add_route("/api/corrupt/repair", health_api_repair, methods=["POST"], feature=FEATURE, level="write",
+                   action="corrupt_repair", fields=("filename",))
     host.add_route("/api/corrupt/list", health_api_list, feature=FEATURE)
     host.add_route("/api/corrupt/check", health_api_check, methods=["POST"], feature=FEATURE, level="write",
                    action="corrupt_check", fields=("filenames",))
@@ -659,6 +845,7 @@ def register(host, tab, deep):
     api = {"check_file": check_file, "progress": progress, "next_pending": next_pending,
            "checkable": checkable, "purge_uncheckable": purge_uncheckable,
            "strip_audio": strip_audio, "recheck_listed": recheck_listed,
-           "check_meta": check_meta, "fix_meta": fix_meta, "startup": _startup}
+           "check_meta": check_meta, "fix_meta": fix_meta,
+           "repair": repair, "repair_async": repair_async, "repairs": repairs, "startup": _startup}
     host.provide_service("integrity.health", api)
     return api

@@ -30,9 +30,9 @@ def media(tmp_path, monkeypatch):
         p.write_bytes(b"x" * size)
     monkeypatch.setitem(tiering._state, "media_dir", str(m))
     monkeypatch.setitem(tiering._state, "cfg", {"enabled": False, "tiers": [], "hysteresis": 0.1})
-    tiering.usage_stale()
+    tiering.usage_reset()
     yield m
-    tiering.usage_stale()
+    tiering.usage_reset()
 
 
 def test_usage_breaks_media_down(media):
@@ -47,11 +47,28 @@ def test_usage_breaks_media_down(media):
 
 
 def test_usage_is_cached_until_stale(media):
-    a = tiering.usage(max_age=600)["total"]
+    """A measurement is reused; once space changed it is still answered at once (the old
+    figure) while a background walk brings it up to date - a visit never waits for a walk."""
+    import time
+    a = tiering.usage(max_age=600)["library"]
     (media / "trip" / "new.jpg").write_bytes(b"x" * 1234)
-    assert tiering.usage(max_age=600)["total"] == a
+    assert tiering.usage(max_age=600)["library"] == a
     tiering.usage_stale()
-    assert tiering.usage(max_age=600)["total"] == a + 1234
+    assert tiering.usage(max_age=600)["library"] == a        # answered from the last walk
+    for _ in range(100):
+        if tiering.usage(max_age=600)["library"] == a + 1234:
+            break
+        time.sleep(0.05)
+    assert tiering.usage(max_age=600)["library"] == a + 1234
+
+
+def test_usage_survives_a_restart_without_a_walk(media, monkeypatch):
+    first = tiering.usage()["total"]
+    assert (media / ".cim" / "storage_usage.json").exists()
+    tiering.usage_reset()                                    # a restart: nothing in memory
+    monkeypatch.setattr(tiering, "_measure_usage", lambda: (_ for _ in ()).throw(AssertionError("walked")))
+    monkeypatch.setattr(tiering, "_refresh_usage_bg", lambda: None)
+    assert tiering.usage()["total"] == first                 # from media/.cim/storage_usage.json
 
 
 def test_status_reports_media_parts_and_drive(media):

@@ -54,7 +54,10 @@
           <span class="text-[10px] text-gray-500 truncate" title="${esc(it.detail)}">${esc(it.detail)}</span>
         </div>
       </div>
-      <div class="flex gap-1 flex-shrink-0 text-[11px]">
+      <div class="flex gap-1 flex-shrink-0 text-[11px] items-center">
+        ${repairLabel(it)}
+        ${unknown || (it.repair && it.repair.state === "running") ? "" :
+          '<button type="button" data-cf-act="repair" class="bg-sky-800 hover:bg-sky-700 px-1.5 py-0.5 rounded" title="Try to fix it: a song stored as video becomes its audio file; a video is remuxed or re-encoded; a truncated image loses its broken rows. The original is kept in .cim/repaired.">Repair</button>'}
         <button type="button" data-cf-act="check" class="bg-gray-700 hover:bg-gray-600 px-1.5 py-0.5 rounded" title="Decode it again">Re-check</button>
         <button type="button" data-cf-act="ignore" class="bg-gray-700 hover:bg-gray-600 px-1.5 py-0.5 rounded"
           title="${showIgnored ? "List it again" : "Hide it from this list (it comes back if it gets worse)"}">${showIgnored ? "Unignore" : "Ignore"}</button>
@@ -62,6 +65,15 @@
           : '<button type="button" data-cf-act="delete" class="bg-red-800 hover:bg-red-700 px-1.5 py-0.5 rounded">Delete</button>'}
       </div>
     </div>`;
+  }
+
+  /** @brief The state of a repair of this file, if one ran this session. */
+  function repairLabel(it) {
+    const r = it.repair;
+    if (!r) return "";
+    const col = r.state === "running" ? "text-sky-300" : r.state === "done" ? "text-green-300" : "text-red-300";
+    const txt = r.state === "running" ? "repairing..." : r.state === "done" ? "repaired" : "repair failed";
+    return `<span class="text-[10px] ${col}" title="${esc(r.detail || "")}">${txt}</span>`;
   }
 
   /** @brief The scan line: how much of the library has been checked. */
@@ -106,6 +118,11 @@
         '<div class="text-[11px] text-gray-500 py-1">Nothing at this level.</div>'}</div>${more}
     </div>`;
     wire(box);
+    // while a repair runs, look again in a few seconds
+    clearTimeout(box._repairPoll);
+    if (d.items.some(it => it.repair && it.repair.state === "running")) {
+      box._repairPoll = setTimeout(() => { if (box.isConnected) render(box); }, 4000);
+    }
     return showIgnored ? Math.max(1, all) : all;
   }
 
@@ -128,6 +145,13 @@
         render(box); return;
       }
       if (act === "open") { if (typeof selectFile === "function") selectFile(rel); return; }
+      if (act === "repair") {
+        b.disabled = true; b.textContent = "...";
+        const d = await post("/api/corrupt/repair", { filename: rel });
+        toast(d.success ? (d.started ? "Repair started." : "A repair of this file is already running.")
+                        : "Repair failed: " + (d.error || ""));
+        render(box); return;
+      }
       if (act === "check") {
         b.disabled = true; b.textContent = "...";
         const d = await post("/api/corrupt/check", { filenames: [rel] });

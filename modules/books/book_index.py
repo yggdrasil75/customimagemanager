@@ -79,6 +79,8 @@ import html as _html
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 
+import media_types as _mt
+
 import numpy as np
 import base64 as _b64
 import shutil as _sh
@@ -1960,8 +1962,8 @@ def _extract_via_calibre(abs_path: str, fmt: str) -> ExtractResult:
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, 'out.epub')
         try:
-            p = subprocess.run(['ebook-convert', abs_path, out],
-                               capture_output=True, timeout=900)
+            cmd, env = _mt.calibre_command('ebook-convert', abs_path, out)   # away from the app's lxml
+            p = subprocess.run(cmd, capture_output=True, timeout=900, env=env)
         except subprocess.TimeoutExpired:
             return ExtractResult('failed', error='ebook-convert timed out (>15 min)')
         if p.returncode != 0 or not os.path.exists(out):

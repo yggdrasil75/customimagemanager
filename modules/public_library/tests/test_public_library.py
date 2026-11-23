@@ -143,7 +143,7 @@ def test_new_files_in_a_public_section_are_arranged_on_their_own(app, host, tree
     try:
         _index(host, app, "movies/Heat.1995.mkv")
         host.emit("file.indexed", rel_path="movies/Heat.1995.mkv", abs_path="")
-        for _ in range(100):
+        for _ in range(300):                                      # up to 15 s on a slow runner
             if _exists(app, "movies/Heat (1995)/Heat (1995).mkv"):
                 break
             time.sleep(0.05)

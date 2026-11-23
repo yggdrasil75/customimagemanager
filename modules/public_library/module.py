@@ -231,9 +231,10 @@ def register(host):
     def worker():
         while True:
             wake.wait()
-            settle = state.get("settle", SETTLE_S)
-            while time.time() - state["last"] < settle:
-                time.sleep(max(0.05, settle - (time.time() - state["last"])))
+            # quiet for `settle` seconds since the last new file (re-read each pass: a
+            # shorter settle set meanwhile applies at once)
+            while time.time() - state["last"] < state.get("settle", SETTLE_S):
+                time.sleep(min(0.5, max(0.05, state.get("settle", SETTLE_S) - (time.time() - state["last"]))))
             with lock:
                 batch, state["queue"] = sorted(state["queue"]), set()
                 wake.clear()

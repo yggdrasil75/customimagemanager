@@ -27,6 +27,8 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 
+from modules.pipeline.dataflow import Dataflow
+
 from . import clustering as cl
 
 SCHEMA = "library/1"
@@ -374,44 +376,11 @@ def parse_home(text):
 
 def run_graph(graph, ctx):
     """! @brief Evaluate a library/1 graph. @return {"plan": [...], "log": [...]}"""
-    nodes = {n["id"]: n for n in (graph or {}).get("nodes", []) if n.get("id")}
-    cache = {}
     log = []
 
     def report(msg):
         log.append(msg)
         ctx.report(msg)
-
-    def wires(n, port):
-        w = (n.get("in") or {}).get(port)
-        if not w:
-            return []
-        return w if isinstance(w[0], (list, tuple)) else [w]
-
-    def pull(n, p):
-        vals = []
-        for w in wires(n, p["name"]):
-            src = nodes.get(w[0])
-            if src is None:
-                continue
-            v = outputs(src).get(w[1])
-            if v is not None:
-                vals.append(v)
-        return vals if p.get("multi") else (vals[0] if vals else None)
-
-    def outputs(n):
-        if n["id"] in cache:
-            return cache[n["id"]]
-        cache[n["id"]] = {}      # a cycle reads empty instead of recursing forever
-        try:
-            out = run_node(n) or {}
-        except Cancelled:
-            raise
-        except Exception as e:
-            report("%s failed: %s" % (n.get("label") or n["type"], e))
-            out = {}
-        cache[n["id"]] = out
-        return out
 
     def run_node(n):
         t = n.get("type")
@@ -419,23 +388,34 @@ def run_graph(graph, ctx):
         if spec is None:
             report("unknown node type %s" % t)
             return {}
-        ins = {p["name"]: pull(n, p) for p in spec["inputs"]}
-        if "run" in (n.get("in") or {}) and not _truthy(ins.get("run")):
+        ins = df.inputs(n)
+        if ins is None:
             return {}
-        for p in spec["inputs"]:
+        for p in spec["inputs"]:               # here an unwired required input skips too
             if not p["optional"] and p["name"] != "run" and ins.get(p["name"]) is None:
                 return {}
         fn = NODES.get(t)
-        out = fn(n, ins, ctx, report) if fn else {}
         label = n.get("label") or spec["label"]
+        try:
+            out = fn(n, ins, ctx, report) if fn else {}
+        except Cancelled:
+            raise
+        except Exception as e:
+            report("%s failed: %s" % (label, e))
+            return {}
         for k, v in out.items():
             if isinstance(v, list) and k in ("files", "pass", "groups", "kept"):
                 report("%s: %d %s" % (label, len(v), "groups" if k in ("groups", "kept") else "files"))
         return out
 
+    # the evaluator the per-photo and task pipelines run on too; empty file lists flow on
+    df = Dataflow((graph or {}).get("nodes", []), lambda n: CATALOG.get(n.get("type")), run_node,
+                  report=report, gate_types=(), empty_skips=False, reraise=(Cancelled,), guard_cycles=True)
+    nodes = df.nodes
     plan = []
     for e in (n for n in nodes.values() if n.get("type") == "end"):
-        for part in pull(e, CATALOG["end"]["inputs"][0]) or []:
+        port = CATALOG["end"]["inputs"][0]
+        for part in df.pull(e, port["name"], port) or []:
             plan.extend(part)
     for i, entry in enumerate(plan):
         entry["id"] = i

@@ -103,8 +103,10 @@ class Guarded:
 class Capability:
     """! @brief A named slot with a canonical input / output contract."""
     def __init__(self, cap_id, *, summary, input, output, owner, label=None,
-                 hidden=False, background=False):
+                 hidden=False, background=False, group=None):
         self.id = cap_id
+        # a picker subsection it is listed in ("people"), None = the main list
+        self.group = group or None
         self.label = label or cap_id  # picker heading
         self.hidden = bool(hidden)  # kept out of the picker
         # output is region-shaped and useful unprompted: offer "run on every image"
@@ -119,7 +121,7 @@ class Capability:
 
     def as_dict(self):
         return {"id": self.id, "label": self.label, "hidden": self.hidden,
-                "background": self.background, "summary": self.summary,
+                "background": self.background, "summary": self.summary, "group": self.group,
                 "input": self.input, "output": self.output, "owner": self.owner}
 
 
@@ -336,7 +338,7 @@ class ModelBroker:
         self._current_module = None  # set by the loader while a module registers
 
     def declare(self, cap_id, *, summary, input, output, owner=None, label=None,
-                hidden=False, background=False):
+                hidden=False, background=False, group=None):
         """! @brief Declare a capability contract; the first declarer owns it.
         @throws ValueError when a re-declaration's contract differs.
         """
@@ -348,10 +350,12 @@ class ModelBroker:
                     raise BrokerError(
                         f"capability '{cap_id}' already declared by "
                         f"'{existing.owner}' with a different contract")
+                if group and not existing.group:
+                    existing.group = group
                 return existing
             cap = Capability(cap_id, summary=summary, input=input,
                              output=output, owner=owner, label=label,
-                             hidden=hidden, background=background)
+                             hidden=hidden, background=background, group=group)
             self._caps[cap_id] = cap
             self._providers.setdefault(cap_id, {})
             return cap

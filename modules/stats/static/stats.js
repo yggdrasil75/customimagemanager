@@ -69,7 +69,7 @@
           <button type="button" data-stats-tab="running" class="px-2 py-1 rounded-t">Running <span id="stats_n_running" class="text-gray-500"></span></button>
           <button type="button" data-stats-tab="history" class="px-2 py-1 rounded-t">Recent <span id="stats_n_history" class="text-gray-500"></span></button>
         </div>
-        <div class="h-80 overflow-y-auto text-xs border border-t-0 border-gray-700 rounded-b p-1">
+        <div class="h-80 overflow-y-auto text-xs border border-t-0 border-gray-700 rounded-b">
           <div id="stats_sources" data-stats-panel="sources"></div>
           <div id="stats_running" data-stats-panel="running"></div>
           <div id="stats_history" data-stats-panel="history"></div>
@@ -155,15 +155,15 @@
       const err = s.last_error ? `<span class="text-red-400" title="${esc(s.last_error)}">error</span>` : "";
       const dim = !s.running && !s.paused ? " text-gray-400" : "";
       return `<tr class="${s.paused ? "text-amber-300" : dim}">
-        <td class="pr-2 truncate max-w-[12rem]" title="${esc(n)}">${esc(n)}</td><td class="text-right pr-2">${s.running || ""}</td>
-        <td class="text-right pr-2">${s.done}</td><td class="text-right pr-2 ${s.failed ? "text-red-400" : ""}">${s.failed}</td>
-        <td class="text-right pr-2">${fmtSecs(s.avg_seconds)}</td><td class="text-right pr-2">${fmtSecs(s.last_seconds)}</td>
-        <td class="text-right pr-2">${fmtSecs(s.max_seconds)}</td><td class="pr-2">${s.paused ? "paused" : err}</td>
-        <td>${b}</td></tr>`;
+        <td class="nowrap" title="${esc(n)}">${esc(n)}</td><td class="num">${s.running || ""}</td>
+        <td class="num">${s.done}</td><td class="num ${s.failed ? "text-red-400" : ""}">${s.failed}</td>
+        <td class="num">${fmtSecs(s.avg_seconds)}</td><td class="num">${fmtSecs(s.last_seconds)}</td>
+        <td class="num">${fmtSecs(s.max_seconds)}</td><td class="nowrap">${s.paused ? "paused" : err}</td>
+        <td class="nowrap">${b}</td></tr>`;
     }).join("");
     $("stats_sources").innerHTML = names.length
-      ? `<table class="w-full"><thead class="text-gray-500 sticky top-0 bg-gray-900"><tr><th class="text-left">source</th><th class="text-right">running</th><th class="text-right">done</th><th class="text-right">failed</th><th class="text-right">avg</th><th class="text-right">last</th><th class="text-right">max</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>`
-      : '<div class="text-gray-500">No worker sources registered.</div>';
+      ? `<table class="cim-table"><thead><tr><th>source</th><th class="num">running</th><th class="num">done</th><th class="num">failed</th><th class="num">avg</th><th class="num">last</th><th class="num">max</th><th>state</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+      : '<div class="text-gray-500 p-2">No worker sources registered.</div>';
     if (window.CIMFeatures && CIMFeatures.apply) CIMFeatures.apply($("stats_sources"));
 
     const running = [];
@@ -175,16 +175,16 @@
       g.n++; g.longest = Math.max(g.longest, j.seconds || 0);
     }
     $("stats_running").innerHTML = running.length
-      ? `<table class="w-full"><thead class="text-gray-500 sticky top-0 bg-gray-900"><tr><th class="text-left">source</th><th class="text-left">file / key</th><th class="text-right">elapsed</th></tr></thead><tbody>` +
-        running.map(j => `<tr><td class="pr-2 whitespace-nowrap">${esc(j.source)}</td><td class="pr-2 text-gray-400 truncate max-w-0 w-full" title="${esc(j.key || "")}">${esc(j.key || "")}</td><td class="text-right whitespace-nowrap">${fmtSecs(j.seconds)}</td></tr>`).join("") +
+      ? `<table class="cim-table"><thead><tr><th>source</th><th>file / key</th><th class="num">elapsed</th></tr></thead><tbody>` +
+        running.map(j => `<tr><td class="nowrap">${esc(j.source)}</td><td class="clip text-gray-400" title="${esc(j.key || "")}">${esc(j.key || "")}</td><td class="num nowrap">${fmtSecs(j.seconds)}</td></tr>`).join("") +
         "</tbody></table>"
       : '<div class="text-gray-500 p-1">Nothing running.</div>';
 
     const h = d.history || [];
     const failed = h.filter(j => !j.ok).length;
     $("stats_history").innerHTML = h.length
-      ? `<table class="w-full"><thead class="text-gray-500 sticky top-0 bg-gray-900"><tr><th class="text-left">started</th><th class="text-left">source</th><th class="text-left">file / key</th><th class="text-right">time</th><th class="text-left pl-2">result</th></tr></thead><tbody>` +
-        h.map(j => `<tr class="${j.ok ? "" : "text-red-400"}"><td class="pr-2 whitespace-nowrap">${when(j.started)}</td><td class="pr-2 whitespace-nowrap">${esc(j.source)}</td><td class="pr-2 text-gray-400 truncate max-w-0 w-full" title="${esc(j.key || "")}">${esc(j.key || "")}</td><td class="text-right pr-2 whitespace-nowrap">${fmtSecs(j.seconds)}</td><td class="pl-2 truncate max-w-[14rem]" title="${esc(j.ok ? "" : j.error)}">${j.ok ? "ok" : esc(j.error)}</td></tr>`).join("") +
+      ? `<table class="cim-table"><thead><tr><th>started</th><th>source</th><th>file / key</th><th class="num">time</th><th>result</th></tr></thead><tbody>` +
+        h.map(j => `<tr class="${j.ok ? "" : "text-red-400"}"><td class="nowrap">${when(j.started)}</td><td class="nowrap">${esc(j.source)}</td><td class="clip text-gray-400" title="${esc(j.key || "")}">${esc(j.key || "")}</td><td class="num nowrap">${fmtSecs(j.seconds)}</td><td class="nowrap" title="${esc(j.ok ? "" : j.error)}">${j.ok ? "ok" : esc((j.error || "").slice(0, 60))}</td></tr>`).join("") +
         "</tbody></table>"
       : '<div class="text-gray-500 p-1">Nothing finished yet.</div>';
 

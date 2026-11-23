@@ -224,6 +224,12 @@ def _import_failure(manifest, exc):
             if any(_import_name(a).split(".")[0] == top for a in _alternatives(dep)):
                 return _missing_message(dep)
         return f"python package '{top}' not installed (and not declared in the manifest's pip list)"
+    m = re.match(r"cannot import name '([^']+)' from '(modules\.[^']+)' \(unknown location\)", str(exc))
+    if isinstance(exc, ImportError) and m:
+        # a sibling file of the module isn't in its folder (a partial copy, a renamed folder)
+        folder = m.group(2).replace(".", "/")
+        return (f"{folder}/{m.group(1)}.py is missing: the module's folder must hold all its files "
+                f"(copy the whole folder, under its own name)")
     return None
 
 
@@ -387,6 +393,11 @@ _RESERVED_DIRS = {"auth", "capabilities", "metadata", "encoding", "threading", "
 
 _MODULES_DIR = os.path.dirname(os.path.abspath(__file__))
 
+## @brief Module folders that were merged into another module or removed. A copy left
+## behind by an update that only adds files is skipped (and said so), never loaded next
+## to its replacement.
+_RETIRED = {"corruption": "merged into the integrity module (Review -> Corrupt files)"}
+
 
 class LoadedModule:
     """! @brief A discovered module and its runtime state."""
@@ -418,6 +429,11 @@ class ModuleRegistry:
         """
         for name in sorted(os.listdir(_MODULES_DIR)):
             if name in _RESERVED_DIRS or name.startswith((".", "_")):
+                continue
+            if name in _RETIRED:
+                if os.path.exists(os.path.join(_MODULES_DIR, name, "module.py")):
+                    _log.warning(f"modules/{name}/ is left from an older version ({_RETIRED[name]}): "
+                                 f"skipped - delete the folder")
                 continue
             folder = os.path.join(_MODULES_DIR, name)
             if not os.path.isdir(folder):

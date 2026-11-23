@@ -12,8 +12,8 @@ stays plain Python, with one warning line.
     native_build.py            build (what install.sh / update.sh run)
     native_build.py --clean    delete every built module (before a git pull:
                                a stale .so would shadow the pulled .py)
-    native_build.py --check    delete built modules older than their source
-                               (run.sh: an edited .py must win over its old .so)
+    native_build.py --check    delete built modules whose source changed since they
+                               were built (run.sh: an edited .py must win over its old .so)
     native_build.py --status   list what is compiled
 
 `./install.sh --no-compile` skips the build. Every .py under the repo is compiled
@@ -26,6 +26,7 @@ more.
 """
 import ast
 import glob
+import hashlib
 import json
 import os
 import shutil
@@ -94,6 +95,15 @@ def _built_for(py):
     return glob.glob(stem + ".*.so") + glob.glob(stem + ".*.pyd")
 
 
+def _digest(path):
+    """! @brief sha256 of a source file, or "" when it can't be read."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ""
+
+
 def _manifest():
     try:
         with open(MANIFEST) as f:
@@ -126,18 +136,30 @@ def clean(quiet=False):
 
 
 def check():
-    """! @brief Drop any built module older than its source (an edit must win), and
-    any whose source is gone (removed upstream). The rest stay: a rebuild after an
-    update compiles only what changed."""
+    """! @brief Drop any built module whose source changed since it was built (an edit
+    must win), whose source is gone (removed upstream), or that has no recorded source
+    hash (built before hashes were kept, so it can't be trusted). The source's content
+    decides, not its mtime: files copied in or unpacked keep their old mtimes, which
+    can be older than the stale build. The rest stay: a rebuild after an update
+    compiles only what changed."""
+    m = _manifest()
+    hashes = m.get("sources", {})
     stale = 0
-    for py in COMPILE + [p for p in _manifest().get("built", {}) if p not in COMPILE]:
+    for py in COMPILE + [p for p in m.get("built", {}) if p not in COMPILE]:
         src = os.path.join(ROOT, py)
-        for so in _built_for(src):
-            if not os.path.exists(src) or os.path.getmtime(so) < os.path.getmtime(src):
+        sos = _built_for(src)
+        if not sos:
+            continue
+        if not os.path.exists(src) or hashes.get(py) != _digest(src):
+            for so in sos:
                 os.remove(so)
                 stale += 1
+            hashes.pop(py, None)
     if stale:
-        print(f"native: {stale} compiled module(s) were older than their source and were removed; "
+        if m:
+            m["sources"] = hashes
+            _save(m)
+        print(f"native: {stale} compiled module(s) no longer match their source and were removed; "
               f"run native_build.py to rebuild", file=sys.stderr)
 
 
@@ -228,6 +250,7 @@ def build():
     srcs = [p for p in COMPILE if os.path.exists(os.path.join(ROOT, p))]
     check()
     todo = [p for p in srcs if not _built_for(os.path.join(ROOT, p))]
+    digests = {p: _digest(os.path.join(ROOT, p)) for p in todo}   # what is compiled, before it is
     if not todo:
         print(f"native: {len(srcs)} module(s) already compiled")
         return 0
@@ -265,7 +288,9 @@ def build():
     shutil.rmtree(os.path.join(ROOT, "build"), ignore_errors=True)
     ok = [p for p, s in built.items() if s]
     bad = [p for p in todo if not built[p]]
-    _save({"built": {p: [os.path.relpath(s, ROOT) for s in built[p]] for p in ok}})
+    known = _manifest().get("sources", {})
+    _save({"built": {p: [os.path.relpath(s, ROOT) for s in built[p]] for p in ok},
+           "sources": {p: digests.get(p) or known.get(p, "") for p in ok}})
     print(f"native: {len(ok)}/{len(srcs)} module(s) compiled"
           + (f"; stayed plain: {', '.join(bad)}" if bad else ""))
     return 0 if ok or not todo else 1

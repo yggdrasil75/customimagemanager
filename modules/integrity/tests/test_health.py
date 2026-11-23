@@ -475,3 +475,82 @@ def test_size_filters_skip_unknown_sizes(client, host, tmp_path):
             d.execute("DELETE FROM files WHERE rel_path=?", (rel,))
         d.commit()
         shutil.rmtree(os.path.dirname(media_path(rels[0])), ignore_errors=True)
+
+# -- repair ----------------------------------------------------------------------------
+def _cleanup(host, rels):
+    d = host.db()
+    for rel in rels:
+        for t in ("files", "corrupt_files", "corrupt_seen", "meta_issues", "meta_seen"):
+            d.execute(f"DELETE FROM {t} WHERE rel_path=?", (rel,))
+    d.commit()
+
+
+def test_repair_crops_a_truncated_image(host, tmp_path):
+    svc = host.get_service("integrity.health")
+    rel = "cf_repair/half.jpg"
+    _place(rel, _img(tmp_path, "jpg", 0.5))
+    host.core.index_file(rel, force=True)
+    try:
+        r = svc["repair"](rel)
+        assert r["repaired"] and r["before"] > 0.3 and r["after"] == 0, r
+        new = r["new_rel"]
+        assert os.path.exists(media_path(new))
+        assert os.path.exists(os.path.join(os.path.dirname(media_path("x")), ".cim", "repaired", rel))
+        assert host.db().execute("SELECT 1 FROM files WHERE rel_path=?", (new,)).fetchone()
+        assert "cropped" in r["detail"]
+    finally:
+        _cleanup(host, [rel, r.get("new_rel") or rel])
+        shutil.rmtree(os.path.dirname(media_path(rel)), ignore_errors=True)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_repair_song_stored_as_video_and_a_clean_file(host, tmp_path):
+    svc = host.get_service("integrity.health")
+    rel = "cf_repair/Song.mp4"
+    fp = media_path(rel)
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=2", "-c:a", "aac", fp], check=True)
+    host.core.index_file(rel, force=True)
+    try:
+        r = svc["repair"](rel)
+        assert r["repaired"] and r["new_rel"].endswith((".m4a", ".flac", ".opus", ".ogg", ".mp3")), r
+        assert not os.path.exists(fp)
+        ok_rel = "cf_repair/fine.png"
+        from PIL import Image
+        Image.new("RGB", (20, 20)).save(tmp_path / "f.png")
+        _place(ok_rel, tmp_path / "f.png")
+        host.core.index_file(ok_rel, force=True)
+        r2 = svc["repair"](ok_rel)
+        assert not r2["repaired"] and "decodes cleanly" in r2["detail"]
+    finally:
+        _cleanup(host, [rel, "cf_repair/Song.m4a", "cf_repair/fine.png"])
+        shutil.rmtree(os.path.dirname(fp), ignore_errors=True)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_repair_of_a_damaged_video_keeps_only_a_better_result(host, tmp_path):
+    svc = host.get_service("integrity.health")
+    src = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25",
+                    "-t", "4", "-c:v", "libx264", "-g", "100", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                    str(src)], check=True)
+    data = src.read_bytes()
+    rel = "cf_repair/cut.mp4"
+    fp = media_path(rel)
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
+    with open(fp, "wb") as f:
+        f.write(data[:int(len(data) * 0.6)])              # index promises frames the file lacks
+    host.core.index_file(rel, force=True)
+    try:
+        before = damage.video_damage(fp)["damage"]
+        assert before > 0
+        r = svc["repair"](rel)
+        if r["repaired"]:
+            assert r["after"] < before
+            assert damage.video_damage(media_path(r["new_rel"]))["damage"] < before
+        else:
+            assert "no better" in r["detail"] or "neither" in r["detail"]
+            assert os.path.exists(fp)                        # nothing replaced
+    finally:
+        _cleanup(host, [rel])
+        shutil.rmtree(os.path.dirname(fp), ignore_errors=True)

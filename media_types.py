@@ -1059,6 +1059,56 @@ def related_exts(primary_path: str) -> list[str]:
 def _have(tool: str) -> bool:
     return shutil.which(tool) is not None
 
+
+# -- calibre ----------------------------------------------------------------------
+_CALIBRE_RUNNER = (
+    "import runpy, sys\n"
+    "script, own_local = sys.argv[1], sys.argv[2] == '1'\n"
+    "sys.path[:] = [p for p in sys.path if 'site-packages' not in p and"
+    " (own_local or not (p.startswith('/usr/local/') and 'dist-packages' in p))]\n"
+    "sys.argv = [script] + sys.argv[3:]\n"
+    "runpy.run_path(script, run_name='__main__')\n")
+_PY_ENV_DROP = ('PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'PYTHONUSERBASE', 'VIRTUAL_ENV',
+                'PYTHONSAFEPATH')
+
+
+def _script_python(path: str) -> str | None:
+    """! @brief The interpreter a Python script's #! line names (resolved on the system
+    PATH, never a venv's), or None for anything that isn't a Python script."""
+    try:
+        with open(path, 'rb') as f:
+            first = f.readline(200).decode('utf-8', 'replace').strip()
+    except OSError:
+        return None
+    if not first.startswith('#!') or 'python' not in first:
+        return None
+    parts = first[2:].split()
+    if not parts:
+        return None
+    if os.path.basename(parts[0]) == 'env' and len(parts) > 1:
+        return shutil.which(parts[1], path=os.defpath)
+    return parts[0] if os.path.exists(parts[0]) else None
+
+
+def calibre_command(tool: str, *args: str) -> tuple[list[str], dict]:
+    """! @brief (argv, env) that run a calibre tool (ebook-convert, ebook-meta) isolated
+    from the app's own Python packages. @throws FileNotFoundError when it isn't installed."""
+    exe = shutil.which(tool)
+    if not exe:
+        raise FileNotFoundError(f"{tool} not installed")
+    env = {k: v for k, v in os.environ.items() if k not in _PY_ENV_DROP}
+    env['PYTHONNOUSERSITE'] = '1'
+    venv = os.environ.get('VIRTUAL_ENV')
+    if venv:                                   # the venv's bin dir off PATH too
+        env['PATH'] = os.pathsep.join(p for p in env.get('PATH', '').split(os.pathsep)
+                                      if not p.startswith(venv))
+    real = os.path.realpath(exe)
+    py = _script_python(real)
+    if py is None:
+        return [exe, *args], env
+    own_local = '1' if real.startswith('/usr/local/') else '0'
+    return [py, '-I', '-c', _CALIBRE_RUNNER, real, own_local, *args], env
+
 def video_poster_frame(path: str, seek: float = 1.0) -> np.ndarray | None:
     """! @brief One representative frame of a video as RGB uint8 (like read_jxl).
     @param seek  seconds in, to skip a black lead-in (first frame if past the end).

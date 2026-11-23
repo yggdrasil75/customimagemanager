@@ -525,7 +525,8 @@ async function refreshTiersStatus() {
       Drive: ${fmtGB(u.drive.used)} used of ${fmtGB(u.drive.total)}, ${fmtGB(u.drive.free)} free -
       ${fmtGB(u.outside)} of it isn't this app's (other programs and files on the same drive).
       ${cap > 0 ? `<br>Max total size: ${fmtGB(u.total)} of ${cap} GB${u.total >= cap * 1073741824 ? ' - <span class="text-red-400">reached</span>' : ''}.` : ''}
-      <span class="text-gray-600">Measured ${u.at ? new Date(u.at * 1000).toLocaleTimeString() : '-'}.</span></div>` : '';
+      <span class="text-gray-600">Measured ${u.at ? new Date(u.at * 1000).toLocaleString() : '-'}${
+        u.refreshing || r.tiers_measuring ? ' - <span class="text-sky-400">measuring again in the background...</span>' : ''}.</span></div>` : '';
   el.innerHTML = worker + rows + total + drive;
 }
 

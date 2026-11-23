@@ -172,6 +172,18 @@ def register(host):
                          set={"model": model, "people": len((pose_data or {}).get("people") or []),
                               "updated": time.time()})
 
+    ## @brief Pose for an image another scan already decoded (the person pipeline's Body
+    # pose step): estimate with the picked provider, store it linked to the body regions,
+    # and mark the file so the background sweep below does not estimate it again.
+    def _run_image(rel, fp, img_bgr):
+        pose_data = _estimate(host, img_bgr)
+        if pose_data.get("note") and not pose_data.get("people"):
+            raise RuntimeError(pose_data["note"])
+        _store(fp, pose_data)
+        _mark(rel, pose_data)
+        return len(pose_data.get("people") or [])
+    host.provide_service("pose.run_image", _run_image)
+
     ## @brief Background sweep (Models -> Pose -> "Run in background").
     def _bg_pending(db, n, after=""):
         model = host.broker.selected_id("pose", "bg") or ""

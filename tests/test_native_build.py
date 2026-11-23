@@ -1,6 +1,7 @@
 """! @file
 @brief native_build.py: the compiled module list holds only Flask-free helper
-modules that exist, and --check drops a build older than its source."""
+modules that exist, and --check drops a build whose source changed (by content, not
+mtime) or was never recorded."""
 import os
 import time
 import native_build as nb
@@ -20,14 +21,39 @@ def test_compile_list_covers_the_tree_and_skips_the_entry_points():
     assert nb._dotted("common.py") == "common"
 
 
-def test_check_drops_stale_build(tmp_path, monkeypatch):
+def _built(tmp_path, monkeypatch, source_hash):
     src = tmp_path / "helper.py"
     src.write_text("x = 1\n")
     so = tmp_path / "helper.cpython-313-x86_64-linux-gnu.so"
     so.write_bytes(b"")
-    old = time.time() - 100
-    os.utime(so, (old, old))
     monkeypatch.setattr(nb, "ROOT", str(tmp_path))
+    monkeypatch.setattr(nb, "MANIFEST", str(tmp_path / "data" / "native_manifest.json"))
     monkeypatch.setattr(nb, "COMPILE", ["helper.py"])
+    nb._save({"built": {"helper.py": [so.name]},
+              "sources": {"helper.py": source_hash(src)} if source_hash else {}})
+    return src, so
+
+
+def test_check_keeps_a_build_of_the_same_source(tmp_path, monkeypatch):
+    src, so = _built(tmp_path, monkeypatch, lambda p: nb._digest(str(p)))
+    old = time.time() - 100
+    os.utime(so, (old, old))                    # older than its source: the content decides
+    nb.check()
+    assert so.exists()
+
+
+def test_check_drops_a_build_whose_source_changed_even_with_an_older_mtime(tmp_path, monkeypatch):
+    """A file copied or unpacked in keeps its old mtime, older than the stale build."""
+    src, so = _built(tmp_path, monkeypatch, lambda p: nb._digest(str(p)))
+    src.write_text("x = 2\n")
+    old = time.time() - 10000
+    os.utime(src, (old, old))
+    nb.check()
+    assert not so.exists()
+    assert "helper.py" not in nb._manifest().get("sources", {})
+
+
+def test_check_drops_a_build_without_a_recorded_source(tmp_path, monkeypatch):
+    src, so = _built(tmp_path, monkeypatch, None)
     nb.check()
     assert not so.exists()

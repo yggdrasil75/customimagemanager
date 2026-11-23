@@ -6,8 +6,9 @@
          -> match known people -> names from metadata -> names via LLM -> finish
 
 ======================================================================
-Each step is a task_pipeline step (Settings > Task pipelines: reorder, switch
-off, pick a backend), run over a batch of files at a time. It replaces the two
+Each step is a task_pipeline step (a node of the Person pipeline graph in
+Settings > Pipeline: rewire, switch off, pick a backend), run over a batch of
+files at a time. It replaces the two
 background sweeps (Face detection, Person detection) that each decoded the
 image, ran their own model and left the other half to the other sweep: the
 image is decoded once, a cheetah backend brings each person's body vector and
@@ -559,6 +560,75 @@ def step_finish(items, o, env):
     pc._db().commit()
 
 
+# -- body pose ----------------------------------------------------------------------
+
+def step_pose(items, o, env):
+    """! @brief Body pose per image from the image already in memory (the pose module's
+    'pose' capability: YOLO pose, RTMPose, MediaPipe, ViTPose...), stored in the sidecar
+    and linked to the body regions just saved; marks the file done for the pose
+    module's own sweep so it isn't estimated twice."""
+    ps = pc.HOST.get_service("pose.run_image")
+    if not ps:
+        return
+    for it in items:
+        if it.get("img") is None:
+            continue
+        if o.get("only_with_people", True) and not it.get("persons"):
+            continue
+        try:
+            with _timed("pose"):
+                ps(it["rel"], it["abs"], it["img"])
+        except Exception as e:
+            pc._face_err("pose FAILED for %s: %s", it["rel"], e)
+
+
+# -- can a step run here ----------------------------------------------------------
+
+def _cap_status(cap, what):
+    """! @brief {"ok", "reason"}: a capability has at least one provider that can run."""
+    try:
+        provs = pc.HOST.broker.providers_for(cap, quick=True)
+    except Exception:
+        provs = []
+    if not provs:
+        return {"ok": False, "reason": f"no {what} model is installed (Models tab)"}
+    if any(p.get("available") for p in provs):
+        return {"ok": True, "reason": ""}
+    first = provs[0]
+    return {"ok": False, "reason": f"no {what} model can run: {first.get('label')}: "
+                                    f"{first.get('reason') or 'unavailable'}"}
+
+
+def _faces_status(key=None, what="the Faces module"):
+    fs = pc._faces()
+    if not fs:
+        return {"ok": False, "reason": "the Faces module is off (Settings > Modules)"}
+    if key and not fs.get(key):
+        return {"ok": False, "reason": f"{what} is not available"}
+    return {"ok": True, "reason": ""}
+
+
+def _bodies_status():
+    if pc._bodies() or _cap_status("detect.persons", "")["ok"]:
+        return {"ok": True, "reason": ""}
+    return {"ok": False, "reason": "the Bodies module is off and no people detector brings body vectors"}
+
+
+def _llm_status():
+    llm = pc.HOST.get_service("llm")
+    if not llm:
+        return {"ok": False, "reason": "no LLM module is on (Settings > Modules)"}
+    if not _HAVE_CV2:
+        return {"ok": False, "reason": "OpenCV (cv2) is not installed"}
+    return {"ok": True, "reason": ""}
+
+
+def _pose_status():
+    if not pc.HOST.get_service("pose.run_image"):
+        return {"ok": False, "reason": "the Pose module is off (Settings > Modules)"}
+    return _cap_status("pose", "pose")
+
+
 # -- registration -----------------------------------------------------------------
 
 _CONF = {"key": "conf", "label": "Min confidence (0 = model default)", "kind": "number",
@@ -570,33 +640,46 @@ STEPS = [
     {"id": "people.detect_faces", "label": "Detect faces", "run": step_detect_faces,
      "summary": "Face boxes. SCRFD and YuNet also give 5 landmarks, so recognition needs no "
                 "second detection. Drawn faces are filtered (Faces settings).",
+     "status": lambda: _cap_status("detect.faces", "face detection"),
      "options": [{"key": "backend", "label": "Detector", "kind": "select", "default": "picked",
                   "choices": lambda: _provider_choices("detect.faces")}, _CONF]},
     {"id": "people.detect_persons", "label": "Detect people", "run": step_detect_persons,
      "summary": "Person boxes for body identity. Cheetah brings a body vector with each "
                 "person and binds it to the face found in it (runs on the app's own runtime, "
                 "AMD included: Faces settings > Cheetah runtime).",
+     "status": lambda: _cap_status("detect.persons", "people detection"),
      "options": [{"key": "backend", "label": "Detector", "kind": "select", "default": "picked",
                   "choices": lambda: _provider_choices("detect.persons")}, _CONF]},
     {"id": "people.background", "label": "Background regions", "run": step_background,
      "summary": "Detect / segment models switched to 'run in background' in the Models tab "
                 "add their regions here (person masks join person boxes)."},
     {"id": "people.landmarks", "label": "Landmarks for boxes without", "run": step_landmarks,
+     "status": lambda: _faces_status("refine_kps", "SCRFD (for landmarks)"),
      "summary": "YOLO-face boxes carry no landmarks: SCRFD on a crop around each finds them."},
     {"id": "people.embed_faces", "label": "Face identity", "run": step_embed_faces,
+     "status": lambda: _faces_status("embed_faces", "a face identity model"),
      "summary": "ArcFace vector per face (Models tab: Face identity), aligned on its landmarks. "
                 "The People tab clusters these; without it no face is stored."},
     {"id": "people.attributes", "label": "Gender and age", "run": step_attributes,
+     "status": lambda: _faces_status("face_attributes", "a gender / age model (insightface pack)"),
      "summary": "Per face: gender with the model's confidence, and an age estimate. The "
                 "People tab shows a person's gender only when confident faces agree "
                 "(People settings), and a birth-year range from photo date minus age "
                 "over dated photos."},
     {"id": "people.embed_bodies", "label": "Body identity", "run": step_embed_bodies,
+     "status": _bodies_status,
      "summary": "Body vector per person (cheetah's own, else Models tab: Body identity) that "
                 "carries a name to photos where the face is turned or too small."},
     {"id": "people.save", "label": "Save regions and identities", "locked": True, "run": step_save,
      "summary": "Regions into the file (named boxes survive a rescan), vectors, landmarks, "
                 "gender and age into the People cache."},
+    {"id": "people.pose", "label": "Body pose", "run": step_pose, "status": _pose_status,
+     "summary": "Skeleton keypoints per person (Models tab: Pose), from the image already "
+                "loaded, stored in the file and linked to each body region. The pose "
+                "module's own background run then skips these files.",
+     "options": [{"key": "only_with_people", "label": "Only images with people found", "kind": "toggle",
+                  "default": True,
+                  "help": "Skip images the people detector found nobody in (saves a model call)."}]},
     {"id": "people.match_known", "label": "Match known people", "run": step_match_known,
      "summary": "A new face this close to a named person joins them right away and gets "
                 "the name as a suggestion.",
@@ -607,7 +690,8 @@ STEPS = [
                 "or the description: suggest that name.",
      "options": [{"key": "tags", "label": "Tags", "kind": "toggle", "default": True},
                  {"key": "description", "label": "Description", "kind": "toggle", "default": True}]},
-    {"id": "people.name_llm", "label": "Names via LLM", "run": step_name_llm,
+    {"id": "people.name_llm", "label": "Names via LLM", "run": step_name_llm, "status": _llm_status,
+     "off_note": "it costs one LLM call per file with several unnamed faces",
      "summary": "Several unnamed faces and several named people: ask the vision LLM which is "
                 "which (the faces are shown numbered). Costs one LLM call per such file.",
      "options": [{"key": "max_faces", "label": "Max faces per file", "kind": "number",
@@ -763,14 +847,14 @@ def sweep_progress(db):
 def register_sweep(host, batch):
     """! @brief The People pipeline capability (its background switch) and its sweep."""
     host.declare_capability(
-        CAP, label="People pipeline", background=True,
+        CAP, label="People pipeline", background=True, group="people",
         summary="The People scan as one pass per image: faces, people, identity, gender / age "
-                "and name suggestions (steps and backends: Settings > Task pipelines).",
+                "and name suggestions (steps and backends: the Person pipeline graph in Settings > Pipeline).",
         input="rel_paths (the background sweep)", output="face_regions / body_regions rows, regions")
     host.provide_model(
         CAP, "task", label="Person pipeline", family="Task pipeline", speed="balanced",
         supports_conf=False,
-        note="Runs the steps in Settings > Task pipelines > Person pipeline. Its detectors and "
+        note="Runs the Person pipeline graph (Settings > Pipeline). Its detectors and "
              "embedders are the providers picked there (or here in the Models tab).",
         loader=lambda: (lambda *a, **k: None), transform=None,
         available=lambda: True, reason="", cost_mb=0)

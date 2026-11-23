@@ -81,6 +81,9 @@
         mount.appendChild(el);
       }
     }
+    // a section a template keeps hidden until a module puts a field in it
+    document.querySelectorAll("[data-unhide-with-fields]").forEach(sec =>
+      sec.classList.toggle("hidden", !sec.querySelector("[data-settings-field]")));
     if (window.renderModuleSettingsButtons) renderModuleSettingsButtons();
     if (window.applyFeatureVisibility) applyFeatureVisibility();
   }
@@ -288,6 +291,34 @@ const SPEED_BADGE = { fast: "fast", balanced: "balanced", accurate: "accurate" }
       caps = (d && d.capabilities) || [];
     } catch (e) { return; }
     mount.innerHTML = "";
+    // capabilities with a group ("people") go into a collapsible subsection after the
+    // main list, closed until opened (the choice is remembered in this browser)
+    const GROUP_LABELS = { people: "People models (faces, bodies, pose)" };
+    const groups = {};
+    const target = (c) => {
+      if (!c.group) return mount;
+      if (!groups[c.group]) {
+        const det = document.createElement("details");
+        det.className = "border border-gray-700 rounded";
+        det.setAttribute("data-model-group", c.group);
+        let open = false;
+        try { open = localStorage.getItem("cim.models.group." + c.group) === "1"; } catch (e) { /* storage off */ }
+        det.open = open;
+        det.addEventListener("toggle", () => {
+          try { localStorage.setItem("cim.models.group." + c.group, det.open ? "1" : "0"); } catch (e) { /* storage off */ }
+        });
+        const sum = document.createElement("summary");
+        sum.className = "cursor-pointer select-none px-2 py-1.5 text-xs font-bold text-sky-300";
+        sum.textContent = GROUP_LABELS[c.group] || (c.group.charAt(0).toUpperCase() + c.group.slice(1) + " models");
+        const body = document.createElement("div");
+        body.className = "space-y-3 p-2 pt-0";
+        det.appendChild(sum);
+        det.appendChild(body);
+        groups[c.group] = { det, body, n: 0 };
+      }
+      groups[c.group].n += 1;
+      return groups[c.group].body;
+    };
     for (const c of caps) {
       const provs = c.providers || [];
       if (!provs.length) continue;
@@ -338,7 +369,11 @@ const SPEED_BADGE = { fast: "fast", balanced: "balanced", accurate: "accurate" }
         n.className = "text-[10px] text-amber-400 mt-1"; n.textContent = p.reason;
         row.appendChild(n);
       }
-      mount.appendChild(row);
+      target(c).appendChild(row);
+    }
+    for (const g of Object.values(groups)) {
+      g.det.querySelector("summary").textContent += ` - ${g.n}`;
+      mount.appendChild(g.det);
     }
     if (window.applyFeatureVisibility) applyFeatureVisibility(mount);
     _bgProgressStart();

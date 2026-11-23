@@ -32,11 +32,17 @@ fields written onto each item (name, appearance, tags, boxes, ...).
 
 Node catalogue (ports + params) is data in CATALOG so the editor can draw
 it; module stages are appended by the host at run time.
+
+The evaluator itself (wires, memoised pulls, the run gate, gate / switch /
+const) is dataflow.Dataflow, shared with the task pipelines
+(modules/task_pipeline), which run their graphs on it too.
 """
 
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+
+from .dataflow import FLOW_CATALOG, Dataflow, flow_node
 
 from .engine import (SCHEMA, crop_box, match_pose_boxes, _clamp, _crop_rect, _dedup,
                      _iou_boxes, _map_box_to_full, _known_text)
@@ -97,6 +103,7 @@ CATALOG = {
               "params": {"graph": "graph"},
               "help": "Runs its sub-graph once per item (a subject or a panel box) with the item's CROP "
                       "as the inner image. Inner End inputs are written onto the item."},
+    **FLOW_CATALOG,         # gate, switch, const: the same in every pipeline graph
     "meta_get": {"label": "Metadata: get field", "kind": "meta",
               "inputs": [P("metadata", "metadata")],
               "outputs": [P("value", "text"), P("is_set", "bool"), P("missing", "bool")],
@@ -106,12 +113,6 @@ CATALOG = {
               "inputs": [P("value", "any"), P("run", "bool", opt=True)],
               "outputs": [P("metadata", "metadata")], "params": {"field": "text"},
               "help": "Wire the result into End.metadata; EXIF fields are written after the run."},
-    "gate":  {"label": "Gate (pass when true)", "kind": "flow",
-              "inputs": [P("value", "any", opt=True), P("run", "bool", opt=True)], "outputs": [P("value", "any")],
-              "params": {"invert": "bool"}},
-    "switch": {"label": "Switch (a if true else b)", "kind": "flow",
-              "inputs": [P("cond", "bool"), P("a", "any", opt=True), P("b", "any", opt=True)],
-              "outputs": [P("value", "any")]},
     "regex": {"label": "Regex extract", "kind": "text",
               "inputs": [P("text", "text")],
               "outputs": [P("match", "text"), P("found", "bool"), P("missing", "bool")],
@@ -121,8 +122,6 @@ CATALOG = {
               "inputs": [P("a", "any", opt=True), P("b", "any", opt=True), P("c", "any", opt=True), P("d", "any", opt=True)],
               "outputs": [P("text", "text")], "params": {"template": "textarea"},
               "help": "{a} {b} {c} {d} substituted; lists join with ', '. Empty inputs render as ''."},
-    "const": {"label": "Constant", "kind": "text", "inputs": [], "outputs": [P("value", "text")],
-              "params": {"value": "text"}},
     "compare": {"label": "Compare / not empty", "kind": "flow",
               "inputs": [P("value", "any")], "outputs": [P("true", "bool"), P("false", "bool")],
               "params": {"op": ["not_empty", "empty", "equals", "contains", "matches"], "to": "text"}},
@@ -192,11 +191,6 @@ def _empty(v):
     return False
 
 
-class _Null:
-    """! @brief Marker for 'this node did not run' (distinct from a legitimate None)."""
-_NULL = _Null()
-
-
 # -- runner -------------------------------------------------------------------
 def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None,
               pose_fn=None, ocr_fn=None, person_fn=None, panel_fn=None, seg_fn=None,
@@ -207,10 +201,9 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
     @param collect  node ids whose raw outputs are also returned, as
                     analysis["_outputs"] = {id: {port: value}} (the pipeline agent
                     runs one tool at a time this way)."""
-    nodes = {n["id"]: n for n in graph.get("nodes", []) if n.get("id")}
     stage_fns = stage_fns or {}
     endpoints = list(endpoints or [])
-    rr = {"i": 0}; rr_lock = threading.Lock(); cache = {}; cache_lock = threading.Lock()
+    rr = {"i": 0}; rr_lock = threading.Lock()
     known = known or {}
     known_text = _known_text(known)
 
@@ -239,54 +232,16 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
             report(f"llm failed: {e}")
             return None
 
-    def wires(node, port):
-        w = (node.get("in") or {}).get(port)
-        if not w:
-            return []
-        return w if (w and isinstance(w[0], (list, tuple))) else [w]
+    def spec_of(node):
+        t = node["type"]
+        if t == "_inner_start":
+            return INNER_START
+        if t == "_inner_end":
+            return INNER_END
+        return CATALOG.get(t) or (STAGE_NODE if t in stage_fns else None)
 
-    def pull(node, port, spec):
-        """! @brief Value on an input port: single wire -> value, multi -> list of non-null values."""
-        ws = wires(node, port)
-        vals = []
-        for w in ws:
-            src = nodes.get(w[0])
-            v = outputs_of(src).get(w[1], None) if src else None
-            if v is not _NULL and v is not None:
-                vals.append(v)
-        if spec and spec.get("multi"):
-            return vals
-        return vals[0] if vals else None
-
-    def outputs_of(node):
-        with cache_lock:
-            if node["id"] in cache:
-                return cache[node["id"]]
-        try:
-            out = run_node(node) or {}
-        except Exception as e:
-            report(f"{node.get('type')} failed: {e}")
-            out = {}
-        with cache_lock:
-            cache[node["id"]] = out
-        return out
-
-    def inputs(node):
-        spec = CATALOG.get(node["type"]) or (STAGE_NODE if node["type"] in stage_fns else None)
-        if node["type"] == "_inner_start": spec = INNER_START
-        if node["type"] == "_inner_end": spec = INNER_END
-        ins = {}
-        for p in (spec or {}).get("inputs", []):
-            ins[p["name"]] = pull(node, p["name"], p)
-        # generic `run` gate: a wired-but-false/absent run means "skip"
-        # (gate handles its own run port so `invert` can work)
-        if node["type"] != "gate" and "run" in (node.get("in") or {}) and not _truthy(ins.get("run")):
-            return None
-        for p in (spec or {}).get("inputs", []):
-            if not p.get("optional") and p["name"] != "run" and (node.get("in") or {}).get(p["name"]) \
-                    and _empty(ins.get(p["name"])):
-                return None            # required input produced nothing -> skip
-        return ins
+    df = Dataflow(graph.get("nodes", []), spec_of, lambda n: run_node(n), report)
+    nodes, outputs_of, inputs = df.nodes, df.outputs_of, df.inputs
 
     def subjects_from_boxes(boxes, default_label="subject"):
         subs = []
@@ -314,8 +269,9 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
             return {}
         if t in ("end", "_inner_end"):
             return {"_ins": ins}
-        if t == "const":
-            return {"value": n.get("value", "")}
+        flow = flow_node(t, n, ins)
+        if flow is not None:
+            return flow
         if t == "meta_get":
             m = ins.get("metadata") or {}
             f = (n.get("field") or "").strip()
@@ -330,13 +286,6 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
             f = (n.get("field") or "").strip()
             v = ins.get("value")
             return {"metadata": {f: v}} if f and not _empty(v) else {}
-        if t == "gate":
-            ok = _truthy(ins.get("run")) != bool(n.get("invert"))
-            if ins.get("value") is None:
-                return {}
-            return {"value": ins.get("value")} if ok else {}
-        if t == "switch":
-            return {"value": ins.get("a") if _truthy(ins.get("cond")) else ins.get("b")}
         if t == "regex":
             txt = _s(ins.get("text"))
             try:

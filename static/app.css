@@ -482,3 +482,14 @@ canvas {
   max-width: 80%; padding: 10px 14px; border-radius: 8px; text-align: center; font-size: 12px; line-height: 1.5;
   background: rgba(17, 24, 39, 0.9); color: #e5e7eb; }
 .cim-video-notice a { color: var(--cim-accent-300, #93c5fd); text-decoration: underline; }
+
+.cim-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 11px; }
+.cim-table thead th { position: sticky; top: 0; z-index: 2; background: rgb(31, 41, 55);
+  color: rgb(156, 163, 175); font-weight: 600; text-align: left; padding: 4px 6px;
+  border-bottom: 1px solid rgb(75, 85, 99); white-space: nowrap; }
+.cim-table tbody td { padding: 3px 6px; border-bottom: 1px solid rgba(55, 65, 81, 0.6); vertical-align: middle; }
+.cim-table tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.02); }
+.cim-table tbody tr:hover td { background: rgba(255, 255, 255, 0.05); }
+.cim-table .num, .cim-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.cim-table td.clip { max-width: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cim-table td.nowrap { white-space: nowrap; }

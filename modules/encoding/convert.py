@@ -477,8 +477,8 @@ def convert_book(src: str, out: str) -> str | None:
     if not mt._have('ebook-convert'):
         return "calibre (ebook-convert) not installed"
     try:
-        p = subprocess.run(['ebook-convert', src, out], capture_output=True,
-                           text=True, timeout=3600)
+        cmd, env = mt.calibre_command('ebook-convert', src, out)   # away from the app's lxml
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
     except Exception as ex:
         return str(ex)
     if p.returncode == 0 and os.path.exists(out):

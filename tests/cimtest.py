@@ -169,6 +169,11 @@ def load_app():
         ig = manager.module_host.get_service("integrity")
         if ig is not None:
             ig["boot"]["at"] = float("inf")
+        # Nor arranging the public sections on its own: the movies / tv / music tests
+        # write loose names there. Its own tests resume it.
+        pl = manager.module_host.get_service("public_library")
+        if pl is not None:
+            pl["pause"](True)
         _APP = manager
     return _APP
 
