@@ -205,7 +205,14 @@ def test_audio_only_helpers(tmp_path):
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
                     reason="ffmpeg not installed")
+def _need_music(host):
+    """Audio is only library content with the music module on (it needs librosa)."""
+    if not host.media.is_audio("x.m4a"):
+        pytest.skip("music module off: audio files are not part of the library")
+
+
 def test_audio_only_video_becomes_its_audio_file(host):
+    _need_music(host)
     svc = host.get_service("integrity.health")
     core = host.core
     d = host.db()
@@ -505,6 +512,7 @@ def test_repair_crops_a_truncated_image(host, tmp_path):
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 def test_repair_song_stored_as_video_and_a_clean_file(host, tmp_path):
+    _need_music(host)
     svc = host.get_service("integrity.health")
     rel = "cf_repair/Song.mp4"
     fp = media_path(rel)

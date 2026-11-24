@@ -93,7 +93,7 @@ def register(host):
         "embed.bodies", "cheetah", label="Cheetah body ReID (insightface 2.x)", family="insightface",
         speed="fast", supports_conf=False,
         note="256-d person re-identification from the cheetah package (Faces settings pick "
-             "s / l).faces decide identity.",
+             "s / l). Faces decide identity.",
         loader=_cheetah_reid_loader, transform=None,
         available=lambda: bool((host.get_service("faces") or {}).get("cheetah_available", lambda: False)()),
         reason="needs insightface >= 2.0 with onnx, and the Faces module", cost_mb=400)

@@ -170,6 +170,49 @@ def test_books_in_a_personal_tree_stay_private(app, client, upload, accounts):
     client.post("/api/books/delete", json={"rel_path": rel})
 
 
+def test_gallery_drops_provider_results_the_viewer_may_not_see(app, client, accounts, monkeypatch):
+    """! @brief The core checks every injected result against the access policies, so a
+    provider that forgets to filter cannot leak another account's files."""
+    alice, bob = accounts["own_alice"], accounts["own_bob"]
+    hidden = "users/own_alice/leak/secret.thing"
+    public = "leak/public.thing"
+
+    def leaky(text, folder, structured=None):
+        return [{"kind": "thing", "rel_path": hidden}, {"kind": "thing", "rel_path": public},
+                {"kind": "thing", "folder": "pub_comic", "cover": "users/own_alice/c.jpg"}]
+    host = app.module_host
+    monkeypatch.setattr(host, "search_providers", list(host.search_providers) + [leaky])
+    with as_(app, bob):
+        names = {f.get("rel_path") or f.get("folder") for f in
+                 client.get("/api/list").get_json()["files"]}
+        assert public in names
+        assert hidden not in names
+        assert "pub_comic" not in names          # its cover is in alice's tree
+    with as_(app, alice):
+        names = {f.get("rel_path") or f.get("folder") for f in
+                 client.get("/api/list").get_json()["files"]}
+        assert hidden in names
+
+
+def test_gallery_leaves_out_results_of_a_feature_the_viewer_lacks(app, client, accounts, monkeypatch):
+    """! @brief A provider registered with feature= gives nothing to a user without read
+    on it (book tiles for someone blocked from the Books tab)."""
+    bob = accounts["own_bob"]
+
+    def books(text, folder, structured=None):
+        return [{"kind": "book", "rel_path": "shelf/a_book.epub"}]
+    host = app.module_host
+    monkeypatch.setattr(host, "search_providers", list(host.search_providers) + [books])
+    monkeypatch.setitem(host.search_provider_features, id(books), "tab.books")
+
+    def names(perms):
+        with signed_in_as(app, {**bob, "is_admin": False,
+                                "features": features.effective_permissions("custom", perms)}):
+            return {f.get("rel_path") for f in client.get("/api/list").get_json()["files"]}
+    assert "shelf/a_book.epub" in names({"tab.books": "read"})
+    assert "shelf/a_book.epub" not in names({"tab.books": "block"})
+
+
 def _jpeg_size(data):
     """! @brief (w, h) of JPEG bytes."""
     img = Image.open(io.BytesIO(data))

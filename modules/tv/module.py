@@ -251,31 +251,39 @@ def register(host):
                         out.append((host.core.rel(ap), ap))
         return out
 
+    _scan_lock = threading.Lock()
+
     def index_all(force=False):
-        """! @brief Walk the tv sections; rows of files that are gone are dropped."""
-        if state["indexing"]:
-            return
-        state.update(indexing=True, status="scanning")
-        try:
-            paths = _walk()
-            _drop_outside()
-            seen = {rp for rp, _ in paths}
-            for r in db().execute("SELECT rel_path FROM tv_episodes").fetchall():
-                if r["rel_path"] not in seen:
+        """! @brief Walk the tv sections; rows of files that are gone are dropped.
+        A call while a scan runs waits for it and then scans again, so a sync asked
+        for mid-scan sees the files as they are when it runs."""
+        with _scan_lock:
+            state.update(indexing=True, status="scanning")
+            try:
+                paths = _walk()
+                _drop_outside()
+                seen = {rp for rp, _ in paths}
+                for r in db().execute("SELECT rel_path FROM tv_episodes").fetchall():
+                    if r["rel_path"] in seen:
+                        continue
+                    # the walk is a snapshot: a file renamed or uploaded since keeps its row
+                    ap = host.safe_path(host.media_dir, r["rel_path"])
+                    if ap and os.path.exists(ap):
+                        continue
                     host.update_file(r["rel_path"], table="tv_episodes", remove=True, dont_write=True)
-            if force:
-                _show_sig.clear()
-            state.update(total=len(paths), indexed=0)
-            for rp, ap in paths:
-                try:
-                    upsert(rp, ap, force=force)
-                except Exception as e:
-                    log.error(f"tv index {rp}: {e}")
-                state["indexed"] += 1
-            _drop_empty_shows()
-            state["status"] = "idle"
-        finally:
-            state["indexing"] = False
+                if force:
+                    _show_sig.clear()
+                state.update(total=len(paths), indexed=0)
+                for rp, ap in paths:
+                    try:
+                        upsert(rp, ap, force=force)
+                    except Exception as e:
+                        log.error(f"tv index {rp}: {e}")
+                    state["indexed"] += 1
+                _drop_empty_shows()
+                state["status"] = "idle"
+            finally:
+                state["indexing"] = False
 
     def _refresh_folder(rel_dir):
         """! @brief Re-read the episodes a folder's sidecars reach: every episode of the

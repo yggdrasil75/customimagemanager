@@ -99,6 +99,7 @@ class Host:
         self.left_panes = []
         # fn(text, folder, structured) -> [entry]
         self.search_providers = []
+        self.search_provider_features = {}   # id(fn) -> feature key the results need
         # token prefix -> fn(token, value) -> (sql, params)
         self.search_types = {}
         # sort name -> ORDER BY expression (or a callable returning one)
@@ -348,11 +349,17 @@ class Host:
         self.app_modals.append({"template": template,
                                 "module_id": self._current_module})
 
-    def register_search_provider(self, fn):
+    def register_search_provider(self, fn, *, feature=None):
         """! @brief Add non-image search results to the gallery.
-        @param fn  fn(text, folder, structured) -> [entry], each with its own "kind".
+        @param fn       fn(text, folder, structured) -> [entry], each with its own "kind"
+                        and its path in "rel_path" / "filename" / "folder".
+        @param feature  the permission the results need at read (e.g. "tab.books"): a
+                        user without it gets none of them. Every entry's path is also
+                        checked against the access policies, whatever fn returns.
         """
         self.search_providers.append(fn)
+        if feature:
+            self.search_provider_features[id(fn)] = feature
 
     def register_search_type(self, prefix, handler, *, help=None):
         """! @brief Handle a custom search token.

@@ -101,6 +101,8 @@ def test_arrange_moves_a_movie_with_its_subtitles_and_art(app, host, tree):
 
 
 def test_music_album_with_its_folder_files(app, host, tree):
+    if host.get_service("music") is None:
+        pytest.skip("music module off (needs mutagen and librosa)")
     db = app.module_host.db()
     for n, (t, disc) in enumerate([("One", 1), ("Two", 2)], start=1):
         rel = f"music/Rip 2001/CD{disc}/track{n}.flac"
@@ -156,6 +158,16 @@ def test_new_files_in_a_public_section_are_arranged_on_their_own(app, host, tree
     finally:
         pl["pause"](True)
         pl["settle"](8.0)
+
+
+def test_paused_arranging_leaves_a_sync_alone(app, host, tree):
+    """While arranging is paused (the test run pauses it), a full sync moves nothing
+    either: it used to start arrange_all anyway, renaming other tests' files mid-test."""
+    rel = "movies/Heat.1995.mkv"
+    _index(host, app, rel)
+    host.emit("library.sync", direction="pull", rel_paths=None)
+    time.sleep(0.5)
+    assert _exists(app, rel) and not _exists(app, "movies/Heat (1995)/Heat (1995).mkv")
 
 
 def test_publishing_a_video_stored_as_separate_streams_puts_it_back_together(app, host, tree, client):

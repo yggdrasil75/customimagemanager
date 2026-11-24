@@ -251,6 +251,8 @@ def register(host):
     host.on("file.renamed", lambda old_rel, new_rel, **_: enqueue(new_rel))
 
     def _sync(direction, rel_paths=None):
+        if state["paused"]:
+            return
         if direction == "pull" and rel_paths is None and host.config.get("public_library_arrange", True):
             threading.Thread(target=arrange_all, daemon=True).start()
     host.on("library.sync", _sync)

@@ -33,6 +33,13 @@ CAPABILITY_PROBES = {
                             and (_installed("onnxruntime")
                                  or _installed("onnxruntime_gpu")),
     "mediapipe":    lambda: _installed("mediapipe"),  # legacy
+    # pose has a provider per backend: any one of them serves it (YOLO pose,
+    # MediaPipe, RTMPose, MoveNet's TFLite, ViTPose's transformers, RF-DETR)
+    "pose":         lambda: any(_installed(m) for m in (
+                                "ultralytics", "mediapipe", "ai_edge_litert", "tflite_runtime",
+                                "tensorflow", "transformers", "rfdetr"))
+                            or (_installed("rtmlib") and (_installed("onnxruntime")
+                                                         or _installed("onnxruntime_gpu"))),
     # 3D viewer, mesh fitting
     "trimesh":      lambda: _installed("trimesh"),
     "ocr":          lambda: _installed("pytesseract") or _installed("easyocr"),
@@ -46,8 +53,9 @@ CAPABILITY_PROBES = {
 CAPABILITY_FEATURES = {
     "insightface": ["tab.faces"],
     "trimesh":     ["view.3d"],
-    "ultralytics": ["ai.autotag", "ai.segment", "ai.pose"],
-    "torch":       ["ai.smarttag", "ai.iqa"],   # dedup itself is sha256 + perceptual hash: no torch
+    "ultralytics": ["ai.autotag", "ai.segment"],
+    "pose":        ["ai.pose"],
+    "torch":       ["ai.smarttag"],   # IQA has BRISQUE (OpenCV only); dedup is sha256 + perceptual hash
     "ocr":         ["ai.ocr"],
     "barcodes":    ["ai.barcodes"],
     "gallery_dl":  [],

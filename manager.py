@@ -53,6 +53,7 @@ def _read_text_loose(path, encoding="utf-8", errors="replace"):
 
 import auth as _auth
 import features
+import capabilities
 import exif_import, exif_export
 import xmp_import, xmp_export
 import iptc_import
@@ -1367,6 +1368,29 @@ def _files_before(where_sql: str, params: list, spec: list, key) -> int:
     return _db().execute(f"SELECT COUNT(*) FROM files{w}", (*params, *pp)).fetchone()[0]
 
 
+def _may_read(feature_key: str) -> bool:
+    """! @brief The current user may read `feature_key` (outside a request: yes)."""
+    if not has_request_context():
+        return True
+    u = g.get("user")
+    if not u:
+        return False
+    if capabilities.capability_denials().get(feature_key) is False:
+        return False
+    return bool(u.get("is_admin")) or features.has_level(u.get("features") or {}, feature_key, "read")
+
+
+def _entry_visible(e) -> bool:
+    """! @brief A module search result the access policies let the current user see:
+    its own path, and its cover when it names one."""
+    paths = [e.get("rel_path") or e.get("filename") or e.get("folder")]
+    if e.get("cover"):
+        paths.append(e["cover"])
+    if not paths[0]:
+        return False
+    return all(module_host.check_path(str(x), False) for x in paths if x)
+
+
 def _entry_key(spec, e):
     """! @brief Where a module's search result sorts: its `sort` values for the gallery's
     sort keys (missing = NULL), then its path."""
@@ -1396,11 +1420,19 @@ def _query_files(search: str, offset: int, limit: int,
     order_sql = f"{order}, rel_path" if order else "rel_path"
     extra = []
     if not album and 'module_host' in globals():
+        feats = getattr(module_host, "search_provider_features", {})
         for prov in getattr(module_host, "search_providers", []):
+            need = feats.get(id(prov))
+            if need and not _may_read(need):
+                continue
             try:
-                extra += prov(text, folder, filters) or []
+                got = prov(text, folder, filters) or []
             except Exception as e:
                 access_logger.error(f"search provider failed: {e}")
+                continue
+            # a provider's results obey the access policies like the files do, whether
+            # or not the provider filtered them itself
+            extra += [e for e in got if _entry_visible(e)]
     nc = len(extra)
     total_files = _files_count(where_sql, p)
     total = nc + total_files

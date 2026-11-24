@@ -23,6 +23,15 @@ import model_registry
 import common
 
 mp, _HAVE_MP = optional_import("mediapipe")
+# HolisticLandmarker is missing from older mediapipe builds (0.10.32 has only the
+# pose landmarker): the Holistic pick is unavailable there, not a load failure
+_HAVE_HOLISTIC = False
+if _HAVE_MP:
+    try:
+        from mediapipe.tasks.python import vision as _mp_vision
+        _HAVE_HOLISTIC = hasattr(_mp_vision, "HolisticLandmarker")
+    except Exception:
+        _HAVE_HOLISTIC = False
 
 MANIFEST = {
     "id":          "mediapipe_pose",
@@ -205,7 +214,9 @@ def register(host):
         speed="balanced",
         loader=lambda: (lambda img, *a, **k: _people(img, "holistic", "", _persons())),
         transform=_coco, settings=[coco_setting],
-        available=lambda: _HAVE_MP, reason="pip install mediapipe",
+        available=lambda: _HAVE_HOLISTIC,
+        reason="pip install mediapipe" if not _HAVE_MP
+               else "this mediapipe has no Holistic landmarker: pip install -U mediapipe",
         cost_mb=300)
 
     host.logger.info("mediapipe_pose module: registered mp_blazepose (33) and mp_holistic (543)")

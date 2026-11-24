@@ -45,7 +45,7 @@ def test_object_store_restore(app, client, upload, tmp_path):
         other = upload("tier_old.png", seed=22, scope="public", folder="trips/2026")
         olink = os.path.join(media, other)
         oobj = os.path.join(str(tier), tiering.OBJECT_DIR, "ab", "abcdef0123456789abcdef0123456789.jxl")
-        os.makedirs(os.path.dirname(oobj)); os.replace(olink, oobj); os.symlink(oobj, olink)
+        os.makedirs(os.path.dirname(oobj), exist_ok=True); os.replace(olink, oobj); os.symlink(oobj, olink)
         assert tiering.adopt_ids() == 1
         assert app._document_id(os.path.splitext(olink)[0] + ".xmp") == "abcdef0123456789abcdef0123456789"
         os.remove(olink)
@@ -57,7 +57,7 @@ def test_object_store_restore(app, client, upload, tmp_path):
         llink = os.path.join(media, lost)
         client.get(f"/api/thumb/{lost}")                     # populate the thumb cache
         lobj = os.path.join(str(tier), tiering.OBJECT_DIR, "cd", "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd.jxl")
-        os.makedirs(os.path.dirname(lobj)); os.replace(llink, lobj)
+        os.makedirs(os.path.dirname(lobj), exist_ok=True); os.replace(llink, lobj)
         plan = client.post("/api/tiers/recover", json={}).get_json()
         assert [m["rel_path"] for m in plan["matched"]] == [lost] and plan["matched"][0]["how"] == "mtime"
         assert not os.path.lexists(llink)                    # a plan changes nothing

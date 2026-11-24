@@ -864,7 +864,7 @@ def register(host):
                  "duration": r["duration"] or 0, "has_cover": r["has_cover"] != 0,
                  "tags": json.loads(r["tags"] or "[]"), "iqa_score": None,
                  "width": 1, "height": 1} for r in rows]
-    host.register_search_provider(query_music)
+    host.register_search_provider(query_music, feature="tab.music")
 
     _TAG_KEYS = ("title", "artist", "album", "albumartist", "track", "disc",
                  "year", "genre", "composer", "comment")
