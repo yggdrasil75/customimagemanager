@@ -31,7 +31,7 @@
   <div class="tr-flow">
     <div class="tr-field"><label class="trlbl">Backend</label>
       <select id="tr_backend" class="trinp" onchange="trBackendChange()"
-        title="YOLO (Ultralytics) or Mayaku (COCO-format, ConvNeXt/UniQuery). Mayaku is bonus support; YOLO is the default.">
+        title="YOLO (Ultralytics, the default) or Mayaku (COCO format, ConvNeXt/UniQuery).">
         <option value="yolo">YOLO (Ultralytics)</option>
         <option value="mayaku">Mayaku</option>
       </select></div>
@@ -91,7 +91,7 @@
         <label class="trck" title="Treat every box as one merged class, ignoring class labels."><input type="checkbox" id="tr_single_cls" class="accent-indigo-500"> 1-class</label>
       </div>
       <label class="trlbl pt-1">Augmentation</label>
-      <p class="text-xs text-gray-500 mb-1">Our own box-safe pipeline. Each transform has a <b>chance</b> (how often it fires per image) and an <b>amount</b> (its magnitude). Variants are generated on disk into the training set and don't touch your originals. Native Ultralytics augments (incl. mosaic) are disabled while this is on.</p>
+      <p class="text-xs text-gray-500 mb-1">Box-safe augmentation. Each transform has a <b>chance</b> (how often it fires per image) and an <b>amount</b> (its magnitude). Variants are generated on disk into the training set and don't touch your originals. Native Ultralytics augments (incl. mosaic) are disabled while this is on.</p>
       <div class="tr-flow">
         <div class="tr-field"><label class="trlbl">variants / image</label><input id="tr_n_aug" type="number" value="0" step="1" min="0" max="20" class="trinp" title="How many augmented copies to generate per training image (0 = augmentation off). Validation images are never augmented."></div>
       </div>

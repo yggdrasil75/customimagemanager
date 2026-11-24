@@ -241,7 +241,7 @@ def register(host):
     host.add_route("/api/ftp/status", api_status, feature="settings." + TAB)
     host.add_route("/api/ftp/restart", api_restart, methods=["POST"], feature="settings." + TAB, level="write")
     host.add_settings_section(TAB, "server", status_url="/api/ftp/status", poll=5,
-                              text="Changes take effect when saved. Accounts sign in with their password, or an API key "
+                              text="Accounts sign in with their password, or an API key "
                                    "as the password (needed for accounts with a second factor). Uploads go through the upload queue.",
                               actions=[{"id": "restart", "label": "Restart server", "url": "/api/ftp/restart",
                                         "title": "Restart the FTP server with the saved settings"}])

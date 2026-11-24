@@ -106,3 +106,79 @@ def test_reader_formats_kept_when_converting_unreadable_only(prefs):
     assert C.target_ext("report.docx") == ".docx"
     assert C.target_ext("tale.fb2") == ".fb2"
     assert C.target_ext("novel.mobi") == ".epub"
+
+
+# -- the Books tab search and the gallery ------------------------------------------
+def test_shelf_search_finds_comics_by_file_name(client, upload, prefs):
+    """A comic whose title doesn't say "Hulk" (ComicInfo issue title, say) is still
+    found by its file name, and every word may match a different field."""
+    prefs(target=".epub", mode="none")
+    rel = _up(upload, _cbz(), "Incredible Hulk 001 (2023).cbz")
+    assert _book(client, rel)
+    client.post("/api/books/meta", json={"rel_path": rel, "title": "Gamma Flight"})
+    hits = lambda q: [b["rel_path"] for b in client.get(f"/api/books/list?q={q}").get_json()["books"]]
+    assert rel in hits("hulk")
+    assert rel in hits("gamma 2023")
+    assert rel not in hits("hulk 1999")
+
+
+def test_passage_search_still_lists_title_matches(client, upload, prefs):
+    prefs(target=".epub", mode="none")
+    rel = _up(upload, _cbz(), "Hulk Smash 002.cbz")
+    assert _book(client, rel)
+    j = client.post("/api/books/search", json={"q": "hulk"}).get_json()
+    assert j["success"], j
+    assert rel in [b["rel_path"] for b in j["matches"]]
+
+
+def _keep_uploads():
+    """Books and images stored as uploaded (this box may have no cjxl); the prefs
+    fixture puts the settings back afterwards."""
+    C.set_media_prefs(dict(C.media_prefs(), book={"target": ".epub", "mode": "none"},
+                           image={"target": ".png", "mode": "none"}))
+
+
+def _gallery(client, q="", folder="mix"):
+    """The whole listing, page by page (page_size is the server's)."""
+    out, page = [], 0
+    while True:
+        j = client.get(f"/api/list?q={q}&folder={folder}&page={page}").get_json()
+        out += [f.get("filename") or f.get("folder") for f in j["files"]]
+        page += 1
+        if page * j["page_size"] >= j["total"]:
+            return out
+
+
+def test_books_sort_in_among_the_photos(client, upload, prefs, app, monkeypatch):
+    """A book is placed by the gallery's order, not stacked ahead of every photo, and
+    paging through gives each tile once, in order."""
+    monkeypatch.setitem(app.state, "page_size", 2)
+    prefs(target=".epub", mode="none")
+    _keep_uploads()
+    book = _epub([f'<html><body><h1>One</h1>{_PARA}</body></html>'])
+    names = {}
+    for i, n in enumerate(("a_photo.png", "c_photo.png", "e_photo.png", "g_photo.png")):
+        names[n] = upload(n, seed=100 + i, folder="mix")
+    for n in ("b_book.epub", "f_book.epub"):
+        j = upload._post({"file": (io.BytesIO(book), n), "mode": "sync", "folder": "mix"}, n)
+        names[n] = j["filename"]
+        assert _book(client, names[n])
+    want = [names[n] for n in sorted(names)]
+    assert _gallery(client) == want
+    assert _gallery(client, "sort:-path") == want[::-1]
+
+
+def test_books_without_a_sort_value_sort_like_files_without_one(client, upload, prefs, app, monkeypatch):
+    """sort:-tags puts tagged files first; an untagged book sorts with the untagged
+    files (by path among them)."""
+    monkeypatch.setitem(app.state, "page_size", 3)
+    prefs(target=".epub", mode="none")
+    _keep_uploads()
+    tagged = upload("z_tagged.png", seed=201, folder="mix2")
+    assert client.post("/api/bulk_tag", json={"filenames": [tagged], "tags": ["x", "y"]}).get_json()["success"]
+    plain = upload("a_plain.png", seed=202, folder="mix2")
+    j = upload._post({"file": (io.BytesIO(_epub([f'<html><body>{_PARA}</body></html>'])), "m_book.epub"),
+                      "mode": "sync", "folder": "mix2"}, "m_book.epub")
+    assert _book(client, j["filename"])
+    got = _gallery(client, "sort:-tags", folder="mix2")
+    assert got[0] == tagged and got[1:] == [plain, j["filename"]], got

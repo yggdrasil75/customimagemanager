@@ -132,7 +132,7 @@ def register(host):
         "pose", "rfdetr", label="RF-DETR keypoints", family="Roboflow", sizes=[],
         types=types17, supports_conf=True,
         note="Roboflow RF-DETR keypoint preview: end-to-end DETR pose, no person detector; "
-             "SOTA-class accuracy at real-time speed on GPU.",
+             "Real-time on GPU.",
         speed="balanced",
         loader=lambda: (lambda c: (lambda img, *a, conf=c, **k: _rf_people(img, conf)))(
             host.model_variant("pose")["conf"]),
@@ -151,4 +151,4 @@ def register(host):
         reason="pip install git+https://github.com/SebastianJanampa/DETRPose.git@inference_only",
         cost_mb=300, gpu=model_registry.on_gpu())
 
-    host.logger.info("roboflow_pose module: registered rfdetr and detrpose (17)")
+    host.logger.info("roboflow_pose module: registered rfdetr and detrpose (17)")

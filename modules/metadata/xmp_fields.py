@@ -216,7 +216,7 @@ CC_FIELDS = [
 # under `unknown`. --
 CRD_FIELDS = [
     XMPField("Description",   TYPE_LANGALT, feeds="description",
-             note="ACR default description. Folded into our description on ingest."),
+             note="ACR default description. Folded into the description on import."),
 
     # crop geometry
     XMPField("CropTop",       TYPE_REAL, note="Normalized top edge (0..1) of kept region."),
@@ -546,13 +546,13 @@ DC_FIELDS = [
     XMPField("creator",     TYPE_STRING, is_list=True,
              note="Artist/author. No artist column yet - surfaced, not folded."),
     XMPField("date",        TYPE_DATE,   is_list=True,
-             note="Initial creation date. No date column yet - surfaced, not folded."),
+             note="Initial creation date."),
     XMPField("description", TYPE_LANGALT, feeds="description",
              note="Folded into our description on ingest."),
     XMPField("format",      TYPE_STRING),
     XMPField("identifier",  TYPE_STRING),
     XMPField("language",    TYPE_STRING, is_list=True,
-             note="If set, image likely has foreign-language text. Surfaced, not folded yet."),
+             note="Set when the image likely has foreign-language text."),
     XMPField("publisher",   TYPE_STRING, is_list=True),
     XMPField("relation",    TYPE_STRING, is_list=True),
     XMPField("rights",      TYPE_LANGALT),
@@ -965,7 +965,7 @@ PRISM_FIELDS = [
     XMPField("PublicationName",      TYPE_STRING),
     XMPField("PublishingFrequency",  TYPE_STRING),
     XMPField("Rating",               TYPE_STRING,
-             note="PRISM content rating (string) - NOT our star rating; read-only."),
+             note="PRISM content rating (string), not the star rating; read-only."),
     XMPField("SamplePageRange",      TYPE_STRING),
     XMPField("Section",              TYPE_STRING),
     XMPField("SellingAgency",        TYPE_STRING),

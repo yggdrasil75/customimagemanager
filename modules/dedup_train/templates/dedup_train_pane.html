@@ -37,7 +37,7 @@
     <label class="trck" title="Use every image in this library as training material. Images are only read, never changed."><input type="checkbox" id="ddt_use_library" checked class="accent-indigo-500"> This library</label>
     <label class="trck" title="Also learn from the pairs you merged or marked 'not a duplicate' in the Dedup panel. They get one extra pass per epoch and their own accuracy column in the report."><input type="checkbox" id="ddt_use_feedback" checked class="accent-indigo-500"> My dedup decisions (<span id="ddt_fb_n">0</span> pairs)</label>
     <label class="trlbl mt-1">Extra dataset folders <span class="text-gray-500">(optional, one per line, scanned recursively)</span></label>
-    <textarea id="ddt_folders" rows="2" class="trinp font-mono" title="Folders of images outside the library to add to the pool (large public dumps make the models generalise better). Saved for next time."
+    <textarea id="ddt_folders" rows="2" class="trinp font-mono" title="Folders of images outside the library to add to the pool."
               placeholder="/data/AVA/images&#10;/data/gelbooru"></textarea>
   </div>
 
@@ -57,27 +57,27 @@
       <div class="tr-field"><label class="trlbl">GPU micro-batch</label><input id="ddt_micro" type="number" value="256" min="0" class="trinp" title="How many pairs are on the GPU at once. Each batch is run in slices of this size with gradients accumulated, then one optimiser step: same result as the full batch, memory of the slice. 0 = whole batch at once. Training memory is the SUM over the ticked sizes at this size (see Benchmark)."></div>
       <div class="tr-field"><label class="trlbl">Learning rate</label><input id="ddt_lr" type="number" value="0.001" step="0.0001" min="0" class="trinp" title="Adam learning rate."></div>
       <div class="tr-field"><label class="trlbl">CPU workers</label><input id="ddt_workers" type="number" value="8" min="1" max="64" class="trinp" title="Processes decoding images into the cache AND generating synthetic pairs while the GPU trains. One per CPU core."></div>
-      <div class="tr-field"><label class="trlbl">Cache side (px)</label><input id="ddt_cache_side" type="number" value="256" min="128" max="512" step="64" class="trinp" title="Images are cached once as a side x side crop at NATIVE resolution (never downscaled). The net is fully convolutional and scores whole images at scan time, so the crop size only sets how much context a training pair carries; 256 is a good default, 512 if RAM allows. Reused by later builds with the same image list."></div>
+      <div class="tr-field"><label class="trlbl">Cache side (px)</label><input id="ddt_cache_side" type="number" value="256" min="128" max="512" step="64" class="trinp" title="Images are cached once as a side x side crop at native resolution, reused by later builds with the same image list. 256 is a good default; 512 if RAM allows."></div>
       <div class="tr-field"><label class="trlbl">Device(s)</label><input id="ddt_device" list="ddt_gpus" class="trinp font-mono" placeholder="auto" title="Blank = first GPU. One device (cuda:1) trains every size there. A list (cuda:0,cuda:1) spreads the ticked sizes over the GPUs, biggest sizes on the first, and trains them at the same time. Or per size: xl=cuda:0,nano=cuda:1. Available GPUs are listed in the status box above."><datalist id="ddt_gpus"></datalist></div>
       <div class="tr-field"><label class="trlbl">Mixed precision</label><select id="ddt_amp" class="trinp" title="Autocast on the GPU. fp16 (with loss scaling) is the fast path on most AMD and Intel GPUs; bf16 on NVIDIA and RDNA3/4 WMMA. Off = float32."><option value="fp16">fp16</option><option value="bf16">bf16</option><option value="">off</option></select></div>
       <div class="tr-field"><label class="trlbl">Seed</label><input id="ddt_seed" type="number" value="0" min="0" class="trinp" title="Random seed; same seed + same inputs = reproducible build."></div>
     </div>
     <div class="tr-flow mt-2">
       <label class="trck" title="Load the whole decoded cache into RAM instead of memory-mapping it (side*side*3 bytes per image: 196 KB at 256 px, 786 KB at 512). Faster if it fits."><input type="checkbox" id="ddt_in_ram" class="accent-indigo-500"> Hold cache in RAM</label>
-      <label class="trck" title="Continue an interrupted build (crash, stop, reboot) from its checkpoint when the file list, sizes, seed and chunk match. A checkpoint is written after every chunk, at most once a minute, and deleted when the build finishes. Untick to start over."><input type="checkbox" id="ddt_resume" checked class="accent-indigo-500"> Resume from checkpoint</label>
+      <label class="trck" title="Continue an interrupted build from its checkpoint when the file list, sizes, seed and chunk match. Untick to start over."><input type="checkbox" id="ddt_resume" checked class="accent-indigo-500"> Resume from checkpoint</label>
       <label class="trck" title="torch.compile the nets (CUDA, or ROCm 6.4+ with Triton for your card). Slower first chunk, faster after. Untick if the build fails right after 'compiling nets'."><input type="checkbox" id="ddt_compile" class="accent-indigo-500"> torch.compile</label>
     </div>
   </details>
 
   <!-- Outputs -->
   <div class="tr-flow">
-    <label class="trck" title="Write every trained size to models/dup_cnn_&lt;size&gt;.pt, copy the active one to models/dup_cnn.pt and reload the running Dedup scorer right away. No restart needed."><input type="checkbox" id="ddt_install" checked class="accent-green-500"> Install for this app (live)</label>
-    <label class="trck" title="Also write modules/dedup_cnn/pretrained/dup_cnn_&lt;size&gt;.pt (+ dup_cnn.pt = active), the copies the module falls back to. Ready to commit and ship."><input type="checkbox" id="ddt_ship" class="accent-indigo-500"> Ship (write modules/dedup_cnn/pretrained)</label>
+    <label class="trck" title="Write every trained size to models/dup_cnn_&lt;size&gt;.pt, copy the active one to models/dup_cnn.pt and reload the running Dedup scorer."><input type="checkbox" id="ddt_install" checked class="accent-green-500"> Install for this app (live)</label>
+    <label class="trck" title="Also write modules/dedup_cnn/pretrained/dup_cnn_&lt;size&gt;.pt (+ dup_cnn.pt = active), the copies the module falls back to."><input type="checkbox" id="ddt_ship" class="accent-indigo-500"> Ship (write modules/dedup_cnn/pretrained)</label>
   </div>
 
   <div class="flex gap-2">
     <button onclick="ddtBuild()" id="ddt_build" class="flex-1 bg-indigo-600 hover:bg-indigo-700 py-2 rounded font-bold text-sm"
-      title="Start training the ticked sizes with the settings above. Runs in the background; progress shows next to the title and in the status bar.">Train dedup models</button>
+      title="Train the ticked sizes with the settings above.">Train dedup models</button>
     <button onclick="ddtStop()" id="ddt_stop" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold text-sm disabled:opacity-40" disabled
       title="Stop the running build. Nothing is written when stopped early.">Stop</button>
   </div>
@@ -88,7 +88,7 @@
       <thead class="text-gray-400"><tr>
         <th class="text-left" title="Size name">size</th>
         <th class="text-right" title="Trainable parameters">params</th>
-        <th class="text-right" title="Inference ms per pair, batch 1 on CPU: the single-board / Pi number">cpu ms</th>
+        <th class="text-right" title="Inference ms per pair, batch 1, CPU">cpu ms</th>
         <th class="text-right" title="Inference ms per pair, batched on the GPU">gpu ms</th>
         <th class="text-right" title="Peak GPU memory of one training step at the chosen batch (this size alone)">train MB</th>
         <th class="text-right" title="Held-out accuracy over all synthetic pair kinds">held-out</th>

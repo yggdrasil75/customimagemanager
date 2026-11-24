@@ -31,7 +31,7 @@
         <span id="tr_withdata" class="text-blue-400">0</span> with data |
         <span id="tr_checked" class="text-green-400">0</span> checked<span id="tr_acc"></span></p>
       <label class="flex items-center gap-2 text-xs text-gray-300 mt-1" data-feature="ai.trainer.keep"
-             title="Gallery-safe: this set only adds boxes, so nothing the gallery relies on is lost. Unsafe: boxes may be removed/replaced - edits stay in the set's isolated copy and are not mirrored back.">
+             title="Gallery-safe: the set only adds boxes. Unsafe: boxes may be removed or replaced; edits stay in the set's own copy.">
         <input id="tr_gallery_safe" type="checkbox" class="accent-green-500" onchange="trSetGallerySafe()">
         <span id="tr_gsafe_label">Gallery-unsafe (isolated copy)</span>
       </label>
@@ -51,7 +51,7 @@
           <span class="text-xs text-gray-400 w-14">From</span>
           <select id="tr_folder" onchange="trFolderChange()"
             class="flex-1 min-w-0 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"
-            title="Copy from one folder (and its subfolders), e.g. a production line's upload folder.">
+            title="Copy from one folder and its subfolders.">
             <option value="">Whole library</option>
           </select>
           <button onclick="trLoadFolders()" class="text-xs text-gray-400 hover:text-gray-200" title="Refresh folder list">&#x21bb;</button>
@@ -91,8 +91,7 @@
         </label>
         <button onclick="trBuildSet()"
           class="w-full bg-indigo-600 hover:bg-indigo-500 py-2 rounded font-bold text-sm">Create set</button>
-        <p class="text-xs text-gray-500">Images are copied into the set's own folder, so editing, adding, or
-          removing boxes never changes your gallery. Recent = latest nx2; diverse = most distinct embeddings.
+        <p class="text-xs text-gray-500">Images are copied into the set's own folder; box edits don't touch your gallery. Recent = latest nx2; diverse = most distinct embeddings.
           YOLO can't use audio.</p>
       </div>
     </details>

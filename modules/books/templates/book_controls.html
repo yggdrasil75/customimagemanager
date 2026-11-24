@@ -1,31 +1,13 @@
-<!-- Book-mode controls pane.
+<!-- Book-mode controls pane: bibliographic metadata, reading progress, tags,
+     description, bookmarks and the comic tools for paged books. The image tabs
+     (EXIF / IPTC / XMP, regions, faces) are hidden in book mode.
 
-     This is the "hide the impossible sections" half of the request. Rather than
-     litter the image editor with conditionals, book mode swaps in its OWN pane
-     body and setMediaMode() hides the tabs that can't apply.
+     Other modules add tools: the book_tools ext area beside the title (metasrc:
+     Lookup) and the registerBookTool() slots (data-book-tools="tags" /
+     "description"; vlm: AI tags and blurb).
 
-     What's gone, and why:
-       EXIF / IPTC / XMP tabs  - those are image container formats. An epub has
-                                 no EXIF. (An OPF has metadata, which is what
-                                 the Book tab below is.)
-       Regions / boxes / pose  - nothing to draw a bounding box on in a text
-                                 flow. Comics DO get panel boxes eventually, but
-                                 that belongs to the image pipeline on extracted
-                                 pages, not here.
-       YOLO / auto-tag / OCR   - same reason. OCR is offered for scanned PDFs
-                                 and comics only (see the Comic block).
-       Faces, quality stars    - no faces in a text file; IQA is a pixel metric.
-       Albums                  - books use Series + Shelves instead.
-
-     What replaces them: bibliographic metadata, reading state, and text tools.
-     Tools come from other modules: the book_tools ext area beside the title
-     (metasrc: Lookup), and the slots below that books.js's registerBookTool()
-     fills (data-book-tools="tags" / "description"; vlm: AI tags and blurb).
-
-     Body only: the core wraps this in #controls_pane_book (register_controls_pane).
-     The file's own embedded metadata is listed read-only in the format tab
-     (book_format.html); this tab is the editable DB copy, which is all a plain
-     text book has. -->
+     Body only: the core wraps this in #controls_pane_book. The file's own
+     embedded metadata is shown read-only in the format tab (book_format.html). -->
   <div id="book_panel" class="flex flex-col gap-3">
 
     <div class="flex justify-between items-center gap-2">
@@ -186,10 +168,6 @@
          than one undifferentiated block of text per page. -->
     <div id="book_comic_tools" class="hidden border-t border-gray-700 pt-2 flex flex-col gap-2">
       <h3 class="font-bold text-indigo-400 text-sm">Comic tools</h3>
-      <p class="text-[10px] text-gray-500">
-        Pages are images, so the image pipeline can run over them. Results are
-        stored per page against the book, not against loose files.
-      </p>
 
       <div id="comic_summary" class="text-[10px] text-gray-400 leading-relaxed"></div>
 
@@ -199,14 +177,13 @@
           <input type="checkbox" id="comic_rtl" class="accent-indigo-500">
           Right-to-left (manga)
         </label>
-        <label class="flex items-center gap-1.5 cursor-pointer" title="Crops and
-          upscales each panel before reading it. Several times slower, but comic
-          lettering is small and full-page OCR often misses it.">
+        <label class="flex items-center gap-1.5 cursor-pointer" title="Reads each panel
+          enlarged. Slower; catches small lettering.">
           <input type="checkbox" id="comic_per_panel" class="accent-indigo-500">
           OCR per panel (slower, more accurate)
         </label>
         <label class="flex items-center gap-1.5 cursor-pointer" title="Redo pages
-          that already have results instead of skipping them.">
+          that already have results.">
           <input type="checkbox" id="comic_force" class="accent-indigo-500">
           Redo pages already done
         </label>

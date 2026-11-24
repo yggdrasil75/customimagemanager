@@ -96,8 +96,7 @@
           placeholder="https://site-a.com/artist&#10;https://site-b.com/artist&#10;https://site-c.com/artist"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white font-mono"></textarea>
         <p class="text-[10px] text-gray-600 mt-1">
-          Each URL becomes its own queue job. Duplicate files across blogs are caught at ingest,
-          so queueing all three is safe. Leave blank to queue the single URL above.
+          Each URL becomes its own queue job. Blank = only the URL above.
         </p>
       </div>
 
@@ -130,7 +129,7 @@
           yt-dlp: <code>{uploader}</code>, <code>{title}</code>, <code>{upload_date}</code>, <code>{id}</code>...), plus
           <code>{original_name}</code> and <code>{ext}</code>. Every segment is a folder
           (<code>music/{uploader}</code>: a folder per uploader) unless the last one has an extension, which
-          names the file, e.g. <code>art/{artist}/{date}/{id}_{original_name}.{ext}</code>. Remembered for next time.
+          names the file, e.g. <code>art/{artist}/{date}/{id}_{original_name}.{ext}</code>.
         </p>
       </div>
 
@@ -172,8 +171,7 @@
           <textarea id="gdl_opts" rows="2" placeholder="danbooru.api-key=...&#10;extractor.timeout=30"
             class="w-full mt-1 p-2 bg-gray-700 rounded border border-gray-600 text-xs text-white font-mono"></textarea>
           <p class="text-[10px] text-gray-600 mt-1">
-            One <code>key=value</code> per line. Global gallery-dl config isn't used, so anything
-            beyond login goes here. Saved with the mapping.
+            One <code>key=value</code> per line. The global gallery-dl config isn't read. Saved with the mapping.
           </p>
         </details>
       </div>

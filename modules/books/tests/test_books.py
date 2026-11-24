@@ -38,9 +38,10 @@ def test_epub_is_shelved_with_metadata(client, epub):
     assert set(b["authors"]) <= authors
 
 
-def test_epub_shows_in_gallery_as_book(client, epub):
-    row = next((f for f in client.get("/api/list").get_json()["files"] if f.get("filename") == epub), None)
-    assert row and row["kind"] == "book"
+def test_epub_stays_out_of_the_gallery(client, epub):
+    """Books are in the Books tab, not between the photos."""
+    assert _book(client, epub)
+    assert not [f for f in client.get("/api/list").get_json()["files"] if f.get("filename") == epub]
 
 
 def test_cover_and_toc(client, epub):

@@ -613,7 +613,7 @@
         </div>
         ${im.is_new ? '' : `<button class="text-xs bg-sky-700 hover:bg-sky-600 px-2 py-1 rounded"
           onclick="event.stopPropagation();trSnap('${im.rel_path.replace(/'/g, "\\'")}')"
-          title="Keep YOUR boxes, but move each to the model's box where they overlap >= Snap IoU, and drop your duplicate boxes. Model-only boxes are not added.">Snap</button>`}
+          title="Keep your boxes, but move each to the model's box where they overlap >= Snap IoU, and drop your duplicate boxes. Model-only boxes are not added.">Snap</button>`}
         <button class="text-xs bg-green-700 hover:bg-green-600 px-2 py-1 rounded"
           onclick="event.stopPropagation();trAccept('${im.rel_path.replace(/'/g, "\\'")}')"
           title="Write the model's predicted boxes as this image's new label">Accept</button>

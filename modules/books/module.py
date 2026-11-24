@@ -143,7 +143,6 @@ def register(host):
                                           "comic_page_names": bi.comic_page_names,
                                           "render_pdf_page": bi.render_pdf_page})
 
-    # Search: contribute book + comic results to the gallery search.
     host.register_search_provider(book_routes.query_books)
     host.register_search_provider(book_routes.query_comics)
 

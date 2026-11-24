@@ -338,7 +338,7 @@ IMAGE_FIELDS = [
     # one artist or a list (newline / semicolon separated)
     EXIFField(0x013b, "Artist", TYPE_STRING, multiline=True,
               note="Primary artist, or a list of artists (one per line); "
-                   "becomes list-type under MWG. Useful for comics"),
+                   "becomes list-type under MWG"),
 
     EXIFField(0x013c, "HostComputer", TYPE_STRING, writable=False,
               note="Creating host computer; read-only"),
@@ -779,8 +779,7 @@ IMAGE_FIELDS = [
                    "as tags at scan time, read-only here"),
     EXIFField(0x9c9f, "XPSubject", TYPE_STRING, writable=False, multiline=True,
               note="Windows Explorer subject; folded into the description JSON "
-                   "at scan time (provenance-tracked; may drive auto box naming "
-                   "later), read-only here"),
+                   "at scan time (provenance-tracked), read-only here"),
 
     # -- Kodak / Hasselblad / HD Photo / Oce / DNG: read-only (MakerNotes skipped) --
     EXIFField(0xafc0, "ExpandSoftware",   TYPE_BINARY, writable=False, note="Kodak; read-only"),
@@ -1180,8 +1179,7 @@ IMAGE_FIELDS = [
     EXIFField(0xcd43, "ColumnInterleaveFactor", TYPE_INT32, writable=False, note="DNG SubIFD; read-only"),
     # camera burst info; comic page order lives in comics.page_order
     EXIFField(0xcd44, "ImageSequenceInfo", TYPE_UNDEF, writable=False,
-              note="DNG burst/sequence info; read-only (comic order lives in "
-                   "comics.page_order, not here)"),
+              note="DNG burst/sequence info; read-only"),
     EXIFField(0xcd46, "ImageStats", TYPE_UNDEF, writable=False, note="DNG; read-only"),
     EXIFField(0xcd47, "ProfileDynamicRange", TYPE_UNDEF, writable=False, note="DNG; read-only"),
     EXIFField(0xcd48, "ProfileGroupName", TYPE_STRING, writable=False, note="DNG; read-only"),
@@ -1257,9 +1255,7 @@ PHOTO_FIELDS = [
               note="Component ordering (Y/Cb/Cr/R/G/B); read-only"),
 
     EXIFField(0x9102, "CompressedBitsPerPixel", TYPE_RATIONAL, generated=True,
-              note="Average bits per pixel of the compressed image. We can "
-                   "compute and set this, especially when recompressing "
-                   "JPEG → JXL"),
+              note="Average bits per pixel of the compressed image"),
 
     EXIFField(0x9201, "ShutterSpeedValue", TYPE_RATIONAL, writable=False,
               note="APEX shutter speed (shown in seconds); read-only"),
@@ -1272,8 +1268,7 @@ PHOTO_FIELDS = [
               note="APEX max aperture (shown as F number); read-only"),
 
     EXIFField(0x9206, "SubjectDistance", TYPE_RATIONAL, generated=True,
-              note="Distance to the subject, in metres. We plan to generate "
-                   "this via depth estimation; exposed here as a generated field"),
+              note="Distance to the subject, in metres"),
 
     EXIFField(0x9207, "MeteringMode", TYPE_INT16, writable=False, values={
         0:   "Unknown",

@@ -179,7 +179,7 @@ touching `media_types.py`.
 | `host.add_table(ddl, kind=, check=)` | own DB tables (created after all modules load; `check(db)` runs once); `kind` is `"cache"`, `"mirrored"` or `"state"` (see "Where data lives") |
 | `host.table_kinds()` | `{table: {"kind", "module_id"}}` for the core tables and every `add_table` table |
 | `host.register_file_enricher(fn)` | attach per-file fields to gallery/list/detail rows |
-| `host.register_search_provider(fn)` / `register_search_type(prefix, handler, help=)` | add results / token handlers to gallery search (`help` shows in Settings -> Info); a token may quote a value with spaces (`location:"north carolina"`), the handler gets it quotes and all |
+| `host.register_search_provider(fn)` / `register_search_type(prefix, handler, help=)` | add results / token handlers to gallery search (`fn(text, folder, filters)` -> entries, on every listing including an empty search; the core interleaves them with the files in the listing's order: by `rel_path` / `filename` / `folder`, or for a `sort:` key by `entry["sort"][key]`, a missing value sorting like a file without one) (`help` shows in Settings -> Info); a token may quote a value with spaces (`location:"north carolina"`), the handler gets it quotes and all |
 | `host.register_pipeline_stage(name, fn, label=)` | an AI-pipeline node type |
 | `host.register_action_target(name, fn)` | an AI-action target (`fn(fp, bgr, meta, action)`) |
 | `host.register_gallery_filter(clause)` | hide container members (comic pages) from the flat gallery |
@@ -318,7 +318,7 @@ later registration. Consumers `get_service(name)` and must handle `None` (the
 provider is off). Current services (`comicinfo` - ComicInfo.xml read / write from the comics
 module - is used by books for comic archives; the metadata ones - `metadata_write`, `exif.write`, `xmp.write`,
 `music.write_meta`, `books.update_meta` - are thin wrappers over `update_file`;
-new code calls `host.update_file` directly): `metadata_write`, `exif` (`read`/`write`), `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`, `sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music` (`write_meta`), `books` (`update_meta`), `xmp` (`write`; `read_gps(abs)` -> (lat, lon) or None from sidecar / EXIF / embedded XMP; `gps(lat, lon, alt=None)` and `date(dt)` format values as XMP write tokens; `capture(abs)` a source file's EXIF capture date + GPS as XMP tokens), `exiv2` (`open(abs)`: use `with open(p) as img:` instead of `pyexiv2.Image(p)` to read a file - it survives malformed XMP, reading a cleaned copy; the handle is read-only then), `metasrc` (metadata source registry: `register(source)`, `http_json`, `http_multipart` - see `metasrc/module.py` for the source contract; each site is its own `metasrc_<site>` module), `llm` (the vlm module's OpenAI-compatible client: `call`, `request`, `encode_image`), `stacks` (`stack_of(rel)`, `create(kind, members, cover=, auto=)`, `match_raw_for(rel)`, `rescan(raw, burst)`), `metadata` (`set_date(rel, dt, offset, fields=None, tz_mode="keep_local", from_offset=None)` writes a taken date into EXIF DateTimeOriginal + OffsetTimeOriginal and the XMP date homes, then re-indexes the d_* buckets; `read_date(abs_path)`; `set_date` is also published alone as `metadata.set_date`), `meta_editor` (`write_location(rel, abs, (lat, lon) | None)`, `write_date(rel, abs, dt, offset)`, `turn(rel, abs, orientation_op)`, `write_crop(rel, abs, crop | None)`, `original_date(rel, abs)`), `geo` (the map module: `refresh(rel)` -> (lat, lon) or None, `rescan()`, `place_of(rel)` -> {city, admin2, admin1, cc, country, continent, source} or None (source "approx": placed from a typed city, no GPS), `resolve([(lat, lon)])` offline place names, `forward([{city, state, country, cc}])` offline approximate positions, `locate(rel)` refresh one file's position and place), `integrity` (`recheck(rel)`, `status()`, `scan(folder)`, `purge(rel)`, `health`), `integrity.health` (`check_file(rel, stale_only=False)`, `check_meta`, `fix_meta(rel)`, `strip_audio`, `progress()`), `encoding` (the core encoding module: `stored_name(filename)`, `target_ext`, `animation_ext`, `encode_jxl(src, out, jpeg_source, threads)`, `convert_image(src, out)`, `convert_av`, `convert_book`, `develop_raw`, `transcode_animation_to_video`, `cjxl_cmd`, `media_prefs()` / `set_media_prefs`, `thumb_params()`).
+
 
 Hierarchical tags: the flat `tags` (dc:subject) hold each keyword's leaf; the path lives in `lr:hierarchicalSubject` ("A|B|C", also read from `digiKam:TagsList` and `mwg-kw`). A tag set as `a/b/c` (or `a|b|c`) is split on save into the leaf tag + the path. The `tag_tree(path, rel_path)` table (mirrored) indexes the paths, `tagpath:a/b` searches a node and everything below it.
 
@@ -680,6 +680,17 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   builder - which writes tokens into the box and parses them back - and
   image search live there),
   `description_tools`, `comic_tools`, `ai_tooling_links`, `controls_tabs`.
+- **A module's own hooks**: a module whose pane other modules may extend
+  publishes its own registration function and needs no core change. The books
+  module does: `registerBookTool(slot, {id, label, url, title, variant, feature,
+  busy})`, slots `tags` and `description` in the book editor (the `book_tools`
+  area beside the title is a core area). The button POSTs `{rel_path}` of the
+  open book to `url`; the reply's `tags` / `description` go into the book
+  editor (autosaved), `message` is shown. Read the book on the server with the
+  `books` service's `content(rel)`. Script order between modules is not fixed,
+  so a user of the hook registers when `window.registerBookTool` exists, else
+  on the `cim:book-tools` window event (see `vlm/static/book_tools.js`); with
+  books off, the hook never appears and nothing is added.
 
 ## Themes
 

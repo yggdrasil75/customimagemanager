@@ -936,6 +936,14 @@ def _published_clause(op: str | None, literal: str):
         return "", []
     return f"({guard} AND substr({col},1,10) {cmp} ?)", [bound]
 
+def _gallery_sort(path: str, **values) -> dict:
+    """! @brief An entry's values for the gallery's sort keys (path and filename from its
+    path); keys left out sort like a file without the value."""
+    out = {"path": path, "filename": path.rsplit("/", 1)[-1].lower()}
+    out.update({k: v for k, v in values.items() if v is not None})
+    return out
+
+
 def query_comics(text: str, folder: str, structured: list | None = None) -> list:
     """!
     @brief Comic cover entries matching the folder scope and free-text search.
@@ -969,6 +977,7 @@ def query_comics(text: str, folder: str, structured: list | None = None) -> list
             "title": r["title"] or r["folder"].split('/')[-1],
             "page_count": len(json.loads(r["page_order"] or "[]")),
             "tags": json.loads(r["tags"] or "[]"),
+            "sort": _gallery_sort(r["folder"], tags=len(json.loads(r["tags"] or "[]"))),
             "width": cw, "height": ch,
         })
     return out
@@ -977,8 +986,9 @@ def query_books(text: str, folder: str, structured: list | None = None) -> list:
     """!
     @brief Book entries matching the folder scope and free-text search.
     @return List of book dicts (kind='book'); [] if the books table is absent.
-    @note Mirrors _query_comics; books live in their own table (not `files`) and
-          are stitched into the same flat list so mixed folders show both.
+    @note Books live in their own table (not `files`); the gallery interleaves
+          them with the files by path, or by the `sort` values given here for the
+          gallery's sort keys.
     """
     if not table_exists(db(), "books"):
         return []
@@ -999,10 +1009,11 @@ def query_books(text: str, folder: str, structured: list | None = None) -> list:
         p += [like] * 5
     where_sql, p = _where(clauses, p)
     rows = db().execute(
-        f"SELECT rel_path,title,authors,kind,fmt,page_count,cover,tags,rating "
+        f"SELECT rel_path,title,authors,kind,fmt,page_count,cover,tags,rating,mtime,published "
         f"FROM books{where_sql} ORDER BY sort_title COLLATE NOCASE", p).fetchall()
     out = []
     for r in rows:
+        tags = json.loads(r["tags"] or "[]")
         out.append({
             "kind": "book",
             "filename": r["rel_path"],
@@ -1013,7 +1024,9 @@ def query_books(text: str, folder: str, structured: list | None = None) -> list:
             "fmt": r["fmt"],
             "page_count": r["page_count"] or 0,
             "has_cover": bool(r["cover"]),
-            "tags": json.loads(r["tags"] or "[]"),
+            "tags": tags,
+            "sort": _gallery_sort(r["rel_path"], mtime=r["mtime"], date=r["published"] or None,
+                                  tags=len(tags)),
             "iqa_score": None,
             # Book covers are 2:3-ish; comics vary. The grid needs *an* aspect
             # ratio up front or every tile reflows once its image loads.
@@ -1191,6 +1204,32 @@ def tag_vocabulary(limit: int = 80) -> list[str]:
     return [t for t, _n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
 
 
+## @brief Columns a shelf search looks in (the file name too: a comic's title is often
+# its ComicInfo issue title, not the series on the file).
+_TEXT_COLS = ("title", "authors", "series", "description", "tags", "subjects", "rel_path")
+
+
+def _text_match(q: str):
+    """! @brief (clauses, params): every word of q appears in one of _TEXT_COLS."""
+    clauses, params = [], []
+    for word in (q or "").split()[:8]:
+        like = "%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        clauses.append("(" + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in _TEXT_COLS) + ")")
+        params += [like] * len(_TEXT_COLS)
+    return clauses, params
+
+
+def _title_matches(q: str, limit: int = 24) -> list:
+    """! @brief Shelf rows matching q by title / author / series / tags / file name."""
+    tc, tp = _text_match(q)
+    if not tc:
+        return []
+    w, wp = _where(tc, tp)
+    rows = _db().execute(f"SELECT * FROM books{w} ORDER BY sort_title COLLATE NOCASE LIMIT ?",
+                         (*wp, limit)).fetchall()
+    return [_row_dict(r) for r in rows]
+
+
 def register(host, ctx: dict):
     # Every books endpoint sits behind tab.books: read = browse/read/annotate
     # your own progress, write = anything that changes the shelf or runs a job.
@@ -1294,12 +1333,9 @@ def register(host, ctx: dict):
         if a.get("folder"):
             clauses.append("rel_path LIKE ?")
             params.append(a["folder"].rstrip("/") + "/%")
-        q = (a.get("q") or "").strip()
-        if q:
-            like = f"%{q}%"
-            clauses.append("(title LIKE ? OR authors LIKE ? OR series LIKE ? "
-                           "OR description LIKE ? OR tags LIKE ? OR subjects LIKE ?)")
-            params += [like] * 6
+        tc, tp = _text_match(a.get("q") or "")
+        clauses += tc
+        params += tp
         where, params = _where(clauses, params)
 
         sort = {"title": "sort_title COLLATE NOCASE",
@@ -1684,10 +1720,15 @@ def register(host, ctx: dict):
         limit = min(100, int(d.get("limit", 30)))
         if not q:
             return jsonify({"success": False, "error": "empty query"})
+        # books whose title / author / file name match come back too, so a passage
+        # search never hides "Hulk" from someone who has comics called that
+        matches = _title_matches(q)
+
+        def _no_passages(why):
+            return jsonify({"success": True, "matches": matches, "results": [], "note": why})
         if not ctx["embed_enabled"]():
-            return jsonify({"success": False,
-                            "error": "Semantic search needs a text embedding model "
-                                     "(Settings → Models → Text embedding)."})
+            return _no_passages("Passage search needs a text embedding model "
+                                "(Settings > Models > Text embedding).")
         sig = bi.emb_sig(ctx["embed_tag"]())
         db = _db()
         n = db.execute("SELECT COUNT(*) n FROM book_chunks WHERE emb_sig=? "
@@ -1696,15 +1737,12 @@ def register(host, ctx: dict):
             other = db.execute("SELECT DISTINCT emb_sig FROM book_chunks "
                                "LIMIT 1").fetchone()
             if other:
-                return jsonify({"success": False,
-                                "error": f"Stored passage vectors use "
-                                         f"'{other['emb_sig']}', not the current "
-                                         f"model. Re-embed to search."})
-            return jsonify({"success": False,
-                            "error": "No passage embeddings yet - run Embed."})
+                return _no_passages(f"Stored passage vectors use '{other['emb_sig']}', not "
+                                    f"the current model. Re-embed to search passages.")
+            return _no_passages("No passage embeddings yet - run Embed.")
         qv = (ctx.get("embed_query") or ctx["embed_text"])(q)
         if qv is None:
-            return jsonify({"success": False, "error": "failed to embed the query"})
+            return _no_passages("Could not embed the query.")
 
         w, wp = _where(["emb_sig=?", "emb IS NOT NULL"], [sig])
         rows = db.execute(
@@ -1729,7 +1767,7 @@ def register(host, ctx: dict):
             e["score"] = round(info["score"], 4)
             e["passages"] = info["passages"]
             out.append(e)
-        return jsonify({"success": True, "results": out})
+        return jsonify({"success": True, "matches": matches, "results": out})
 
     @host.route("/api/books/delete", methods=["POST"], feature="tab.books", level="write",
                 action="book_delete", fields=("rel_path", "keep_file"))

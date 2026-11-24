@@ -82,9 +82,7 @@
            row per capability the broker knows, with family / size / type
            selects (greyed out when a provider offers a single choice) and any
            widgets the selected provider registered. Core knows no providers. -->
-      <p class="text-[10px] text-gray-500 mb-2">Each capability is served by whichever
-        module you pick here. Family = which module/generation, size and type = that
-        model's own variants. Extra fields belong to the selected model.</p>
+      <p class="text-[10px] text-gray-500 mb-2">Pick the model for each job. Family = module / generation; size and type = that model's variants.</p>
       <div id="model_capabilities" class="space-y-2"></div>
       <div id="module_settings_fields_models" class="grid grid-cols-3 gap-x-4 gap-y-2 mt-3"></div>
     </div>
@@ -131,8 +129,7 @@
       <section class="border-t border-gray-700 mt-3 pt-3">
         <h3 class="font-bold text-amber-300 text-sm mb-2">Limits</h3>
         <div id="module_settings_fields_storage_limits" data-compact class="settings-compact"></div>
-        <p class="text-[11px] text-gray-500 mt-1">Fetch pauses and browser uploads wait while a limit is hit, and
-          carry on by themselves once space is freed. Files already in the upload spool keep being added.</p>
+        <p class="text-[11px] text-gray-500 mt-1">Fetch pauses and browser uploads wait while a limit is hit, and resume when space is freed. Files already in the upload spool keep being added.</p>
       </section>
       <!-- Alerts (the storage_alerts module): its fields render compact here
            (pane="storage", section="alerts"); its declared settings section

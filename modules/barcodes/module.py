@@ -135,6 +135,6 @@ def register(host):
     host.add_button("ai_tools", "barcodes", "Scan barcodes", url="/api/barcodes", feature="ai.barcodes",
                     variant="warn", busy="Scanning...", on_done="apply",
                     title="Detect barcodes and QR codes with the configured YOLO model, then decode each one. "
-                          "Codes that are found but can't be read are still marked, so you keep a note of where they are.")
+                          "Codes that can't be read are still marked.")
 
     host.logger.info("barcodes module: registered /api/barcodes")

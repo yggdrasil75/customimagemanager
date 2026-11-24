@@ -88,7 +88,7 @@
     if (f.feeds) {
       feeds.textContent = `→ ${f.feeds}`;
       feeds.classList.add("xmp-feeds-" + f.feeds);
-      feeds.title = `Folded into our ${f.feeds} field on ingest`;
+      feeds.title = `Folded into the ${f.feeds} field on import`;
     } else {
       feeds.textContent = "";
     }

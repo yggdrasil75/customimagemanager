@@ -1201,7 +1201,7 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
             if callable(expr):
                 expr = expr()
             if expr:
-                structured.append(("sort", expr, desc))
+                structured.append(("sort", expr, desc, key))
             continue
         if low == 'is:untagged':
             where.append("(tags IS NULL OR tags='' OR tags='[]')")
@@ -1282,10 +1282,105 @@ def _files_count(where_sql: str, params: list) -> int:
             _count_cache.popitem(last=False)
     return n
 
+def _split_top_level(expr: str) -> list:
+    """! @brief An ORDER BY expression split on its top-level commas."""
+    parts, depth, quote, cur = [], 0, None, ""
+    for ch in expr:
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(cur.strip())
+            cur = ""
+            continue
+        cur += ch
+    parts.append(cur.strip())
+    return [x for x in parts if x]
+
+
+def _sort_spec(structured) -> list:
+    """! @brief The gallery's `sort:` tokens as [(key, value_expr, desc, nulls_last, nocase)].
+    A key's expression is its value, optionally led by an "(x IS NULL)" part that
+    puts files without a value last; otherwise NULLs sort as SQLite does (first
+    ascending, last descending)."""
+    spec = []
+    for s in structured:
+        if s[0] != "sort":
+            continue
+        parts = _split_top_level(s[1])
+        value = parts[-1]
+        nulls_last = bool(s[2]) or any(x.replace(" ", "").upper().endswith("ISNULL)") for x in parts[:-1])
+        nocase = value.upper().replace(" ", "").endswith("COLLATENOCASE")
+        spec.append((s[3] if len(s) > 3 else "", value, bool(s[2]), nulls_last, nocase))
+    return spec
+
+
+def _sql_rank(v):
+    """! @brief SQLite's ordering of storage classes: NULL < numbers < text < blobs."""
+    if v is None:
+        return 0
+    if isinstance(v, (bool, int, float)):
+        return 1
+    if isinstance(v, str):
+        return 2
+    return 3
+
+
+def _sort_cmp(spec, a, b) -> int:
+    """! @brief Compare two (values, path) keys the way ORDER BY <spec>, rel_path does."""
+    for (_k, _e, desc, nulls_last, nocase), x, y in zip(spec, a[0], b[0]):
+        if nocase:
+            x = x.lower() if isinstance(x, str) else x
+            y = y.lower() if isinstance(y, str) else y
+        if x is None or y is None:
+            if x is None and y is None:
+                continue
+            first = x is None                 # x is the NULL one
+            return (1 if first else -1) if nulls_last else (-1 if first else 1)
+        rx, ry = _sql_rank(x), _sql_rank(y)
+        if rx != ry or x != y:
+            lt = rx < ry if rx != ry else x < y
+            c = -1 if lt else 1
+            return -c if desc else c
+    return (a[1] > b[1]) - (a[1] < b[1])
+
+
+def _files_before(where_sql: str, params: list, spec: list, key) -> int:
+    """! @brief How many files of the query sort before a (values, path) key."""
+    vals, path = key
+    pred, pp = "files.rel_path < ?", [path]
+    for (_k, expr, desc, nulls_last, _nc), v in reversed(list(zip(spec, vals))):
+        if v is None:
+            before = f"({expr}) IS NOT NULL" if nulls_last else "0"
+            eq, ep, bp = f"({expr}) IS NULL", [], []
+        else:
+            op = ">" if desc else "<"
+            before = f"(({expr}) {op} ?)" if nulls_last else f"(({expr}) IS NULL OR ({expr}) {op} ?)"
+            eq, ep, bp = f"({expr}) = ?", [v], [v]
+        pred, pp = f"({before} OR ({eq} AND {pred}))", bp + ep + pp
+    w = f"{where_sql} AND {pred}" if where_sql else f" WHERE {pred}"
+    return _db().execute(f"SELECT COUNT(*) FROM files{w}", (*params, *pp)).fetchone()[0]
+
+
+def _entry_key(spec, e):
+    """! @brief Where a module's search result sorts: its `sort` values for the gallery's
+    sort keys (missing = NULL), then its path."""
+    sv = e.get("sort") or {}
+    path = e.get("sort_path") or e.get("rel_path") or e.get("filename") or e.get("folder") or ""
+    return tuple(sv.get(k) for k, *_ in spec), path
+
+
 def _query_files(search: str, offset: int, limit: int,
                  folder: str = '', album: str = '') -> tuple[list, int]:
-    """! @brief One gallery page: module results (books, comics: one tile each) first,
-    then images.
+    """! @brief One gallery page: images and module results (books, comics: one tile
+    each) interleaved in the query's order.
+    Module results sort by path, or by the value they give for each `sort:` key in
+    entry["sort"] (missing = NULL, like a file without one).
     @param album  only that album's images; module results are left out.
     @return (entries, total); entries carry kind "comic" | "book" | "image".
     """
@@ -1299,37 +1394,57 @@ def _query_files(search: str, offset: int, limit: int,
         # an open album uses its own sort unless the search names one
         order, order_p = _album_order(album)
     order_sql = f"{order}, rel_path" if order else "rel_path"
-    comic_entries = []
+    extra = []
     if not album and 'module_host' in globals():
         for prov in getattr(module_host, "search_providers", []):
             try:
-                comic_entries += prov(text, folder, filters) or []
+                extra += prov(text, folder, filters) or []
             except Exception as e:
                 access_logger.error(f"search provider failed: {e}")
-    nc = len(comic_entries)
-
+    nc = len(extra)
     total_files = _files_count(where_sql, p)
     total = nc + total_files
 
-    entries = []
-    if offset < nc:
-        entries.extend(comic_entries[offset:offset + limit])
-    need = limit - len(entries)
-    if need > 0:
-        file_offset = max(0, offset - nc)
-        rows = _db().execute(
-            f"SELECT rel_path, tags, description, width, height "
-            f"FROM files{where_sql} "
-            f"ORDER BY {order_sql} LIMIT ? OFFSET ?", (*p, *order_p, need, file_offset)).fetchall()
-        batch = []
-        for r in rows:
-            batch.append({"kind": "image", "filename": r["rel_path"],
-                          "tags": json.loads(r["tags"] or "[]"),
-                          "description": r["description"] or "",
-                          "width": r["width"] or 0, "height": r["height"] or 0})
-        # module fields (rating, ...) from the registered enrichers
-        module_host.enrich_file_rows(_db(), batch)
-        entries.extend(batch)
+    spec = _sort_spec(structured) if not album else []
+    keyed = sorted(((_entry_key(spec, e), e) for e in extra),
+                   key=functools.cmp_to_key(lambda a, b: _sort_cmp(spec, a[0], b[0])))
+    # results before the page: the first i whose place (i + files before it) is at or
+    # past the offset; a place only grows with i, so a binary search finds it
+    lo, hi = 0, (nc if offset > 0 else 0)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if mid + _files_before(where_sql, p, spec, keyed[mid][0]) >= offset:
+            hi = mid
+        else:
+            lo = mid + 1
+    before = lo
+    file_offset = max(0, offset - before)
+
+    vcols = "".join(f", {v} AS _sk{i}" for i, (_k, v, *_r) in enumerate(spec))
+    rows = _db().execute(
+        f"SELECT rel_path, tags, description, width, height{vcols} "
+        f"FROM files{where_sql} "
+        f"ORDER BY {order_sql} LIMIT ? OFFSET ?", (*p, *order_p, limit, file_offset)).fetchall()
+    batch = []
+    for r in rows:
+        batch.append({"kind": "image", "filename": r["rel_path"],
+                      "tags": json.loads(r["tags"] or "[]"),
+                      "description": r["description"] or "",
+                      "width": r["width"] or 0, "height": r["height"] or 0})
+    # module fields (rating, ...) from the registered enrichers
+    module_host.enrich_file_rows(_db(), batch)
+
+    entries, i, j, rest = [], 0, 0, keyed[before:]
+    while len(entries) < limit and (i < len(batch) or j < len(rest)):
+        take_file = j >= len(rest) or (i < len(batch) and _sort_cmp(
+            spec, (tuple(rows[i][f"_sk{n}"] for n in range(len(spec))), rows[i]["rel_path"]),
+            rest[j][0]) <= 0)
+        if take_file:
+            entries.append(batch[i])
+            i += 1
+        else:
+            entries.append(rest[j][1])
+            j += 1
     return entries, total
 
 _MEDIA_ABS = os.path.abspath(MEDIA_DIR)
@@ -8441,8 +8556,7 @@ module_host.add_settings_field(
 module_host.add_settings_field(
     key="upload_janitor_minutes", label="Upload spool clean-up (minutes)", kind="number",
     section="system",
-    help="At most this often (and only when there is something to do) the spool janitor "
-         "retries failed uploads, removes finished ones and drops expired sessions.")
+    help="How often failed uploads are retried, finished ones removed and expired sessions dropped.")
 # storage limits (Settings -> Storage, "Limits"): what this app may hold in total, and the free
 # space downloads keep on the drive. Both stop new data coming in (fetch, browser uploads);
 # the upload spool keeps ingesting, since its files are already here.
@@ -8455,8 +8569,8 @@ modules.config.declare("library_max_gb", default=0, owner="core",
 module_host.add_settings_field(
     key="library_max_gb", label="Max total size (GB)", kind="number", pane="storage", section="limits",
     help="Everything this app stores: library files (media and tiers), database, thumbnails, video copies, "
-         "re-encode backups, trash. When reached, fetch pauses and browser uploads wait; both resume by "
-         "themselves when space is freed. 0 = no limit.")
+         "re-encode backups, trash. When reached, fetch pauses and browser uploads wait until space is "
+         "freed. 0 = no limit.")
 module_host.add_settings_field(
     key="min_free_gb", label="Keep free on the drive (GB)", kind="number", pane="storage", section="limits",
     help="Fetch and model downloads pause while the drive has less free space than this "

@@ -231,7 +231,7 @@ def register(host):
                  "cy": float(b["cy"]), "w": float(b["w"]), "h": float(b["h"])} for b in boxes]
     host.provide_model("detect", "vlm", prompted=True, loader=lambda: _detect,
                        note="Open vocabulary: finds whatever you describe. Slow and API-bound; "
-                            "boxes are rough. Foreground only - it has nothing to run without a prompt.",
+                            "boxes are rough. Foreground only (needs a prompt).",
                        settings=_settings("detect", "Used when the caller gives no query."), **common)
 
     # -- classify: pick from the app's class list ---------------------------
@@ -325,7 +325,7 @@ def register(host):
         return {"raw": q, "quality": q, "reason": str(res.get("reason", ""))[:200]}
     host.provide_model("iqa", "vlm", loader=lambda: _iqa,
                        note="Asks the model for a 0..1 quality judgement. Slow, subjective and "
-                            "not comparable across models - a fallback, not a metric.",
+                            "not comparable across models .",
                        settings=_settings("iqa", "Ask for JSON with a 0..1 'quality'."), **common)
 
     ## @brief  ocr: transcription (boxes are rough; omitted when the model can't place them)
@@ -344,7 +344,7 @@ def register(host):
         return {"text": " ".join(l["text"] for l in lines), "lines": lines}
     host.provide_model("ocr", "vlm", loader=lambda: _ocr,
                        note="Reads text with the chat model. Handles handwriting and context the "
-                            "engines miss; boxes are rough or absent, and it costs a call.",
+                            "engines miss; boxes are rough or absent.",
                        settings=_settings("ocr", "Ask for JSON lines with normalised boxes."), **common)
 
     # The editor's AI picker: the (user-editable) prompt actions, each under

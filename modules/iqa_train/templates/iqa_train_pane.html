@@ -8,10 +8,7 @@
       <span class="font-bold text-indigo-300">Pretrain Personal IQA (scorer sizes)</span>
       <span id="iqt_phase" class="text-xs text-gray-400">idle</span>
     </div>
-    <p class="text-xs text-gray-500 mt-1">Each dataset image goes through the same feature pipeline the personal
-      scorer uses (encoder embed + tiles, faces, pose, base IQA, tags) and is cached, then every size you tick is
-      fitted on the same samples and scored on a hold-out against the base IQA. The active size becomes the
-      personal scorer; your own Retrain later fine-tunes it on your star ratings.</p>
+    <p class="text-xs text-gray-500 mt-1">Dataset images run through the personal scorer's feature pipeline (embeddings, faces, pose, base IQA, tags) and are cached; each ticked size is trained on them and scored on a hold-out against the base IQA. The active size becomes the personal scorer, and Retrain fine-tunes it on your star ratings.</p>
   </div>
 
   <div id="iqt_live" class="text-xs bg-gray-900 border border-gray-800 rounded p-2 text-gray-300 whitespace-pre-wrap"></div>
@@ -41,7 +38,7 @@
   </div>
 
   <div>
-    <label class="trlbl">Required per image <span class="text-gray-500">(models that must have RUN on it; finding nothing is fine, so non-human photos train too)</span></label>
+    <label class="trlbl">Required per image <span class="text-gray-500">(models that must have run on it; finding nothing counts)</span></label>
     <div id="iqt_required" class="tr-flow">
       <label class="trck" title="Encoder embedding of the whole image + 3x3 tiles (content)."><input type="checkbox" data-req="embed" checked class="accent-indigo-500"> embed</label>
       <label class="trck" title="Base no-reference IQA score (blur, noise, splotches: the technical quality signal)."><input type="checkbox" data-req="iqa" checked class="accent-indigo-500"> base IQA</label>
@@ -53,8 +50,8 @@
   </div>
 
   <div class="tr-flow">
-    <div class="tr-field"><label class="trlbl">Max images</label><input id="iqt_max" type="number" value="100000" min="20" class="trinp" title="Cap on labelled images used (in label-file order). Feature extraction is the slow part; results are cached so a rerun only pays for new images."></div>
-    <div class="tr-field"><label class="trlbl">Epochs</label><input id="iqt_epochs" type="number" value="10" min="1" class="trinp" title="Full passes over the cached features, per size. Cheap compared with feature extraction."></div>
+    <div class="tr-field"><label class="trlbl">Max images</label><input id="iqt_max" type="number" value="100000" min="20" class="trinp" title="Cap on labelled images used (in label-file order). Features are cached, so a rerun only extracts new images."></div>
+    <div class="tr-field"><label class="trlbl">Epochs</label><input id="iqt_epochs" type="number" value="10" min="1" class="trinp" title="Full passes over the cached features, per size."></div>
     <div class="tr-field"><label class="trlbl">Batch</label><input id="iqt_batch" type="number" value="64" min="4" class="trinp" title="Samples per optimiser step."></div>
     <div class="tr-field"><label class="trlbl">Learning rate</label><input id="iqt_lr" type="number" value="0.001" step="0.0001" min="0" class="trinp" title="AdamW learning rate."></div>
     <div class="tr-field"><label class="trlbl">Hold-out %</label><input id="iqt_holdout" type="number" value="10" min="1" max="50" class="trinp" title="Percent of images held out by path hash to report MSE and Spearman against the base IQA."></div>
@@ -66,9 +63,9 @@
 
   <div class="flex gap-2">
     <button onclick="iqtBuild()" id="iqt_build" class="flex-1 bg-indigo-600 hover:bg-indigo-700 py-2 rounded font-bold text-sm"
-      title="Extract/cache features for the datasets, then train the ticked sizes. Runs in the background; progress shows next to the title and in the status bar.">Pretrain IQA models</button>
+      title="Extract and cache features for the datasets, then train the ticked sizes.">Pretrain IQA models</button>
     <button onclick="iqtPack()" id="iqt_pack" class="bg-sky-700 hover:bg-sky-600 px-3 py-2 rounded font-bold text-sm"
-      title="Extract/cache features only and write a self-contained pack (models/personal_iqa/iqa/packs/<name>.pt) with the per-stage timing profile. Train it anywhere with modules/iqa_train/train_pack.py (rented GPU box: needs torch + net.py, not the app).">Pack features</button>
+      title="Extract/cache features only and write a self-contained pack (models/personal_iqa/iqa/packs/<name>.pt) with the per-stage timing profile. Train it elsewhere with modules/iqa_train/train_pack.py (needs torch and net.py, not the app).">Pack features</button>
     <button onclick="iqtStop()" id="iqt_stop" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold text-sm disabled:opacity-40" disabled
       title="Stop the running build. Cached features are kept; nothing else is written.">Stop</button>
   </div>

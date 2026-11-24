@@ -432,8 +432,7 @@ def register(host):
         settings=[{"key": "face_weights", "label": "Custom weights", "kind": "select",
                    "options": lambda: (_faces().get("detector_options") or (lambda: []))(),
                    "help": "Blank = stock yolo-face weights for the picked size."}],
-        note="akanametov yolo-face weights. Nano misses small/profile faces - the ones "
-             "cluster density depends on; go larger if you can afford it.",
+        note="akanametov yolo-face weights. Nano misses small and profile faces; larger sizes find more.",
         loader=_face_loader, transform=None,
         available=lambda: _avail() and bool(_faces()),
         reason="ultralytics not installed, or the Faces module (which holds the weights) is off",

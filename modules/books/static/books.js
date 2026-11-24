@@ -279,11 +279,25 @@ async function booksSemanticSearch(q) {
     list.innerHTML = `<div class="text-amber-400 text-sm p-4">${_esc(d.error)}</div>`;
     return;
   }
-  if (!d.results.length) {
-    list.innerHTML = '<div class="text-gray-500 text-sm p-4">Nothing matched.</div>';
+  const matches = d.matches || [], results = d.results || [];
+  if (!matches.length && !results.length) {
+    list.innerHTML = `<div class="text-gray-500 text-sm p-4">Nothing matched.${
+      d.note ? `<div class="text-amber-400 text-xs mt-1">${_esc(d.note)}</div>` : ''}</div>`;
+    _bq('books_pager')?.classList.add('hidden');
     return;
   }
-  list.innerHTML = d.results.map(b => `
+  const open = rp => `openBook('${_esc(rp).replace(/'/g, "\\'")}')`;
+  const head = matches.length ? `
+    <div class="mb-3 border border-gray-800 rounded overflow-hidden">
+      ${matches.map(b => `
+        <div onclick="${open(b.rel_path)}"
+             class="px-3 py-1.5 hover:bg-gray-800 cursor-pointer flex items-center gap-2 text-sm">
+          <span class="truncate flex-1">${_esc(b.title || b.rel_path)}</span>
+          <span class="text-[10px] text-gray-500 truncate max-w-[40%]">${_esc((b.authors || []).join(', '))}</span>
+        </div>`).join('')}
+    </div>` : '';
+  const note = d.note ? `<div class="text-amber-400 text-xs px-1 pb-2">${_esc(d.note)}</div>` : '';
+  list.innerHTML = head + note + results.map(b => `
     <div class="mb-3 border border-gray-800 rounded overflow-hidden">
       <div onclick="openBook('${_esc(b.rel_path).replace(/'/g, "\\'")}')"
            class="px-3 py-2 bg-gray-800 hover:bg-gray-750 cursor-pointer flex items-center gap-2">
@@ -609,7 +623,6 @@ async function booksFindSimilar() {
   const seed = [currentBook.title, (currentBook.authors || []).join(' '),
                 currentBook.description].filter(Boolean).join('. ').slice(0, 800);
   _bq('books_search').value = seed.slice(0, 80);
-  _bq('books_semantic').checked = true;
   booksSemanticSearch(seed);
 }
 
@@ -729,8 +742,7 @@ async function _comicRun(mode) {
   if (mode === 'ocr') {
     const s = await _comicSummary();
     if (s && !s.with_panels) {
-      if (!confirm('No panels detected yet. OCR will still read the text, but '
-                 + 'nothing will be grouped by panel.\n\nRun panel detection first?')) {
+      if (!confirm('No panels detected yet. Detect panels first?')) {
         // fall through and OCR anyway
       } else {
         return _comicRun('both');
