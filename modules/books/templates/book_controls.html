@@ -18,6 +18,9 @@
        Albums                  - books use Series + Shelves instead.
 
      What replaces them: bibliographic metadata, reading state, and text tools.
+     Tools come from other modules: the book_tools ext area beside the title
+     (metasrc: Lookup), and the slots below that books.js's registerBookTool()
+     fills (data-book-tools="tags" / "description"; vlm: AI tags and blurb).
 
      Body only: the core wraps this in #controls_pane_book (register_controls_pane).
      The file's own embedded metadata is listed read-only in the format tab
@@ -138,7 +141,11 @@
     <div>
       <div class="flex justify-between items-center mb-1">
         <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Tags</label>
-        <span id="book_tag_count" class="text-[10px] text-gray-500"></span>
+        <div class="flex items-center gap-1">
+          <span id="book_tag_count" class="text-[10px] text-gray-500"></span>
+          <!-- tag tools from other modules (AI tags: vlm) -->
+          <span data-book-tools="tags" class="flex items-center gap-1"></span>
+        </div>
       </div>
       <div id="book_tag_list"
         class="max-h-40 overflow-y-auto bg-gray-900 border border-gray-600 rounded p-1 flex flex-col gap-0.5"></div>
@@ -156,9 +163,8 @@
     <div>
       <div class="flex justify-between items-center mb-1">
         <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Description</label>
-        <button onclick="booksSummarize()" id="btn_book_summarize"
-          title="Summarise this book with the configured LLM"
-          class="text-xs bg-amber-600 hover:bg-amber-500 px-2 py-0.5 rounded font-bold">AI</button>
+        <!-- description tools from other modules (AI blurb: vlm) -->
+        <span data-book-tools="description" class="flex items-center gap-1"></span>
       </div>
       <textarea id="book_description" rows="5" oninput="booksAutosave()"
         class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>

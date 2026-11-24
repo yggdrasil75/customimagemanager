@@ -14,12 +14,16 @@ Each provider ships a default prompt as an editable setting that shows in
 the Models tab only while this provider is the pick for that capability.
 A runtime prompt (an AI action's text, a detect query) overrides it.
 Uses this module's own OpenAI-compatible client (client.py).
+
+Books: AI tags and AI blurb buttons in the book editor, added through the books
+module's registerBookTool hook when it is there, reading the book through the
+`books` service (book_tools.py, static/book_tools.js).
 """
 import time
 
 from flask import jsonify
 
-from . import client, actions
+from . import client, actions, book_tools
 
 MANIFEST = {
     "id":          "vlm",
@@ -30,7 +34,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "assets":      ["actions.js"],
+    "assets":      ["actions.js", "book_tools.js"],
 }
 
 _PROMPTS = {
@@ -138,6 +142,7 @@ def register(host):
         {"success": True, "actions": host.config.get("oai_actions", [])}),
         endpoint="vlm_ai_actions", feature="ai.llm")
     host.add_asset("actions.js")
+    host.add_asset("book_tools.js")
     # The actions editor is custom UI: give the module a settings tab and let
     # actions.js draw the editor into it (module-settings-tab event).
     host.add_settings_tab("vlm", "AI actions", admin_only=True)
@@ -199,6 +204,9 @@ def register(host):
     def _configured():
         return bool((host.config.get("oai_endpoint") or "").strip()
                     and (host.config.get("oai_model") or "").strip())
+
+    # AI buttons in the book editor (the books module's ext areas)
+    book_tools.register(host, _configured)
 
     def _prompt(cap, runtime=""):
         return (runtime or "").strip() or (host.config.get(f"vlm_prompt_{cap}") or "").strip() \

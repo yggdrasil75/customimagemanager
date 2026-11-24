@@ -118,7 +118,16 @@ function readerEmptyAction() {
  * FLOW READER
  * ========================================================================== */
 
-async function showSection(idx, fraction) {
+/** @brief True when a rendered section has nothing to read: no picture and no text
+ *  beyond a stub label like "COVER" (books extracted before such pages were dropped). */
+function _isPlaceholderSection(box) {
+  if (box.querySelector('img')) return false;
+  const t = (box.textContent || '').trim().toLowerCase();
+  return !t || ['cover', 'front cover', 'back cover', 'title page', 'titlepage',
+                'image', 'illustration', 'untitled'].includes(t);
+}
+
+async function showSection(idx, fraction, dir) {
   if (!readerBook) return;
   idx = Math.max(0, Math.min(readerSectionCount - 1, idx));
   const r = await fetch(`/api/books/section/${encodeURI(readerBook.rel_path)}?idx=${idx}`);
@@ -132,13 +141,31 @@ async function showSection(idx, fraction) {
   readerSectionCount = d.total || readerSectionCount;
 
   // The HTML is sanitized server-side (book_index.sanitize_html), which is why
-  // it can go in directly. Images inside epubs point at zip-internal paths we
-  // don't serve, so they're neutralised rather than left as broken icons.
-  box.innerHTML = (d.title ? `<h2 class="text-lg font-bold mb-4">${d.title}</h2>` : '')
-                  + d.html;
+  // it can go in directly. An epub's own pictures arrive rewritten to
+  // /api/books/asset/...; any other relative src points into a zip we don't
+  // serve, so it's dropped rather than left as a broken icon.
+  box.innerHTML = d.html;
   box.querySelectorAll('img').forEach(img => {
-    if (!/^https?:|^data:/.test(img.getAttribute('src') || '')) img.remove();
+    const src = img.getAttribute('src') || '';
+    if (!/^https?:|^data:|^\/api\/books\/asset\//.test(src)) img.remove();
+    else img.style.maxWidth = '100%';
   });
+  // An empty stub page (a lone "COVER") is skipped in the direction of travel.
+  if (_isPlaceholderSection(box)) {
+    const step = dir || (fraction > 0.5 ? -1 : 1);
+    const next = idx + step;
+    if (next >= 0 && next < readerSectionCount) return showSection(next, fraction, step);
+  }
+  // The section title is only added when the text has no heading of its own
+  // (no "Chapter 1" twice) and there is text at all (a cover picture gets no
+  // "Cover" caption over it).
+  const hasText = (box.textContent || '').trim().length > 0;
+  if (d.title && hasText && !box.querySelector('h1,h2,h3')) {
+    const h = document.createElement('h2');
+    h.className = 'text-lg font-bold mb-4';
+    h.textContent = d.title;
+    box.prepend(h);
+  }
 
   box.scrollTop = 0;
   box.scrollLeft = 0;

@@ -613,29 +613,85 @@ async function booksFindSimilar() {
   booksSemanticSearch(seed);
 }
 
-async function booksSummarize() {
-  if (!currentBook) return;
-  const st = _bq('book_status_text');
-  if (st) st.textContent = 'Asking the LLM...';
-  // NOT /api/run_llm - that one decodes the file as an image first, which is
-  // exactly wrong for an epub. /api/books/summarize sends sampled TEXT instead.
+/* ==========================================================================
+ * BOOK TOOLS - other modules' buttons in the book editor
+ *
+ * The books module runs no tools itself. It offers slots in its editor and a
+ * registration hook; a module that has something to offer (the vlm module's AI
+ * tags and blurb) sees the hook and adds its buttons:
+ *
+ *   registerBookTool('tags', {id, label, url, title, variant, feature, busy})
+ *   slots: 'tags' (beside Tags), 'description' (beside Description)
+ *
+ * The button POSTs {rel_path} of the open book to `url`. The reply's `tags` are
+ * merged into the book's tags, its `description` added to the book's, and the
+ * usual autosave writes them; `message` is shown, `error` reported. A module
+ * whose script runs before this one listens for `cim:book-tools` on window.
+ * ========================================================================== */
+
+const _bookTools = {};
+
+function registerBookTool(slot, spec) {
+  const box = document.querySelector(`[data-book-tools="${slot}"]`);
+  if (!box || !spec || !spec.id || !spec.url) return false;
+  _bookTools[spec.id] = spec;
+  box.querySelector(`[data-book-tool="${spec.id}"]`)?.remove();
+  const tmp = document.createElement('span');
+  tmp.innerHTML = cimButton({ size: 'xs', variant: spec.variant || 'secondary', label: spec.label,
+                              title: spec.title, feature: spec.feature,
+                              attrs: { 'data-book-tool': spec.id },
+                              onclick: `booksRunTool('${String(spec.id).replace(/[^\w-]/g, '')}', this)` });
+  const btn = tmp.firstElementChild;
+  box.appendChild(btn);
+  if (typeof applyFeatureVisibility === 'function') applyFeatureVisibility(box);
+  return true;
+}
+window.registerBookTool = registerBookTool;
+
+async function booksRunTool(id, el) {
+  const spec = _bookTools[id];
+  if (!spec) return;
+  if (!currentBook) { showToast('Open a book first.'); return; }
+  const rp = currentBook.rel_path;
+  const og = el ? el.textContent : '';
+  if (el) { el.disabled = true; el.textContent = spec.busy || '...'; }
   try {
-    const r = await fetch('/api/books/summarize', {
+    const d = await fetch(spec.url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rel_path: currentBook.rel_path })
-    });
-    const d = await r.json();
-    if (d.success && d.description) {
-      _bq('book_description').value = d.description;
-      booksAutosave();
-      if (st) st.textContent = 'Summarised.';
-    } else if (st) {
-      st.textContent = d.error || 'No summary returned.';
-    }
-  } catch (e) {
-    if (st) st.textContent = 'LLM call failed.';
+      body: JSON.stringify({ rel_path: rp })
+    }).then(r => r.json()).catch(() => ({ success: false, error: 'network error' }));
+    if (!currentBook || currentBook.rel_path !== rp) return;    // another book opened meanwhile
+    if (d.success === false || d.error) { alert((spec.label || 'Tool') + ' failed: ' + (d.error || '')); return; }
+    booksApplyResult(d);
+    if (d.message) showToast(d.message);
+  } finally {
+    if (el) { el.disabled = false; el.textContent = og; }
   }
 }
+
+/** @brief A tool's reply into the editor: tags merged (case-insensitively), a
+ * description added below the one there; autosave writes both. */
+function booksApplyResult(d) {
+  let changed = false;
+  if (d.tags && d.tags.length) {
+    const tags = booksCurrentTags();
+    const low = new Set(tags.map(t => String(t).toLowerCase()));
+    d.tags.forEach(t => {
+      t = String(t).trim();
+      if (t && !low.has(t.toLowerCase())) { tags.push(t); low.add(t.toLowerCase()); changed = true; }
+    });
+    renderBookTags(tags);
+  }
+  if (d.description) {
+    const ta = _bq('book_description');
+    ta.value = (ta.value.trim() ? ta.value.trim() + '\n\n' : '') + d.description;
+    changed = true;
+  }
+  if (changed) booksAutosave();
+}
+
+// The hook exists now: tell modules whose script ran first.
+window.dispatchEvent(new Event('cim:book-tools'));
 
 /* ==========================================================================
  * COMIC TOOLS - panel detection & OCR over a paged book

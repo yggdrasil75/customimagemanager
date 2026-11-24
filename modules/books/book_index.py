@@ -75,6 +75,7 @@ import tarfile
 import hashlib
 import subprocess
 import threading
+from collections import OrderedDict
 import html as _html
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
@@ -1763,10 +1764,28 @@ def _extract_epub(path: str) -> ExtractResult:
             except Exception:
                 continue
             body = _epub_images_to_assets(z, n, _body_of(raw))
+            html = sanitize_html(body)
+            if _placeholder_section(html):
+                continue
             title = (_first_heading(body) or _doc_title(raw)
                      or os.path.splitext(os.path.basename(n))[0])
-            sections.append({'title': title, 'html': sanitize_html(body)})
+            sections.append({'title': title, 'html': html})
     return _finish(sections)
+
+
+## @brief Words a converter leaves on a page whose picture it dropped (or never had).
+_PLACEHOLDER_WORDS = {'cover', 'front cover', 'back cover', 'title page', 'titlepage',
+                      'image', 'illustration', 'untitled'}
+
+
+def _placeholder_section(html: str) -> bool:
+    """! @brief True for a content document with nothing to read: no picture, and no
+    text beyond a stub label like "COVER" (calibre's titlepage when the cover image
+    is missing, a converter's cover.xhtml with only its <h1>)."""
+    if re.search(r'<img\b', html or '', re.I):
+        return False
+    text = _strip_tags(html).strip().lower()
+    return not text or text in _PLACEHOLDER_WORDS
 
 def _extract_opf_folder(opf_path: str) -> ExtractResult:
     d = os.path.dirname(opf_path)
@@ -2164,6 +2183,15 @@ def cover_cache_name(rel_path: str) -> str:
     h = hashlib.sha1(rel_path.encode('utf-8')).hexdigest()
     return f"{h}.jpg"
 
+def decode_image(data: bytes | None):
+    """! @brief Encoded image bytes -> a BGR array, or None."""
+    if not data or not _HAVE_CV2:
+        return None
+    try:
+        return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
 def make_cover_jpeg(data: bytes, max_edge: int = 640) -> bytes | None:
     """! @brief Normalise any cover image to a bounded JPEG. cv2 is already a hard dep."""
     if not data:
@@ -2183,22 +2211,118 @@ def make_cover_jpeg(data: bytes, max_edge: int = 640) -> bytes | None:
     except Exception:
         return None
 
+## @brief PyMuPDF is not thread-safe: one render at a time. The page cache below is
+# what keeps that from mattering - a page or thumbnail is rendered once.
+_PDF_LOCK = threading.Lock()
+
+
 def render_pdf_page(abs_path: str, page: int, dpi: int = 150) -> bytes | None:
-    doc = _open_pdf(abs_path)
-    if doc is None:
-        return None
-    try:
-        if page < 0 or page >= doc.page_count:
+    key = ('pdf', page, int(dpi))
+    hit = _page_cache_get(abs_path, key)
+    if hit is not None:
+        return hit
+    with _PDF_LOCK:
+        hit = _page_cache_get(abs_path, key)    # rendered while this request waited
+        if hit is not None:
+            return hit
+        doc = _open_pdf(abs_path)
+        if doc is None:
             return None
-        pix = doc.load_page(page).get_pixmap(dpi=dpi)
-        return pix.tobytes('jpeg') if hasattr(pix, 'tobytes') else pix.getImageData('jpeg')
-    except Exception:
-        return None
-    finally:
         try:
-            doc.close()
+            if page < 0 or page >= doc.page_count:
+                return None
+            pix = doc.load_page(page).get_pixmap(dpi=dpi)
+            data = pix.tobytes('jpeg') if hasattr(pix, 'tobytes') else pix.getImageData('jpeg')
         except Exception:
-            pass
+            return None
+        finally:
+            try:
+                doc.close()
+            except Exception:
+                pass
+    _page_cache_put(abs_path, key, data)
+    return data
+
+
+# -- rendered page cache ------------------------------------------------------------
+# Paging through a comic asks for the same few pages over and over (the page, its
+# neighbours, the thumbnail strip). Rendering a PDF page or pulling a page out of a
+# rar / 7z is the slow part, so the bytes are kept, bounded by size. Keys carry the
+# file's mtime + size, so an edited book never serves a stale page.
+_PAGE_CACHE: "OrderedDict[tuple, bytes]" = OrderedDict()
+_PAGE_CACHE_BYTES = [0]
+PAGE_CACHE_LIMIT = 192 * 1024 * 1024
+_PAGE_CACHE_LOCK = threading.Lock()
+
+
+def _file_stamp(abs_path: str):
+    try:
+        st = os.stat(abs_path)
+        return (abs_path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _page_cache_get(abs_path: str, key: tuple):
+    stamp = _file_stamp(abs_path)
+    if stamp is None:
+        return None
+    with _PAGE_CACHE_LOCK:
+        k = stamp + key
+        v = _PAGE_CACHE.get(k)
+        if v is not None:
+            _PAGE_CACHE.move_to_end(k)
+        return v
+
+
+def _cache_size(v) -> int:
+    return len(v) if isinstance(v, (bytes, bytearray)) else 256 * len(v)   # a name list: rough
+
+
+def _page_cache_put(abs_path: str, key: tuple, data):
+    stamp = _file_stamp(abs_path)
+    if stamp is None or data is None:
+        return
+    size = _cache_size(data)
+    if size > PAGE_CACHE_LIMIT // 8:
+        return
+    with _PAGE_CACHE_LOCK:
+        k = stamp + key
+        old = _PAGE_CACHE.pop(k, None)
+        if old is not None:
+            _PAGE_CACHE_BYTES[0] -= _cache_size(old)
+        _PAGE_CACHE[k] = data
+        _PAGE_CACHE_BYTES[0] += size
+        while _PAGE_CACHE_BYTES[0] > PAGE_CACHE_LIMIT and _PAGE_CACHE:
+            _k, v = _PAGE_CACHE.popitem(last=False)
+            _PAGE_CACHE_BYTES[0] -= _cache_size(v)
+
+
+def cached_page_names(abs_path: str, fmt: str) -> list[str]:
+    """! @brief comic_page_names, listed once per file version (a rar or 7z listing
+    is a full read of its headers, and every page request needs it)."""
+    key = ('names', fmt)
+    hit = _page_cache_get(abs_path, key)
+    if hit is not None:
+        return list(hit)
+    names = comic_page_names(abs_path, fmt)
+    if names:
+        _page_cache_put(abs_path, key, tuple(names))
+    return names
+
+
+def cached_comic_page(abs_path: str, fmt: str, name: str, thumb: bool = False) -> bytes | None:
+    """! @brief One archive page's bytes; thumb=True gives a small JPEG instead of the
+    full scan (the thumbnail strip would otherwise pull every full page)."""
+    key = ('page', name, 'thumb' if thumb else 'full')
+    hit = _page_cache_get(abs_path, key)
+    if hit is not None:
+        return hit
+    data = comic_page_bytes(abs_path, fmt, name)
+    if data is not None and thumb:
+        data = make_cover_jpeg(data, max_edge=320) or data
+    _page_cache_put(abs_path, key, data)
+    return data
 
 def page_count_for(abs_path: str, fmt: str) -> int | None:
     if fmt == 'pdf':

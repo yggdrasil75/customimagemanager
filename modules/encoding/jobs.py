@@ -64,7 +64,9 @@ class Jobs:
         if t is None:
             raise ValueError(mode)
         media = self.host.media
-        safe = getattr(media, "SAFE_EXTS", {}).get(kind, set())
+        safe = set(getattr(media, "SAFE_EXTS", {}).get(kind, set()))
+        if kind == "book":
+            safe |= media.media_group("book", "reader")   # the books reader opens these as they are
         convert, check, skip = [], [], 0
         for rel in self._rows(kind, folder):
             e = os.path.splitext(rel)[1].lower()

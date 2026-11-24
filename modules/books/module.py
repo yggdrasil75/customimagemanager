@@ -36,10 +36,6 @@ MANIFEST = {
 }
 
 
-def _no_llm(*a, **k):
-    raise RuntimeError("LLM not available (vlm module disabled)")
-
-
 def register(host):
     bi.bind_media(host.media)
     bi.bind_comicinfo(lambda: host.get_service("comicinfo"))
@@ -66,6 +62,10 @@ def register(host):
     # as it is (never converted): it fills in what the book file doesn't say
     host.extend_media_type("book", exts=(".opf",), unambiguous_exts=(), uploadable_exts=(".opf",),
                            group="sidecar")
+    # what the reader opens itself, without calibre: Settings > Media's "convert
+    # only what the reader can't open" keeps these as uploaded
+    host.extend_media_type("book", exts=(".epub", ".docx", ".fb2", ".pdf", ".txt", ".htm", ".html"),
+                           unambiguous_exts=(), uploadable_exts=(), group="reader")
 
     # Auth feature: read = browse the shelf/read, write = delete/triage.
     host.register_feature("tab.books", "Books tab (read=view, write=delete)",
@@ -91,7 +91,7 @@ def register(host):
     ## @brief Wire the actual routes via the existing register(app, ctx). ctx is built
     # from the host + a couple of core helpers reached lazily.
     # Embedding functions come from the embedding module's service, reached
-    # lazily like llm/comic_pages: it may register after books, or be disabled,
+    # lazily like comic_pages: it may register after books, or be disabled,
     # and either way the Books tab must still open (search just reads not-ready).
     def _emb(key, default):
         return (host.get_service("embedding") or {}).get(key) or default
@@ -110,7 +110,6 @@ def register(host):
         "embed_query":   lambda text: _emb("embed_query", lambda t: None)(text),
         "embed_enabled": lambda: bool(_emb("text_doc_enabled", lambda: False)()),
         "embed_tag":     lambda: _emb("text_space", lambda: "")(),
-        "llm_request":   lambda *a, **k: (host.get_service("llm") or {}).get("request", _no_llm)(*a, **k),
         "comic_pages":   lambda: host.get_service("comic_pages"),   # comics module, or None
         "current_user":  host.current_user,
         "files_clause":  host.files_clause,     # access policies (ownership): listings
@@ -129,8 +128,13 @@ def register(host):
     # Metadata writes for other modules (metasrc applies lookups through it).
     # index_one: a module that writes or grows a book/comic archive in place
     # (webcomic downloads) puts it on the shelf / refreshes its page count.
+    # content / tag_vocabulary: what a tool in the book areas (book_tools,
+    # book_tag_tools, book_description_tools) reads of the open book - the vlm
+    # module's AI tag / describe buttons do; books itself runs no models.
     host.provide_service("books", {"update_meta": book_routes.update_meta,
-                                   "index_one": book_routes.index_one})
+                                   "index_one": book_routes.index_one,
+                                   "content": book_routes.book_content,
+                                   "tag_vocabulary": book_routes.tag_vocabulary})
     host.register_metadata_writer(
         "book", book_routes.write_book_meta, fields=book_routes._META_KEYS,
         claims=lambda rel: host.db().execute("SELECT 1 FROM books WHERE rel_path=?",

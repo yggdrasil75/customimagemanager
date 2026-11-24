@@ -76,12 +76,12 @@ def _f(key, group, label, kind, default, hint, *, options=None, lo=None, hi=None
     return d
 
 
-def _mode_opts(what):
+def _mode_opts(what, unsafe=("Convert only what browsers can't show",
+                             "Formats most browsers can display are kept; the rest are converted.")):
     """! @brief The keep / convert / convert-unsafe choice of a kind."""
     return [_opt("none", "Keep original", f"Store {what} exactly as uploaded."),
             _opt("all", "Convert to", f"Convert all {what} to the format below."),
-            _opt("unsafe", "Convert only what browsers can't show",
-                 "Formats most browsers can display are kept; the rest are converted.")]
+            _opt("unsafe", *unsafe)]
 
 
 _LOSSY_FMTS = [".jxl", ".webp", ".avif"]
@@ -320,11 +320,18 @@ FIELDS = [
     # -- books --------------------------------------------------------------
     _f("media_storage.book.mode", "book", "Output", "select", "none",
        "Keep uploads as they are, or convert them.",
-       options=_mode_opts("books"), expert=False, store="media_storage"),
+       options=_mode_opts("books", ("Convert only what the reader can't open",
+                                    "EPUB, DOCX, FB2, PDF, TXT and HTML are kept (the reader opens "
+                                    "them without calibre); the rest are converted.")),
+       expert=False, store="media_storage"),
     _f("media_storage.book.target", "book", "Format", "select", ".epub",
-       "Books convert with calibre. Comic archives (cbz/cbr/cb7) are read as they are; "
+       "Books convert with calibre. DOCX uploads are stored as they are when DOCX is "
+       "chosen (no calibre wait). Comic archives (cbz/cbr/cb7) are read as they are; "
        "they repack only when CBZ is chosen.",
-       options=[_opt(".epub", "EPUB", needs="ebook_convert"), _opt(".pdf", "PDF", needs="ebook_convert"),
+       options=[_opt(".epub", "EPUB", needs="ebook_convert"),
+                _opt(".docx", "DOCX", "Word documents. The reader opens them directly.",
+                     needs="ebook_convert"),
+                _opt(".pdf", "PDF", needs="ebook_convert"),
                 _opt(".cbz", "CBZ (comics only)")],
        expert=False, show=[_conv("book")], store="media_storage"),
 

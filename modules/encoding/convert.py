@@ -48,7 +48,7 @@ MEDIA_TARGETS = {
     'image': ['.jxl', '.webp', '.avif', '.png', '.jpg'],
     'video': ['.mp4', '.webm', '.mkv'],
     'audio': ['.flac', '.opus', '.ogg', '.mp3'],
-    'book':  ['.epub', '.pdf', '.cbz'],
+    'book':  ['.epub', '.docx', '.pdf', '.cbz'],
 }
 DEFAULT_MEDIA_PREFS = {
     'image': {'target': '.jxl', 'mode': 'all'},
@@ -103,6 +103,8 @@ def _browser_unsafe(e, k, src):
             return not _PLAYABLE[0](src)
         except Exception:
             pass
+    if k == 'book' and e in mt.media_group('book', 'reader'):
+        return False  # the books module's reader opens it as it is
     return e not in mt.SAFE_EXTS[k]
 
 

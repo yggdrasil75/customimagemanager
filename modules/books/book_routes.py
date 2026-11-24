@@ -1117,6 +1117,80 @@ def update_meta(rp: str, d: dict) -> bool:
     return CTX["update_file"](rp, set={k: v for k, v in d.items() if k in _META_KEYS}).get("success", False)
 
 
+# ==============================================================================
+# Book content for other modules (the `books` service)
+# ==============================================================================
+# The books module reads books; it does not know what reads them. A module that
+# offers tools for the open book (the vlm module's AI tag / describe buttons in
+# the book_tag_tools / book_description_tools areas) asks for a book's content
+# here and answers the button with tags / a description for the book editor.
+
+def book_content(rp: str, max_chars: int = 14000) -> dict | None:
+    """! @brief What a tool is shown of a book, or None when it is unknown or hidden.
+    @return {"rel_path", "title", "authors", "series", "fmt", "reader", "tags",
+             "subjects", "description", "text", "image"} - text: the opening plus a
+             spread of passages (at most max_chars); image: the first page as a BGR
+             array for a paged book (comic, scan; None otherwise); text of a paged
+             book is its stored OCR transcript, if any.
+    """
+    check = CTX.get("check_path")
+    if check and not check(rp, write=False):
+        return None
+    db = _db()
+    r = db.execute("SELECT * FROM books WHERE rel_path=?", (rp,)).fetchone()
+    if not r:
+        return None
+    f = _row_fields(r)
+    out = {"rel_path": rp, "title": f["title"], "authors": f["authors"], "series": f["series"],
+           "fmt": r["fmt"], "reader": r["reader"], "tags": f["tags"], "subjects": f["subjects"],
+           "description": f["description"], "text": "", "image": None}
+    secs = db.execute("SELECT html FROM book_sections WHERE rel_path=? ORDER BY idx",
+                      (rp,)).fetchall()
+    if secs:
+        texts = [bi._strip_tags(x["html"]) for x in secs]
+        head = max(1, max_chars * 3 // 7)
+        text = texts[0][:head]
+        step = max(1, len(texts) // 4)
+        for t in texts[step::step][:3]:
+            text += "\n\n[...]\n\n" + t[:max(1, (max_chars - head) // 3)]
+        out["text"] = text[:max_chars]
+    elif r["reader"] == "paged":
+        lines = [x["text"] for x in db.execute(
+            "SELECT text FROM book_pages WHERE rel_path=? AND text<>'' ORDER BY page LIMIT 40",
+            (rp,)).fetchall()]
+        out["text"] = "\n".join(lines)[:max_chars]
+        out["image"] = _first_page_bgr(rp, r["fmt"])
+    return out
+
+
+def _first_page_bgr(rp: str, fmt: str):
+    """! @brief The first page of a paged book as a BGR image, or None."""
+    ap = _abs(rp)
+    if not ap or not os.path.exists(ap):
+        return None
+    if fmt == "pdf":
+        data = bi.render_pdf_page(ap, 0, dpi=110)
+    else:
+        names = bi.cached_page_names(ap, fmt)
+        data = bi.cached_comic_page(ap, fmt, names[0]) if names else None
+    return bi.decode_image(data)
+
+
+def tag_vocabulary(limit: int = 80) -> list[str]:
+    """! @brief The book tags already in use on the shelf, most used first."""
+    counts = {}
+    w, wp = _where(["tags IS NOT NULL", "tags<>''", "tags<>'[]'"], [])
+    for r in _db().execute(f"SELECT tags FROM books{w}", wp):
+        try:
+            for t in json.loads(r["tags"]) or []:
+                t = str(t).strip().lower()
+                if t:
+                    counts[t] = counts.get(t, 0) + 1
+        except (TypeError, ValueError):
+            continue
+    return [t for t, _n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
+
+
 def register(host, ctx: dict):
     # Every books endpoint sits behind tab.books: read = browse/read/annotate
     # your own progress, write = anything that changes the shelf or runs a job.
@@ -1382,28 +1456,42 @@ def register(host, ctx: dict):
         if not ap or not os.path.exists(ap):
             return jsonify({"success": False, "error": "file missing"}), 404
         fmt = row["fmt"]
+        try:
+            dpi = max(36, min(300, int(request.args.get("dpi", 150))))
+        except (TypeError, ValueError):
+            dpi = 150
+        thumb = dpi < 100       # the thumbnail strip asks for dpi=72
+
+        def _image(data, mime):
+            # Pages never change under the same file stamp (the cache key), so the
+            # browser may keep them: a page turned back to is not fetched again.
+            resp = Response(data, mimetype=mime)
+            resp.headers["Cache-Control"] = "private, max-age=3600"
+            return resp
+
         if fmt == "pdf":
-            dpi = max(72, min(300, int(request.args.get("dpi", 150))))
             data = bi.render_pdf_page(ap, n, dpi=dpi)
             if data is None:
                 return jsonify({"success": False,
                                 "error": "PDF rendering needs PyMuPDF "
                                          "(pip install pymupdf)"}), 501
-            return Response(data, mimetype="image/jpeg")
-        names = bi.comic_page_names(ap, fmt)
+            return _image(data, "image/jpeg")
+        names = bi.cached_page_names(ap, fmt)
         if not names:
             return jsonify({"success": False,
                             "error": f"cannot read {fmt} archive - "
                                      f"install rarfile/py7zr (or unrar/7z)"}), 501
         if n < 0 or n >= len(names):
             return jsonify({"success": False, "error": "page out of range"}), 404
-        data = bi.comic_page_bytes(ap, fmt, names[n])
+        data = bi.cached_comic_page(ap, fmt, names[n], thumb=thumb)
         if data is None:
             return jsonify({"success": False, "error": "page read failed"}), 500
+        if thumb and data[:3] == b"\xff\xd8\xff":
+            return _image(data, "image/jpeg")
         ext = os.path.splitext(names[n])[1].lower()
         mime = {".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
                 ".jxl": "image/jxl", ".avif": "image/avif"}.get(ext, "image/jpeg")
-        return Response(data, mimetype=mime)
+        return _image(data, mime)
 
     # -- comic pages: panels + OCR --------------------------------------------
     @host.route("/api/books/comic/analyze", methods=["POST"], feature="tab.books", level="write")
@@ -1654,57 +1742,6 @@ def register(host, ctx: dict):
             return jsonify({"success": False, "error": "not found"}), 404
         ok = delete_book(rp, remove_file=not d.get("keep_file"))
         return jsonify({"success": ok})
-
-    # -- LLM ------------------------------------------------------------------
-    @host.route("/api/books/summarize", methods=["POST"], feature="tab.books", level="write")
-    def books_summarize():
-        """! @brief Blurb a book with the configured LLM.
-
-        /api/run_llm can't serve this: it decodes the file as an image first,
-        which is exactly the wrong move for an epub. We send TEXT instead - the
-        opening and a few sampled passages rather than the whole book, because a
-        400k-word novel is not going in a context window and the first chapter
-        plus a spread of samples is enough to write a jacket blurb.
-        """
-        d = request.json or {}
-        rp = d.get("rel_path", "")
-        llm = ctx.get("llm_request")
-        if not llm:
-            return jsonify({"success": False, "error": "LLM not wired up"}), 501
-        db = _db()
-        row = db.execute("SELECT title, authors FROM books WHERE rel_path=?",
-                         (rp,)).fetchone()
-        if not row:
-            return jsonify({"success": False, "error": "not found"}), 404
-        secs = db.execute(
-            "SELECT html FROM book_sections WHERE rel_path=? ORDER BY idx",
-            (rp,)).fetchall()
-        if not secs:
-            return jsonify({"success": False,
-                            "error": "No extracted text - run Extract first."})
-        texts = [bi._strip_tags(s["html"]) for s in secs]
-        sample = texts[0][:6000]
-        step = max(1, len(texts) // 4)
-        for t in texts[step::step][:3]:
-            sample += "\n\n[...]\n\n" + t[:2000]
-
-        prompt = (
-            f"Below are excerpts from a book titled {row['title']!r} by "
-            f"{', '.join(json.loads(row['authors'] or '[]')) or 'an unknown author'}.\n"
-            "Write a 3-5 sentence jacket blurb: what it is about, its tone, and "
-            "who would enjoy it. No spoilers past the opening act. Reply with the "
-            "blurb only - no preamble, no headings.\n\n"
-            f"{sample[:14000]}"
-        )
-        try:
-            msg = llm([{"role": "user", "content": prompt}], timeout=300)
-            text = (msg.get("content") or "").strip()
-        except Exception as e:
-            return jsonify({"success": False, "error": str(e)})
-        if not text:
-            return jsonify({"success": False, "error": "empty response"})
-        CTX["update_file"](rp, set={"description": text})
-        return jsonify({"success": True, "description": text})
 
     # -- triage ---------------------------------------------------------------
     @host.route("/api/books/triage", feature="tab.books")

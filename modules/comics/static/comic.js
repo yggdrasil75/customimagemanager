@@ -101,7 +101,17 @@ function showComicPage(i) {
   if (!comicState.pages.length) return;
   comicState.idx = Math.max(0, Math.min(comicState.pages.length - 1, i));
   const src = comicState.pages[comicState.idx];
-  document.getElementById('comic_page_img').src = src + (src.includes('?') ? '&' : '?') + 'ts=' + Date.now();
+  // Folder pages are library images that may have just been edited, so they skip
+  // the browser cache; archive / PDF pages are fixed for the file and cache fine.
+  const img = document.getElementById('comic_page_img');
+  img.src = comicState.kind === 'folder' ? src + (src.includes('?') ? '&' : '?') + 'ts=' + Date.now() : src;
+  // Prefetch the next page once this one is in, so a page turn doesn't wait.
+  const ahead = comicState.pages[comicState.idx + 1];
+  if (ahead && comicState.kind !== 'folder') {
+    const pre = () => { new Image().src = ahead; };
+    if (img.complete) pre(); else img.addEventListener('load', pre, { once: true });
+  }
+  _comicThumbBump(comicState.idx);
   // Folder comic pages are library images: put the page in the editor so the
   // Editor/EXIF/IPTC/XMP tabs work on it, without leaving the reader.
   const pf = comicState.kind === 'folder' ? comicState.pageFiles[comicState.idx] : null;
@@ -113,13 +123,71 @@ function showComicPage(i) {
   });
 }
 function comicPage(d) { showComicPage(comicState.idx + d); }
+/* Thumbnail strip. Each thumb of a PDF / archive is a server render, and the
+ * browser has only ~6 connections to the server: a strip that asked for every
+ * thumb at once queued the page itself, the metadata editor and every click
+ * behind hundreds of renders. So thumbs load only as they scroll into view, at
+ * most two at a time, nearest the open page first. */
+const _COMIC_THUMB_PARALLEL = 2;
+let _comicThumbQueue = [], _comicThumbBusy = 0, _comicThumbObs = null, _comicThumbGen = 0;
+
+function _comicThumbPump() {
+  const gen = _comicThumbGen;
+  while (_comicThumbBusy < _COMIC_THUMB_PARALLEL && _comicThumbQueue.length) {
+    // nearest to the open page first
+    const here = comicState.idx;
+    _comicThumbQueue.sort((a, b) => Math.abs(a.j - here) - Math.abs(b.j - here));
+    const { im } = _comicThumbQueue.shift();
+    if (!im.dataset.src) continue;
+    _comicThumbBusy++;
+    const done = () => {
+      if (gen !== _comicThumbGen) return;   // a different comic opened meanwhile
+      _comicThumbBusy--; _comicThumbPump();
+    };
+    im.addEventListener('load', done, { once: true });
+    im.addEventListener('error', done, { once: true });
+    im.src = im.dataset.src; delete im.dataset.src;
+  }
+}
+
+function _comicThumbWant(im) {
+  if (!im.dataset.src || im.dataset.queued) return;
+  im.dataset.queued = '1';
+  _comicThumbQueue.push({ im, j: parseInt(im.dataset.j, 10) });
+  _comicThumbPump();
+}
+
+/** @brief Make sure the open page's own thumb (and its neighbours) load soon, and
+ * keep it in view in the strip. */
+function _comicThumbBump(i) {
+  const s = document.getElementById('comic_strip');
+  const el = s?.children[i];
+  if (!el) return;
+  for (let j = Math.max(0, i - 2); j <= i + 2; j++) if (s.children[j]) _comicThumbWant(s.children[j]);
+  el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
 function renderComicStrip() {
   const s = document.getElementById('comic_strip'); s.innerHTML = '';
+  _comicThumbGen++; _comicThumbQueue = []; _comicThumbBusy = 0;
+  if (_comicThumbObs) _comicThumbObs.disconnect();
+  const folder = comicState.kind === 'folder';
+  _comicThumbObs = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+    entries.forEach(e => { if (e.isIntersecting) { _comicThumbWant(e.target); _comicThumbObs.unobserve(e.target); } });
+  }, { root: s, rootMargin: '0px 300px' }) : null;
   comicState.thumbs.forEach((src, j) => {
     const im = document.createElement('img');
-    im.src = src; im.loading = 'lazy';
-    im.className = 'cstrip h-full w-auto object-cover rounded cursor-pointer flex-shrink-0';
+    im.dataset.j = j;
+    // a fixed width until it loads, so off-screen thumbs really are off screen
+    im.className = 'cstrip h-full object-cover rounded cursor-pointer flex-shrink-0 bg-gray-800';
+    im.style.minWidth = '3rem';
+    im.alt = `page ${j + 1}`;
     im.onclick = () => showComicPage(j);
+    if (folder) { im.src = src; im.loading = 'lazy'; }      // cheap cached thumbnails
+    else {
+      im.dataset.src = src;
+      if (_comicThumbObs) _comicThumbObs.observe(im); else _comicThumbWant(im);
+    }
     s.appendChild(im);
   });
 }
