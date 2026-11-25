@@ -992,6 +992,17 @@ def _should_upload(fname, aggressive):
     return ext in MEDIA_EXTENSIONS
 
 
+def _long_path(path):
+    """! @brief On Windows, path in its extended-length form (\\\\?\\ or \\\\?\\UNC\\), so
+    files deeper than MAX_PATH (260 chars) can still be opened. Elsewhere, unchanged."""
+    if os.name != "nt" or path.startswith("\\\\?\\"):
+        return path
+    path = os.path.abspath(path)
+    if path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path[2:]
+    return "\\\\?\\" + path
+
+
 def _walk(source_dir):
     """! @brief Every file under source_dir (absolute paths), folders in walk order."""
     return [os.path.join(root, f)
@@ -1186,7 +1197,7 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
                 verify_tls=True, dest="", mode="auto", chunked="auto", validate=False,
                 delete_source=False, dry_run=False, takeout=False, takeout_edited="both"):
     """! @brief Upload a folder tree (or, with takeout, a Google Takeout). @return the exit code."""
-    source_dir = os.path.abspath(source_dir)
+    source_dir = _long_path(os.path.abspath(source_dir))
     if not os.path.isdir(source_dir):
         print("Error: '{}' is not a directory.".format(source_dir))
         return 2
