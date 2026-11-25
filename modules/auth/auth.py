@@ -71,6 +71,7 @@ def require_feature(feature_key, action=None, fields=(), level="read"):
             if not u:
                 return jsonify({"success": False, "error": "authentication required"}), 401
             g.cim_write = (level == "write")  # mutating endpoint (access policies read this)
+            g.cim_feature = feature_key       # which feature: an ACL maps it to the right it needs
             if capabilities.capability_denials().get(feature_key) is False:
                 return jsonify({"success": False, "error": "feature unavailable on this server"}), 503
             if not u.get("is_admin"):
@@ -271,6 +272,23 @@ class Auth:
         have_g = {row[1] for row in db.execute("PRAGMA table_info(auth_groups)")}
         if "extra" not in have_g:
             db.execute("ALTER TABLE auth_groups ADD COLUMN extra TEXT")
+        if "ldap_dn" not in have_g:
+            db.execute("ALTER TABLE auth_groups ADD COLUMN ldap_dn TEXT")
+        # A user belongs to any number of groups. auth_users.group_id stays as the
+        # first one, for readers that predate the list; the single value it held
+        # becomes the first membership.
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS auth_user_groups (
+            user_id   INTEGER NOT NULL,
+            group_id  INTEGER NOT NULL,
+            source    TEXT NOT NULL DEFAULT 'local',   -- local | ldap (synced at sign-in)
+            PRIMARY KEY (user_id, group_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_aug_group ON auth_user_groups(group_id);
+        """)
+        db.execute("INSERT OR IGNORE INTO auth_user_groups(user_id, group_id) "
+                   "SELECT id, group_id FROM auth_users WHERE group_id IS NOT NULL "
+                   "AND group_id IN (SELECT id FROM auth_groups)")
         db.commit()
 
     def _load_perms(self, raw):
@@ -288,13 +306,66 @@ class Auth:
         return self._db().execute(
             "SELECT * FROM auth_groups WHERE id=?", (group_id,)).fetchone()
 
+    def _group_dict(self, r, members=None):
+        keys = r.keys()
+        d = {"id": r["id"], "name": r["name"], "role": r["role"],
+             "perms": self._load_perms(r["perms"]),
+             "extra": self._load_perms(r["extra"] if "extra" in keys else None),
+             "ldap_dn": (r["ldap_dn"] if "ldap_dn" in keys else None) or ""}
+        if members is not None:
+            d["member_count"] = members
+        return d
+
     def list_groups(self):
-        rows = self._db().execute(
-            "SELECT * FROM auth_groups ORDER BY name").fetchall()
-        return [{"id": r["id"], "name": r["name"], "role": r["role"],
-                 "perms": self._load_perms(r["perms"]),
-                 "extra": self._load_perms(r["extra"] if "extra" in r.keys() else None)}
-                for r in rows]
+        db = self._db()
+        rows = db.execute("SELECT * FROM auth_groups ORDER BY name").fetchall()
+        counts = {r["group_id"]: r["n"] for r in db.execute(
+            "SELECT group_id, COUNT(*) n FROM auth_user_groups GROUP BY group_id")}
+        return [self._group_dict(r, counts.get(r["id"], 0)) for r in rows]
+
+    def user_group_rows(self, user_id):
+        """! @brief The groups a user belongs to (rows), in id order."""
+        if not user_id:
+            return []
+        return self._db().execute(
+            "SELECT gr.* FROM auth_user_groups m JOIN auth_groups gr ON gr.id=m.group_id "
+            "WHERE m.user_id=? ORDER BY gr.id", (user_id,)).fetchall()
+
+    def user_group_ids(self, user_id):
+        """! @brief Ids of the groups a user belongs to."""
+        return [r["id"] for r in self.user_group_rows(user_id)]
+
+    def group_members(self, group_id):
+        """! @brief User ids in a group."""
+        return [r["user_id"] for r in self._db().execute(
+            "SELECT user_id FROM auth_user_groups WHERE group_id=?", (group_id,))]
+
+    def set_user_groups(self, user_id, group_ids, source="local"):
+        """! @brief Replace the `source` memberships of a user with `group_ids` (unknown
+        ids are dropped); memberships from the other source stay. Keeps
+        auth_users.group_id on the first membership."""
+        db = self._db()
+        want = []
+        for gid in group_ids or ():
+            try:
+                gid = int(gid)
+            except (TypeError, ValueError):
+                raise ValueError("group ids must be integers")
+            if gid not in want:
+                want.append(gid)
+        known = {r["id"] for r in db.execute("SELECT id FROM auth_groups")}
+        want = [gid for gid in want if gid in known]
+        db.execute("DELETE FROM auth_user_groups WHERE user_id=? AND source=?", (user_id, source))
+        db.executemany("INSERT OR IGNORE INTO auth_user_groups(user_id, group_id, source) VALUES(?,?,?)",
+                       [(user_id, gid, source) for gid in want])
+        self._sync_first_group(user_id)
+        db.commit()
+
+    def _sync_first_group(self, user_id):
+        first = self._db().execute("SELECT MIN(group_id) g FROM auth_user_groups WHERE user_id=?",
+                                   (user_id,)).fetchone()
+        self._db().execute("UPDATE auth_users SET group_id=? WHERE id=?",
+                           (first["g"] if first else None, user_id))
 
     def effective_perms_for(self, user_row):
         """! @brief A user's effective permission levels: role defaults, group overrides, then the user's own."""
@@ -314,12 +385,12 @@ class Auth:
         overrides = features.migrate_perms(self._load_perms(
             user_row["perms"] if "perms" in user_row.keys() else None))
 
-        group_overrides = {}
-        gid = user_row["group_id"] if "group_id" in user_row.keys() else None
-        grp = self.get_group(gid)
-        if grp:
-            role = role if role and role != "custom" else grp["role"]
-            group_overrides = features.migrate_perms(self._load_perms(grp["perms"]))
+        groups = self.user_group_rows(user_row["id"])
+        if groups and (not role or role == "custom"):
+            # a custom account takes its groups' role: the most permissive of them
+            role = features.best_role([gr["role"] for gr in groups]) or role
+        group_overrides = features.merge_group_overrides(
+            [features.migrate_perms(self._load_perms(gr["perms"])) for gr in groups])
         return features.effective_permissions(role, overrides, group_overrides)
 
     def _row_to_user(self, r):
@@ -337,13 +408,21 @@ class Auth:
             "extra": self._load_perms(r["extra"] if "extra" in keys else None),
         }
         u["features"] = self.effective_perms_for(r)
+        groups = self.user_group_rows(r["id"])
+        u["group_ids"] = [gr["id"] for gr in groups]
+        u["groups"] = [{"id": gr["id"], "name": gr["name"]} for gr in groups]
+        if groups and not u["group_id"]:
+            u["group_id"] = groups[0]["id"]
         # what modules read off g.user: resolved account fields and role
-        grp = self.get_group(u["group_id"])
-        gextra = self._load_perms(grp["extra"] if grp is not None and "extra" in grp.keys() else None)
+        # (a later group's field beats an earlier one's; the user's own beats both)
+        gextra = {}
+        for gr in groups:
+            gextra.update({k: v for k, v in self._load_perms(
+                gr["extra"] if "extra" in gr.keys() else None).items() if v})
         u["account"] = {k: v for k, v in {**gextra, **u["extra"]}.items() if v}
         role = u["role"]
-        if grp is not None and (not role or role == "custom"):
-            role = grp["role"] or role
+        if groups and (not role or role == "custom"):
+            role = features.best_role([gr["role"] for gr in groups]) or role
         u["effective_role"] = "admin" if u["is_admin"] else (role or "custom")
         return u
 
@@ -363,7 +442,7 @@ class Auth:
 
     def create_local_user(self, username, password, is_admin=False,
                           display_name=None, email=None, role=None,
-                          group_id=None, perms=None, extra=None):
+                          group_id=None, perms=None, extra=None, group_ids=None):
         username = (username or "").strip()
         if not _USERNAME_RE.match(username):
             raise ValueError("invalid username")
@@ -382,7 +461,20 @@ class Auth:
              datetime.utcnow().isoformat(),
              json.dumps({k: v for k, v in _clean_extra(extra or {}, "user").items() if v})))
         db.commit()
+        if group_ids is None and group_id:
+            group_ids = [group_id]
+        if group_ids:
+            self.set_user_groups(self.get_user(username)["id"], group_ids)
         return self._row_to_user(self.get_user(username))
+
+    def sync_ldap_groups(self, user_id, member_of):
+        """! @brief Make the user's LDAP-sourced memberships the local groups whose
+        ldap_dn is in `member_of` (case-insensitive). Memberships set by hand stay."""
+        dns = {str(d or "").strip().lower() for d in member_of or () if d}
+        rows = self._db().execute(
+            "SELECT id, ldap_dn FROM auth_groups WHERE ldap_dn IS NOT NULL AND ldap_dn<>''").fetchall()
+        self.set_user_groups(user_id, [r["id"] for r in rows if r["ldap_dn"].strip().lower() in dns],
+                             source="ldap")
 
     def _upsert_ldap_user(self, username, display_name, email, is_admin):
         db = self._db()
@@ -410,7 +502,7 @@ class Auth:
 
     def update_user(self, user_id, is_admin=None, disabled=None,
                     display_name=None, email=None, role=None, perms=None,
-                    group_id=_UNSET, extra=None):
+                    group_id=_UNSET, extra=None, group_ids=_UNSET):
         sets, vals = [], []
         for col, val in (("is_admin", is_admin), ("disabled", disabled)):
             if val is not None:
@@ -421,8 +513,10 @@ class Auth:
                 sets.append(f"{col}=?"); vals.append(val)
         if perms is not None:
             sets.append("perms=?"); vals.append(json.dumps(perms))
-        if group_id is not _UNSET:  # None clears the group
-            sets.append("group_id=?"); vals.append(group_id)
+        if group_ids is _UNSET and group_id is not _UNSET:  # legacy single group; None clears
+            group_ids = [group_id] if group_id else []
+        if group_ids is not _UNSET:
+            self.set_user_groups(user_id, group_ids or [])
         if extra is not None:
             r = self._db().execute("SELECT extra FROM auth_users WHERE id=?", (user_id,)).fetchone()
             cur = self._load_perms(r["extra"] if r is not None else None)
@@ -435,23 +529,43 @@ class Auth:
             f"UPDATE auth_users SET {','.join(sets)} WHERE id=?", vals)
         self._db().commit()
 
-    def create_group(self, name, role="custom", perms=None, extra=None):
+    def create_group(self, name, role="custom", perms=None, extra=None, ldap_dn=None):
         name = (name or "").strip()
         if not name:
             raise ValueError("group name required")
         db = self._db()
         db.execute(
-            "INSERT INTO auth_groups(name,role,perms,created_at,extra) VALUES(?,?,?,?,?)",
+            "INSERT INTO auth_groups(name,role,perms,created_at,extra,ldap_dn) VALUES(?,?,?,?,?,?)",
             (name, role or "custom", json.dumps(perms or {}),
              datetime.utcnow().isoformat(),
-             json.dumps({k: v for k, v in _clean_extra(extra or {}, "group").items() if v})))
+             json.dumps({k: v for k, v in _clean_extra(extra or {}, "group").items() if v}),
+             (ldap_dn or "").strip() or None))
         db.commit()
         r = db.execute("SELECT * FROM auth_groups WHERE name=?", (name,)).fetchone()
-        return {"id": r["id"], "name": r["name"], "role": r["role"],
-                "perms": self._load_perms(r["perms"]), "extra": self._load_perms(r["extra"])}
+        return self._group_dict(r, 0)
 
-    def update_group(self, group_id, name=None, role=None, perms=None, extra=None):
+    def update_group(self, group_id, name=None, role=None, perms=None, extra=None,
+                     ldap_dn=None, members=None):
+        """! @brief Change a group; `members` (user ids) replaces its hand-set members."""
         sets, vals = [], []
+        if ldap_dn is not None:
+            sets.append("ldap_dn=?"); vals.append(str(ldap_dn).strip() or None)
+        if members is not None:
+            db = self._db()
+            ids = []
+            for uid in members:
+                try:
+                    ids.append(int(uid))
+                except (TypeError, ValueError):
+                    raise ValueError("members must be user ids")
+            before = set(self.group_members(group_id))
+            db.execute("DELETE FROM auth_user_groups WHERE group_id=? AND source='local'", (group_id,))
+            db.executemany("INSERT OR IGNORE INTO auth_user_groups(user_id, group_id, source) "
+                           "SELECT id, ?, 'local' FROM auth_users WHERE id=?",
+                           [(group_id, uid) for uid in ids])
+            for uid in before | set(ids):
+                self._sync_first_group(uid)
+            db.commit()
         if extra is not None:
             r = self._db().execute("SELECT extra FROM auth_groups WHERE id=?", (group_id,)).fetchone()
             cur = self._load_perms(r["extra"] if r is not None else None)
@@ -472,9 +586,12 @@ class Auth:
 
     def delete_group(self, group_id):
         db = self._db()
-        db.execute("UPDATE auth_users SET group_id=NULL WHERE group_id=?",
-                   (group_id,))
+        members = self.group_members(group_id)
+        db.execute("DELETE FROM auth_user_groups WHERE group_id=?", (group_id,))
         db.execute("DELETE FROM auth_groups WHERE id=?", (group_id,))
+        for uid in members:
+            self._sync_first_group(uid)
+        db.execute("UPDATE auth_users SET group_id=NULL WHERE group_id=?", (group_id,))
         db.commit()
 
     def _user_event(self, event, user_id):
@@ -490,6 +607,7 @@ class Auth:
         name = self._db().execute("SELECT username FROM auth_users WHERE id=?", (user_id,)).fetchone()
         db = self._db()
         db.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
+        db.execute("DELETE FROM auth_user_groups WHERE user_id=?", (user_id,))
         db.execute("DELETE FROM auth_users WHERE id=?", (user_id,))
         db.commit()
         for fn in self.user_hooks:
@@ -604,6 +722,11 @@ class Auth:
 
         self._upsert_ldap_user(username, display_name, email, is_admin)
         r = self.get_user(username)
+        if r:
+            try:
+                self.sync_ldap_groups(r["id"], member_of)
+            except Exception as e:  # a group sync problem never blocks the sign-in
+                log.error("ldap group sync for %s failed: %s", username, e)
         if r and r["disabled"]:
             return None
         return r
@@ -911,6 +1034,7 @@ class Auth:
                     email=d.get("email"),
                     role=d.get("role"),
                     group_id=d.get("group_id"),
+                    group_ids=d.get("group_ids"),
                     perms=d.get("perms"),
                     extra=d.get("extra"))
             except Exception as e:
@@ -940,7 +1064,11 @@ class Auth:
             kw = dict(is_admin=d.get("is_admin"), disabled=d.get("disabled"),
                       display_name=d.get("display_name"), email=d.get("email"),
                       role=d.get("role"), perms=d.get("perms"))
-            if "group_id" in d:
+            if "group_ids" in d:
+                if not isinstance(d.get("group_ids") or [], list):
+                    return jsonify({"error": "group_ids must be a list"}), 400
+                kw["group_ids"] = d.get("group_ids") or []
+            elif "group_id" in d:
                 kw["group_id"] = d.get("group_id")
             if "extra" in d:
                 kw["extra"] = d.get("extra")
@@ -974,9 +1102,14 @@ class Auth:
             try:
                 if d.get("role") == "admin" and not g.user.get("is_admin"):
                     return jsonify({"error": "only an admin can grant admin"}), 403
+                if d.get("role") is not None and d["role"] not in features.ROLE_DEFAULT_LEVEL:
+                    return jsonify({"error": "unknown role"}), 400
                 grp = self.create_group(
                     d.get("name"), role=d.get("role") or "custom",
-                    perms=d.get("perms") or {}, extra=d.get("extra"))
+                    perms=d.get("perms") or {}, extra=d.get("extra"),
+                    ldap_dn=d.get("ldap_dn"))
+                if isinstance(d.get("members"), list):
+                    self.update_group(grp["id"], members=d["members"])
             except Exception as e:
                 return jsonify({"error": str(e)}), 400
             return jsonify({"ok": True, "group": grp})
@@ -990,9 +1123,14 @@ class Auth:
                 return jsonify({"error": "id required"}), 400
             if d.get("role") == "admin" and not g.user.get("is_admin"):
                 return jsonify({"error": "only an admin can grant admin"}), 403
+            if d.get("role") is not None and d["role"] not in features.ROLE_DEFAULT_LEVEL:
+                return jsonify({"error": "unknown role"}), 400
+            if "members" in d and not isinstance(d.get("members"), list):
+                return jsonify({"error": "members must be a list of user ids"}), 400
             try:
                 self.update_group(gid, name=d.get("name"), role=d.get("role"),
-                                  perms=d.get("perms"), extra=d.get("extra"))
+                                  perms=d.get("perms"), extra=d.get("extra"),
+                                  ldap_dn=d.get("ldap_dn"), members=d.get("members"))
             except ValueError as e:
                 return jsonify({"error": str(e)}), 400
             return jsonify({"ok": True})

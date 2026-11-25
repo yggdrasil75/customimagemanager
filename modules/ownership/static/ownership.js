@@ -1,7 +1,7 @@
 /* ownership.js - front-end of the ownership & sharing module.
  *
  * Three touch points, all additive:
- *   - upload box: a Personal / Public selector next to the folder field,
+ *   - upload box: a Public / Private / Personal selector next to the folder field,
  *     posted as the `scope` form field;
  *   - album rows (core fires 'cim:album-row'): owner / visibility badge, a
  *     share button for the owner, rename/delete hidden for everyone else;
@@ -57,14 +57,26 @@
   }
 
   // -- upload scope --------------------------------------------------------
-  /** @brief Add the Personal / Public selector next to the upload folder field. */
+  /** @brief Add the Public / Private / Personal selector next to the upload folder field.
+   *  The choices and the default come from /api/acl/me (the account's "Uploads default
+   *  to" setting; personal only for accounts that may keep a personal folder). */
+  const SCOPE_LABEL = { public: 'Public', private: 'Private', personal: 'Personal folder' };
+  const SCOPE_TITLE = 'Public: the shared library (the folder\'s permissions apply). ' +
+    'Private: only you until you share it (Owner tab). Personal folder: your users/<you>/ tree.';
+  let _scopes = null;
   function addScopeSelects() {
+    if (_scopes === null) {
+      _scopes = ['public', 'private'];
+      fetch('/api/acl/me').then(r => r.json()).then(d => {
+        if (d && d.success && d.scopes) { _scopes = d.scopes; document.querySelectorAll('.upload-scope').forEach(fillScope); }
+      }).catch(() => {});
+    }
     document.querySelectorAll('#upload_folder, [id="upload_folder"]').forEach(inp => {
       if (inp.nextElementSibling && inp.nextElementSibling.classList.contains('upload-scope')) return;
       const sel = document.createElement('select');
       sel.className = 'upload-scope bg-gray-700 text-xs px-1 py-1 rounded border border-gray-600';
-      sel.title = 'Personal: only you (and who you share with) can see it. Public: everyone on this server.';
-      sel.innerHTML = '<option value="personal">Personal</option><option value="public">Public</option>';
+      sel.title = SCOPE_TITLE;
+      fillScope(sel);
       inp.insertAdjacentElement('afterend', sel);
     });
     // The core uploader posts FormData; add the scope to every /api/upload post.
@@ -80,6 +92,13 @@
         return _fetch(input, init);
       };
     }
+  }
+
+  function fillScope(sel) {
+    const cur = sel.dataset.touched ? sel.value : null;
+    sel.innerHTML = _scopes.map(v => `<option value="${v}">${SCOPE_LABEL[v] || v}</option>`).join('');
+    if (cur && _scopes.includes(cur)) sel.value = cur;
+    sel.onchange = () => { sel.dataset.touched = '1'; };
   }
 
   // -- album rows ----------------------------------------------------------

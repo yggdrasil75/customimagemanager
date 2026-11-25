@@ -55,7 +55,8 @@ def test_api_keys(app, client, auth_on):
     assert client.get("/api/auth/me").status_code == 401
     assert client.get("/api/auth/me", headers=_bearer("cim_nope_nope")).status_code == 401
     up = client.post("/api/upload", headers=_bearer(key), content_type="multipart/form-data",
-                     data={"file": (io.BytesIO(png_bytes(seed=41)), "key_up.png"), "mode": "sync"})
+                     data={"file": (io.BytesIO(png_bytes(seed=41)), "key_up.png"), "mode": "sync",
+                           "scope": "personal"})   # uploads default to public; ask for the personal folder
     assert up.status_code == 200, up.get_json()
     fn = up.get_json()["filename"]
     assert fn.startswith("users/k_user/")

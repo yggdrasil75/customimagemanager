@@ -1,0 +1,15 @@
+/* acl.css - the Owner tab and Settings -> Permissions & audit (acl.js). */
+.acl-box { border: 1px solid var(--cim-gray-700, #374151); border-radius: 6px; padding: 6px 8px; }
+.acl-btn { background: var(--cim-gray-700, #374151); color: var(--cim-gray-200, #e5e7eb); border-radius: 4px;
+  padding: 2px 8px; font-size: 11px; display: inline-block; }
+.acl-btn:hover { background: var(--cim-gray-600, #4b5563); }
+.acl-btn:disabled { opacity: .45; cursor: default; }
+.acl-primary { background: var(--cim-accent-600, #2563eb); color: #fff; font-weight: 700; }
+.acl-primary:hover { background: var(--cim-accent-500, #3b82f6); }
+.acl-table { width: 100%; border-collapse: collapse; }
+.acl-table tr + tr td { border-top: 1px solid var(--cim-gray-700, #374151); }
+.acl-adv { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 1px 8px;
+  background: var(--cim-gray-900, #111827); border-radius: 4px; padding: 4px; }
+.acl-inh { padding: 1px 0; }
+.acl-log { width: 100%; border-collapse: collapse; font-size: 11px; }
+.acl-log td { padding: 2px 4px; vertical-align: top; border-top: 1px solid var(--cim-gray-700, #374151); }

@@ -437,7 +437,8 @@ def _init_db():
             error       TEXT DEFAULT '',
             rel_path    TEXT DEFAULT '',   -- set once processed
             created     REAL NOT NULL,
-            updated     REAL NOT NULL
+            updated     REAL NOT NULL,
+            upload_ctx  TEXT DEFAULT '{}'  -- who sent it (+ module extras), see _upload_ctx
         );
         CREATE INDEX IF NOT EXISTS idx_uq_status ON upload_queue(status, id);
 
@@ -587,6 +588,13 @@ def _init_db():
         db.execute(f"CREATE INDEX IF NOT EXISTS idx_files_date_sort ON files(({_x} IS NULL), {_x}, rel_path)")
         db.execute(f"CREATE INDEX IF NOT EXISTS idx_files_date_sort_desc ON files(({_x} IS NULL), {_x} DESC, rel_path)")
         db.commit()
+    except Exception:
+        pass
+    # who sent a queued upload: the queue worker hands it back to the modules
+    try:
+        if "upload_ctx" not in {r[1] for r in db.execute("PRAGMA table_info(upload_queue)")}:
+            db.execute("ALTER TABLE upload_queue ADD COLUMN upload_ctx TEXT DEFAULT '{}'")
+            db.commit()
     except Exception:
         pass
     # Fold legacy manual IQA stars (iqa_manual=1) into rating / rating_user,
@@ -5316,6 +5324,7 @@ def _enqueue_spooled_upload(spool_path, orig_name, folder, metadata, pred):
     @return the response tuple; 500 (spool removed) when queueing fails.
     """
     now = time.time()
+    upload_ctx = json.dumps(_upload_ctx())
     def _enqueue():
         db = _db()
         # a job for this name is pending: fold the repeat into it
@@ -5327,9 +5336,9 @@ def _enqueue_spooled_upload(spool_path, orig_name, folder, metadata, pred):
             return ("dup", dup["id"])
         cur = db.execute(
             "INSERT INTO upload_queue"
-            "(spool_path, orig_name, folder, metadata, status, created, updated) "
-            "VALUES(?,?,?,?,'pending',?,?)",
-            (spool_path, orig_name, folder, metadata, now, now))
+            "(spool_path, orig_name, folder, metadata, status, created, updated, upload_ctx) "
+            "VALUES(?,?,?,?,'pending',?,?,?)",
+            (spool_path, orig_name, folder, metadata, now, now, upload_ctx))
         db.commit()
         return ("new", cur.lastrowid)
     try:
@@ -6105,6 +6114,10 @@ def _process_upload_job(job) -> tuple[str, str, str]:
             "folder": job["folder"] or "", "metadata": job["metadata"] or "{}"},
             content_type="multipart/form-data")
     with ctx:
+        try:
+            g.upload_ctx = json.loads(job.get("upload_ctx") or "{}") or {}
+        except (TypeError, ValueError):
+            g.upload_ctx = {}
         resp = _run_upload()
         body, code = (resp if isinstance(resp, tuple) else (resp, 200))
         payload = body.get_json(silent=True) or {}
@@ -6617,6 +6630,18 @@ _session_locks_guard = threading.Lock()
 def _upload_user():
     """! @brief The requester's username ('' with auth off), the owner of a session."""
     return (getattr(g, "user", None) or {}).get("username", "") if has_request_context() else ""
+
+def _upload_ctx():
+    """! @brief Who an upload is from, carried through the queue: {"user": name, ...}.
+    In the queue worker it is the context the job was queued with; in a request it
+    is the requester plus what modules put in g.upload_ctx_extra (the ownership
+    module's private / public choice). Modules read it with host.upload_context().
+    """
+    if not has_request_context():
+        return {}
+    if g.get("upload_ctx") is not None:
+        return dict(g.upload_ctx)
+    return {**(g.get("upload_ctx_extra") or {}), "user": _upload_user()}
 
 def _session_lock(sid):
     """! @brief The lock serialising writes to one session."""
@@ -8692,6 +8717,7 @@ _core_api = SimpleNamespace(
     current_user=lambda: (getattr(g, "user", None) or {}).get("username", ""),
     object_grouping=og,
     ingest_inline=_process_spooled_inline, enqueue_spooled_upload=_enqueue_spooled_upload,
+    upload_context=lambda: _upload_ctx(),
     file_albums=_file_albums, set_file_albums=_set_file_albums, delete_file=_delete_file,
     album_create=_album_create, album_add=_album_add, album_remove=_album_remove,
     album_set_description=_album_set_description, album_set_cover=_album_set_cover,
@@ -8844,7 +8870,7 @@ for _t, _k in (
         ("upload_queue", "state"),          # ingest jobs in flight
         ("cim_meta", "state")):
     module_host.declare_table(_t, _k)
-for _t in ("auth_users", "auth_groups", "auth_sessions"):
+for _t in ("auth_users", "auth_groups", "auth_user_groups", "auth_sessions"):
     module_host.declare_table(_t, "state", module_id="auth")
 # album description / sort / cover and manual positions come back from the files on a pull
 module_host.on("library.sync", _album_restore)

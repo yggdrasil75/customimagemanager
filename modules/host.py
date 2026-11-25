@@ -872,6 +872,15 @@ class Host:
                 folder = fn(folder, form)
         return folder
 
+    def upload_context(self):
+        """! @brief Who the upload being stored now came from: {"user": username, ...}
+        (plus what modules set in g.upload_ctx_extra while the upload was received).
+        Valid inside upload handlers (upload.check / upload.stored), in the request and
+        in the queue worker alike; {} elsewhere.
+        """
+        fn = getattr(self.core, "upload_context", None)
+        return fn() if fn else {}
+
     def register_gallery_filter(self, clause):
         """! @brief Hide matching rows from the flat gallery (a SQL condition on files)."""
         self.gallery_filters.append(clause)

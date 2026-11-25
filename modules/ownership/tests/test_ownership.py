@@ -56,7 +56,8 @@ def test_ownership_end_to_end(app, client, upload, accounts, host):
     pub = upload("own_pub.png", seed=11, scope="public")
     assert not pub.startswith("users/")
     with as_(app, alice):
-        mine = upload("own_mine.png", seed=12)              # personal is the default
+        mine = upload("own_mine.png", seed=12, scope="personal")  # uploads default to public now
+        assert upload("own_default.png", seed=19).startswith("own_default")   # ... like this one
         assert mine == "users/own_alice/own_mine.jxl"
         assert os.path.exists(os.path.join("media", mine))
         assert {pub, mine} <= _names(client)
@@ -144,7 +145,8 @@ def test_books_in_a_personal_tree_stay_private(app, client, upload, accounts):
     nowhere (gallery tiles, shelf, authors, status, detail, cover, download)."""
     alice, bob = accounts["own_alice"], accounts["own_bob"]
     with as_(app, alice):
-        j = upload._post({"file": (io.BytesIO(_cbz()), "own_comic.cbz"), "mode": "sync"}, "own_comic.cbz")
+        j = upload._post({"file": (io.BytesIO(_cbz()), "own_comic.cbz"), "mode": "sync", "scope": "personal"},
+                         "own_comic.cbz")
     rel = j["filename"]
     assert rel.startswith("users/own_alice/")
     for _ in range(20):

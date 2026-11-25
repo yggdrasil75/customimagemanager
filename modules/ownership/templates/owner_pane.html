@@ -1,0 +1,8 @@
+{# Controls-pane tab "Owner": the open file's (or one of its folders') owner,
+   permissions (own + inherited entries, inheritance switch, advanced rights),
+   effective access for any account, auditing entries and the audit log.
+   Body only - the core renders #controls_pane_owner around it; acl.js fills it.
+   Behind the feature acl.manage (read = see, write = change). #}
+<div id="acl_pane" class="flex flex-col gap-3 text-xs">
+  <div class="text-gray-500 italic">Open a file to see its owner and permissions.</div>
+</div>
