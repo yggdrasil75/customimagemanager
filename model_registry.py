@@ -449,9 +449,13 @@ class ModelRegistry:
             return key
 
     def acquire(self, key):
+        """! @brief The model under `key`, loading it first when needed. Inside no_load()
+        a model that isn't resident is not loaded: the answer is None."""
         with self._lock:
             e = self._entries.get(key)
             if e is None:
+                return None
+            if not e["loaded"] and getattr(_NO_LOAD, "on", False):
                 return None
             self._pinned.add(key)
             already = e["loaded"]
@@ -627,6 +631,23 @@ class ModelRegistry:
                 if victim is None:
                     return
                 self._unload_locked(victim)
+
+## @brief Set by no_load() on the current thread.
+_NO_LOAD = threading.local()
+
+
+@contextlib.contextmanager
+def no_load():
+    """! @brief Within it, this thread's acquire() never loads (nor downloads) a model:
+    a status check can ask "is it ready?" through the normal loaders and gets a
+    model only when one is already resident."""
+    prev = getattr(_NO_LOAD, "on", False)
+    _NO_LOAD.on = True
+    try:
+        yield
+    finally:
+        _NO_LOAD.on = prev
+
 
 REGISTRY = ModelRegistry()
 

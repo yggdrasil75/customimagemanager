@@ -25,6 +25,8 @@ import logging
 import time
 from concurrent import futures as _futures
 
+import model_registry
+
 # "fg" (button / pipeline) or "bg" (background sweep), set while request() binds,
 # so a loader reading variant() gets the pick of the run it serves.
 _ROLE = threading.local()
@@ -608,6 +610,17 @@ class ModelBroker:
                     except Exception:
                         return None
         return None
+
+    def peek(self, cap_id, role="fg"):
+        """! @brief The handle request() would give, but only when its model is already
+        loaded: never loads or downloads one (model_registry.no_load). For status checks
+        ("is text search ready?"), which must not start a model nobody asked for.
+        @return the handle, or None (nothing picked / available, or not loaded yet)."""
+        try:
+            with model_registry.no_load():
+                return self.request(cap_id, role)
+        except Exception:
+            return None
 
     def try_request(self, cap_id):
         """! @brief request(), but None instead of raising."""

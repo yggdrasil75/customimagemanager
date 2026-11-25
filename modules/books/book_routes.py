@@ -1342,7 +1342,7 @@ def register(host, ctx: dict):
             "embedded": c["embedded"] or 0,
             "authors": authors, "series": series, "triage": pending_triage,
             "calibre": bi.have_calibre(),
-            "search_ready": bool(ctx["embed_enabled"]()),
+            "search_ready": bool((ctx.get("embed_available") or ctx["embed_enabled"])()),
         })
 
     @host.route("/api/books/reindex", methods=["POST"], feature="tab.books", level="write")

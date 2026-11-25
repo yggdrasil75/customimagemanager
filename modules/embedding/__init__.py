@@ -119,6 +119,16 @@ def register(host):
             updated  REAL,
             PRIMARY KEY (rel_path, model))
     """, kind="cache", check=_migrate_embeddings)
+    # What each picked model said about itself the last time it was loaded: its
+    # vector space and whether it also embeds text. Status checks read this instead
+    # of loading the model just to ask (which downloaded models nobody asked for).
+    host.add_table("""
+        CREATE TABLE IF NOT EXISTS embed_spaces(
+            pick     TEXT PRIMARY KEY,           -- cap|provider|size|type
+            space    TEXT NOT NULL DEFAULT '',
+            text     INTEGER NOT NULL DEFAULT 0,
+            updated  REAL)
+    """, kind="cache")
     host.add_table("""
         CREATE TABLE IF NOT EXISTS image_clusters(
             rel_path TEXT PRIMARY KEY,
@@ -163,20 +173,89 @@ def register(host):
         except NoProviderError as e:
             raise RuntimeError(str(e))
 
-    def _try_handle():
+    def _try_handle(role="fg"):
         try:
-            return _handle()
-        except RuntimeError:
+            h = _handle() if role == "fg" else host.request_model("embed", role)
+        except (RuntimeError, NoProviderError):
             return None
+        _remember("embed", h, role)
+        return h
 
     _last_tag = {}          # role -> the space last embedded into (progress reads it)
 
-    def _embed_tag(handle=None, role="fg"):
-        handle = handle or _try_handle()
+    # -- answers that must not load a model ---------------------------------
+    # Status probes, the Books shelf and the library pipeline ask "which space?",
+    # "can it search by text?", "is a text model set up?". Loading the model to
+    # answer meant opening the app (or a background library pass) downloaded and
+    # started models nobody asked for. These read the loaded model when there is
+    # one (broker.peek), else what it said last time (embed_spaces), else the
+    # pick's name; only real work (embedding, searching) loads.
+    _noted = {}             # pick key -> (space, text) already written to embed_spaces
+
+    def _pick_key(cap, role="fg"):
+        pid = host.broker.selected_id(cap, role)
+        if not pid:
+            return ""
+        v = host.model_variant(cap, role)
+        return f"{cap}|{pid}|{v.get('size') or ''}|{v.get('type') or ''}"
+
+    def _remember(cap, handle, role="fg"):
+        """! @brief Note what a loaded handle says about itself (space, text search)."""
+        model = getattr(handle, "model", None)
+        space = getattr(model, "space", None)
+        key = _pick_key(cap, role)
+        if not key or handle is None:
+            return
+        text = 1 if callable(getattr(model, "embed_text", None)) else 0
+        if _noted.get(key) == (str(space or ""), text):
+            return                                 # nothing new: no write per embed call
+        _noted[key] = (str(space or ""), text)
+        try:
+            db = host.db()
+            db.execute("INSERT OR REPLACE INTO embed_spaces(pick, space, text, updated) VALUES (?,?,?,?)",
+                       (key, str(space or ""), text, time.time()))
+            db.commit()
+        except Exception:
+            pass
+
+    def _recalled(cap, role="fg"):
+        """! @brief (space, text) noted for the current pick, or None."""
+        key = _pick_key(cap, role)
+        if not key:
+            return None
+        try:
+            r = host.db().execute("SELECT space, text FROM embed_spaces WHERE pick=?", (key,)).fetchone()
+        except Exception:
+            return None
+        return (r["space"], bool(r["text"])) if r else None
+
+    def _would_serve(cap, role="fg"):
+        """! @brief A model is picked (or defaulted) and installed: it would load on use."""
+        p = host.broker.provider_for(cap, role)
+        try:
+            return p is not None and bool(p.available())
+        except Exception:
+            return False
+
+    def _peek(cap, role="fg"):
+        """! @brief The picked model's handle only when it is already loaded."""
+        h = host.broker.peek(cap, role)
+        if h is not None:
+            _remember(cap, h, role)
+        return h
+
+    def _embed_tag(handle=None, role="fg", quick=False):
+        """! @brief The image vector space of the pick. quick=True never loads a model."""
+        if handle is None:
+            handle = _peek("embed", role) if quick else _try_handle(role)
         space = getattr(getattr(handle, "model", None), "space", None)
         if space:
             _last_tag[role] = str(space)          # what the progress readout counts
             return str(space)
+        if quick:
+            got = _recalled("embed", role)
+            if got and got[0]:
+                return got[0]
         pid = host.broker.selected_id("embed", role)
         return f"{pid}:{host.model_variant('embed', role).get('size') or ''}"
 
@@ -189,6 +268,22 @@ def register(host):
 
     def _text_search_enabled():
         return _text_embedder() is not None
+
+    def _can_text(cap):
+        """! @brief Can the pick of `cap` embed text? Answered without loading it: exact
+        when it is loaded, else what it said when last loaded, else (never loaded yet)
+        yes when it is set up - a search loads it on demand and reports a model that
+        turns out to have no text side."""
+        h = _peek(cap)
+        if h is not None:
+            return callable(getattr(getattr(h, "model", None), "embed_text", None))
+        if not _would_serve(cap):
+            return False
+        got = _recalled(cap)
+        return got[1] if got else True
+
+    def _text_search_quick():
+        return _can_text("embed")
 
     ## @brief -- the text and audio picks (Models -> Text embedding / Audio embedding) -
     # Same pattern as the image pick: this module never names a model. The
@@ -203,15 +298,23 @@ def register(host):
 
     def _try_cap(cap):
         try:
-            return _cap_handle(cap)
+            h = _cap_handle(cap)
         except RuntimeError:
             return None
+        _remember(cap, h)
+        return h
 
-    def _cap_space(cap, handle=None):
-        handle = handle or _try_cap(cap)
+    def _cap_space(cap, handle=None, quick=False):
+        """! @brief The vector space of a pick. quick=True never loads a model."""
+        if handle is None:
+            handle = _peek(cap) if quick else _try_cap(cap)
         space = getattr(getattr(handle, "model", None), "space", None)
         if space:
             return str(space)
+        if quick:
+            got = _recalled(cap)
+            if got and got[0]:
+                return got[0]
         pid = host.broker.selected_id(cap)
         return f"{pid}:{host.model_variant(cap).get('size') or ''}" if pid else ""
 
@@ -236,9 +339,12 @@ def register(host):
         fn = getattr(getattr(h, "model", None), "embed_text", None)
         return fn if callable(fn) else None
 
+    def _audio_text_quick():
+        return _can_text("embed.audio")
+
     def _why_no_text():
-        return "" if _text_search_enabled() else \
-            "The picked embedding model can't embed text, so text search is off."
+        return "" if _text_search_quick() else \
+            "Text search unavailable."
 
     # -- core embedding functions -------------------------------------------
     def _normalise(v):
@@ -555,11 +661,11 @@ def register(host):
             "SELECT model, COUNT(*) c, MAX(dim) dim FROM image_embeddings GROUP BY model ORDER BY c DESC").fetchall()]
 
     def _embedding_count(db, model=None):
-        model = _embed_tag() if model is None else model
+        model = _embed_tag(quick=True) if model is None else model
         return db.execute("SELECT COUNT(*) FROM image_embeddings WHERE model=?", (model,)).fetchone()[0]
 
     def _current_dim(db, model=None):
-        model = _embed_tag() if model is None else model
+        model = _embed_tag(quick=True) if model is None else model
         r = db.execute("SELECT dim, COUNT(*) c FROM image_embeddings WHERE model=? GROUP BY dim "
                        "ORDER BY c DESC LIMIT 1", (model,)).fetchone()
         return (r["dim"], r["c"]) if r else (None, 0)
@@ -992,22 +1098,22 @@ def register(host):
         cur = _embedding_count(db)
         return jsonify({
             "provider": _embed_provider(),
-            "space": _embed_tag(),
-            "text_search": _text_search_enabled(),
+            "space": _embed_tag(quick=True),
+            "text_search": _text_search_quick(),
             "note": _why_no_text(),
-            "stored_model": _embed_tag() if cur else (models[0]["model"] if models else None),
+            "stored_model": _embed_tag(quick=True) if cur else (models[0]["model"] if models else None),
             "stored_models": models,               # every space kept; switch back any time
             "stored_matches": cur > 0,
             "total": cur,
             "images": db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image'").fetchone()[0],
             "background": "embed" in host.broker.background_capabilities(),
             "text_provider": host.broker.selected_id("embed.text"),
-            "text_space": _cap_space("embed.text"),
-            "text_ready": _text_doc_embedder() is not None,
+            "text_space": _cap_space("embed.text", quick=True),
+            "text_ready": _would_serve("embed.text"),
             "audio_provider": host.broker.selected_id("embed.audio"),
-            "audio_space": _cap_space("embed.audio"),
-            "audio_ready": _audio_embedder() is not None,
-            "audio_text_search": _audio_text_embedder() is not None,
+            "audio_space": _cap_space("embed.audio", quick=True),
+            "audio_ready": _would_serve("embed.audio"),
+            "audio_text_search": _audio_text_quick(),
         })
 
     # Backward-compatible endpoints (matching original manager.py API)
@@ -1019,22 +1125,22 @@ def register(host):
         cur = _embedding_count(db)
         return jsonify({
             "provider": _embed_provider(),
-            "space": _embed_tag(),
-            "text_search": _text_search_enabled(),
+            "space": _embed_tag(quick=True),
+            "text_search": _text_search_quick(),
             "note": _why_no_text(),
-            "stored_model": _embed_tag() if cur else (models[0]["model"] if models else None),
+            "stored_model": _embed_tag(quick=True) if cur else (models[0]["model"] if models else None),
             "stored_models": models,               # every space kept; switch back any time
             "stored_matches": cur > 0,
             "total": cur,
             "images": db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image'").fetchone()[0],
             "background": "embed" in host.broker.background_capabilities(),
             "text_provider": host.broker.selected_id("embed.text"),
-            "text_space": _cap_space("embed.text"),
-            "text_ready": _text_doc_embedder() is not None,
+            "text_space": _cap_space("embed.text", quick=True),
+            "text_ready": _would_serve("embed.text"),
             "audio_provider": host.broker.selected_id("embed.audio"),
-            "audio_space": _cap_space("embed.audio"),
-            "audio_ready": _audio_embedder() is not None,
-            "audio_text_search": _audio_text_embedder() is not None,
+            "audio_space": _cap_space("embed.audio", quick=True),
+            "audio_ready": _would_serve("embed.audio"),
+            "audio_text_search": _audio_text_quick(),
         })
 
     @host.route("/api/library_embed", methods=["POST"], feature="tab.review", level="write")
@@ -1066,7 +1172,7 @@ def register(host):
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
                         "scope": "selected" if sel else "library",
-                        "text_search": _text_search_enabled(), "note": _why_no_text()})
+                        "text_search": _text_search_quick(), "note": _why_no_text()})
 
     @host.route("/api/embedding/generate", methods=["POST"], feature="tab.review", level="write")
     def embedding_generate():
@@ -1088,7 +1194,7 @@ def register(host):
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
                         "scope": "selected" if sel else "library",
-                        "text_search": _text_search_enabled(), "note": _why_no_text()})
+                        "text_search": _text_search_quick(), "note": _why_no_text()})
 
     @host.route("/api/embedding/bulk", methods=["POST"], feature="tab.review", level="write")
     def embedding_bulk():
@@ -1108,7 +1214,7 @@ def register(host):
         total = _embedding_count(db)
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
-                        "text_search": _text_search_enabled(), "note": _why_no_text()})
+                        "text_search": _text_search_quick(), "note": _why_no_text()})
 
     @host.route("/api/embedding/cluster", methods=["POST"], feature="tab.review", level="write")
     def embedding_cluster():
@@ -1292,7 +1398,7 @@ def register(host):
         "embedding_count": _embedding_count,
         "cluster_count": _cluster_count,
         "stored_models": _stored_models,
-        "embedding_model_tag": lambda db: _embed_tag() if _embedding_count(db) else None,
+        "embedding_model_tag": lambda db: _embed_tag(quick=True) if _embedding_count(db) else None,
         "embed_tag": _embed_tag,
         "text_embed_enabled": _text_search_enabled,
         "embed_text": lambda text: (lambda f: f(text) if f else None)(_text_embedder()),
@@ -1302,6 +1408,8 @@ def register(host):
         "register_similar_finder": register_similar_finder,
         # text pick (embed.text capability): passages / queries, own space
         "text_doc_enabled": lambda: _text_doc_embedder() is not None,
+        # set up and would load on use - for status, never loads
+        "text_doc_available": lambda: _would_serve("embed.text"),
         "text_space": lambda: _cap_space("embed.text"),
         "embed_doc": lambda text: (lambda f: f(text) if f else None)(_text_doc_embedder()),
         "embed_query": lambda text: (lambda f: f(text) if f else None)(_text_query_embedder()),
@@ -1309,6 +1417,11 @@ def register(host):
         "audio_enabled": lambda: _audio_embedder() is not None,
         "audio_space": lambda: _cap_space("embed.audio"),
         "audio_text_enabled": lambda: _audio_text_embedder() is not None,
+        # never load a model (status): what a loaded / last loaded pick said about itself
+        "peek_space": lambda cap: (lambda h: str(getattr(getattr(h, "model", None), "space", "") or "")
+                                   if h is not None else ((_recalled(cap) or ("", False))[0]))(_peek(cap)),
+        "peek_text": _can_text,
+        "note_loaded": lambda cap, handle: _remember(cap, handle),
         "embed_audio": lambda abs_path: (lambda f: f(abs_path) if f else None)(_audio_embedder()),
         "embed_audio_text": lambda text: (lambda f: f(text) if f else None)(_audio_text_embedder()),
         "audio_handle": _audio_embedder,

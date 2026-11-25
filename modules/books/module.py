@@ -109,6 +109,7 @@ def register(host):
         "embed_text":    lambda text: _emb("embed_doc", lambda t: None)(text),
         "embed_query":   lambda text: _emb("embed_query", lambda t: None)(text),
         "embed_enabled": lambda: bool(_emb("text_doc_enabled", lambda: False)()),
+        "embed_available": lambda: bool(_emb("text_doc_available", lambda: False)()),
         "embed_tag":     lambda: _emb("text_space", lambda: "")(),
         "comic_pages":   lambda: host.get_service("comic_pages"),   # comics module, or None
         "current_user":  host.current_user,

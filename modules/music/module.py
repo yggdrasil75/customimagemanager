@@ -148,7 +148,21 @@ def register(host):
         m = getattr(h, "model", None)
         space = str(getattr(m, "space", None) or host.broker.selected_id("embed.audio") or "")
         et = getattr(m, "embed_text", None)
+        note = (host.get_service("embedding") or {}).get("note_loaded")
+        if note:
+            note("embed.audio", h)        # so status can answer later without loading it
         return h, space, (et if callable(et) else None)
+
+    def _quick_audio():
+        """! @brief (space, text_search) of the audio pick without loading a model: the
+        loaded one's own answer, else what it said when last loaded, else its name (text
+        search then reads as on: the search loads the model when it runs)."""
+        svc = host.get_service("embedding") or {}
+        space = svc["peek_space"]("embed.audio") if svc.get("peek_space") else ""
+        text = bool(svc["peek_text"]("embed.audio")) if svc.get("peek_text") else False
+        prov = host.broker.provider_for("embed.audio")
+        ok = prov is not None and prov.available()
+        return (space or (host.broker.selected_id("embed.audio") or "") if ok else ""), (text and ok)
 
     def _try_audio_handle():
         try:
@@ -492,7 +506,7 @@ def register(host):
         return clauses, params
 
     def status():
-        _, space, embed_text = _try_audio_handle()
+        space, text_ok = _quick_audio()          # a status poll never loads a model
         w, wp = where()
         c = db().execute(f"SELECT COUNT(*) tot, COUNT(DISTINCT {_NAME}) artists, "
                          f"COUNT(DISTINCT {_ALB} || char(0) || {_NAME}) albums, "
@@ -507,7 +521,7 @@ def register(host):
                         "albums": c["albums"] or 0, "genres": c["genres"] or 0,
                         "hours": round((c["secs"] or 0) / 3600.0, 1), "clusters": n,
                         "provider": host.broker.selected_id("embed.audio"), "space": space,
-                        "can_embed": bool(space), "text_search": embed_text is not None,
+                        "can_embed": bool(space), "text_search": text_ok,
                         "can_cluster": bool(ml.HAVE_SKLEARN)})
 
     def reindex():

@@ -28,6 +28,7 @@ import atexit
 import collections
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -89,9 +90,9 @@ def _bin_dir():
     return model_registry.model_dir("kobold", "bin")
 
 
-def download(variant, cfg, save):
+def download(variant, set_exe):
     """! @brief Fetch the chosen build to models/kobold/bin/koboldcpp-<variant>, make it
-    executable and set it as the executable. Runs on a thread; logs progress."""
+    executable and set it as the executable (set_exe(path)). Runs on a thread; logs progress."""
     url, label = _BUILDS[variant]
     dest = os.path.join(_bin_dir(), f"koboldcpp-{variant}" + (".exe" if _WIN else ""))
     tmp = dest + ".part"
@@ -114,15 +115,44 @@ def download(variant, cfg, save):
         os.replace(tmp, dest)
         if not _WIN:
             os.chmod(dest, 0o755)
-        cfg["kobold_exe"] = dest
-        save()
-        _LOG.append(f"[download] done → {dest} (set as executable)")
+        set_exe(dest)
+        _LOG.append(f"[download] done -> {dest} (set as executable)")
     except Exception as e:
         _LOG.append(f"[download] failed: {e}")
         if os.path.exists(tmp):
             os.remove(tmp)
     finally:
         _DL["busy"] = False
+
+
+def _downloaded_builds():
+    """! @brief Builds the Download button fetched (models/kobold/bin/), newest first."""
+    d = _bin_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    out = [os.path.join(d, n) for n in names
+           if n.startswith("koboldcpp-") and not n.endswith(".part") and os.path.isfile(os.path.join(d, n))]
+    return sorted(out, key=os.path.getmtime, reverse=True)
+
+
+def _usable(exe):
+    """! @brief The executable setting names something that can run."""
+    return bool(exe) and (os.path.isfile(exe) or shutil.which(exe) is not None)
+
+
+def resolve_exe(exe):
+    """! @brief (executable to run, note): the setting when it runs, else the newest
+    downloaded build (a settings form saved with the old value must not lose the
+    download), else the setting as it is (start then reports it missing)."""
+    exe = str(exe or "koboldcpp").strip()
+    if _usable(exe):
+        return exe, ""
+    builds = _downloaded_builds()
+    if builds:
+        return builds[0], f"using {builds[0]}"
+    return exe, ""
 
 
 def _hf(path: str) -> str:
@@ -184,10 +214,9 @@ def register(host):
          "Same forms as the model. Needed for image input (VLM)."),
         ("kobold_port", 5001, "number", "Port", ""),
         ("kobold_host", "127.0.0.1", "text", "Listen address",
-         "127.0.0.1 keeps the server reachable only through this app (the logged-in /chat pages). "
-         "Empty = every interface, which lets anyone on the network bypass the app's login."),
+         "Empty = all interfaces."),
         ("kobold_jinja", True, "toggle", "Jinja chat template (--jinja)",
-         "Format chats with the model's own template, including tool calls (needed by /chat tools)."),
+         "Needed for /chat tools."),
         ("kobold_gpulayers", -1, "number", "GPU layers", "-1 = auto."),
         ("kobold_context", 8192, "number", "Context size", ""),
         ("kobold_backend", "auto", "select", "Backend", ""),
@@ -206,7 +235,10 @@ def register(host):
                                 options=backends if kind == "select" else None)
 
     def _cmd():
-        exe = str(cfg.get("kobold_exe") or "koboldcpp").strip()
+        exe, note = resolve_exe(cfg.get("kobold_exe"))
+        if note:
+            _LOG.append("[exe] " + note)
+            host.set_config("kobold_exe", exe)      # the field shows where it really is
         cmd = [sys.executable, exe] if exe.endswith(".py") else [exe]
         model = _hf(cfg.get("kobold_model"))
         if not model:
@@ -245,10 +277,15 @@ def register(host):
             cmd = _cmd()
             _LOG.clear()
             _LOG.append("$ " + _cmdline(cmd))
-            _PROC = subprocess.Popen(cmd, cwd=model_registry.model_dir("kobold", "gguf"),
-                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     # no console window popping up on a Windows server
-                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            try:
+                _PROC = subprocess.Popen(cmd, cwd=model_registry.model_dir("kobold", "gguf"),
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         # no console window popping up on a Windows server
+                                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except (FileNotFoundError, PermissionError) as e:
+                msg = f"koboldcpp not found: {cmd[0]}"
+                _LOG.append("[start] " + msg)
+                raise RuntimeError(msg)
             threading.Thread(target=_pump, args=(_PROC,), daemon=True).start()
 
         def _wait():   # downloads can take a while; apply the endpoint once it answers
@@ -303,7 +340,8 @@ def register(host):
             return jsonify({"success": False, "error": "unknown build"})
         if _DL["busy"]:
             return jsonify({"success": False, "error": "download already running"})
-        threading.Thread(target=download, args=(variant, cfg, host.save_config), daemon=True).start()
+        threading.Thread(target=download, args=(variant, lambda p: host.set_config("kobold_exe", p)),
+                         daemon=True).start()
         return jsonify({"success": True, **_status()})
 
     host.add_route("/api/kobold/download", api_download, methods=["POST"], feature="settings.kobold",

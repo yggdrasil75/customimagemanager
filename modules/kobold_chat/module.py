@@ -77,10 +77,10 @@ def register(host):
     host.add_config_key("kobold_chat_rounds", default=8,
                         validate=lambda v: max(1, min(20, int(v))))
     host.add_settings_field(key="kobold_chat_rounds", label="Tool rounds per message", kind="number",
-                            pane="module", help="Most model calls one chat message may take (1-20).")
+                            pane="module", help="1-20.")
     host.add_config_key("kobold_chat_prompt", default="", validate=lambda v: str(v or "")[:4000])
     host.add_settings_field(key="kobold_chat_prompt", label="Extra instructions", kind="textarea",
-                            pane="module", help="Appended to the system note the chat model gets.")
+                            pane="module", help=None)
 
     def base_url():
         """! @brief The kobold module's server address."""
