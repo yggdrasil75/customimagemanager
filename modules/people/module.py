@@ -33,6 +33,8 @@ Single-valued facts about a person live in the .person record: `hidden`
 `favorites` (usernames); other users' favourites are DB state
 (person_favorites).
 """
+import threading
+
 from . import people_core as pc
 from . import person_pipeline
 from . import personlib
@@ -203,6 +205,24 @@ def register(host):
                         validate=lambda v: max(1, int(float(v or 3))))
     host.add_settings_field(key="person_gender_min_faces", label="...and at least this many confident faces",
                             kind="number", pane="module")
+    def _detach_later(new=None, old=None):
+        threading.Thread(target=pc.detach_excluded_faces, daemon=True, name="people-exclude").start()
+    host.add_config_key("face_skip_artwork", default=True, validate=bool, on_change=_detach_later)
+    host.on_startup(_detach_later)      # covers clustered before the switch existed
+    host.add_settings_field(key="face_skip_artwork", label="Keep covers and posters out of People",
+                            kind="toggle", pane="module",
+                            help="Album covers, movie and TV posters, book covers and fan art are still scanned "
+                                 "and tagged, but their faces don't become people: every picture in the Music, "
+                                 "Movies, TV and Books folders, and pictures named like artwork (cover.jpg, "
+                                 "folder.jpg, poster.jpg, ...-fanart.jpg).")
+    host.add_config_key("face_skip_folders", default="", on_change=_detach_later,
+                        validate=lambda v: "\n".join(f.strip() for f in str(v or "").replace(",", "\n").split("\n")
+                                                     if f.strip()))
+    host.add_settings_field(key="face_skip_folders", label="Keep these folders out of People",
+                            kind="textarea", pane="module",
+                            help="One folder per line, e.g. wallpapers or scans/receipts; * works too "
+                                 "(*/covers). Pictures there are still scanned and tagged; their faces just "
+                                 "don't become people.")
     host.add_config_key("face_skip_ai_generated", default=False, validate=bool)
     host.add_settings_field(key="face_skip_ai_generated", label="Skip face scan on AI-generated images",
                             kind="toggle", pane="module",
@@ -241,6 +261,7 @@ def register(host):
     host.add_route("/api/faces/unknown_cluster", pc.api_face_unknown_cluster, methods=["POST"], feature="tab.faces", level="write", action='face_unknown_cluster', fields=('cluster_id',))
     host.add_route("/api/faces/not_real_cluster", pc.api_face_not_real_cluster, methods=["POST"], feature="tab.faces", level="write", action='face_not_real_cluster', fields=('cluster_id',))
     host.add_route("/api/faces/unmark", pc.api_face_unmark, methods=["POST"], feature="tab.faces", level="write", action='face_unmark', fields=('ids',))
+    host.add_route("/api/faces/cluster_faces", pc.api_face_cluster_faces, feature="tab.faces")
     host.add_route("/api/faces/merge_candidates", pc.api_face_merge_candidates, feature="tab.faces")
     host.add_route("/api/faces/merge", pc.api_face_merge, methods=["POST"], feature="tab.faces", level="write", action='face_merge', fields=('src', 'dst'))
     host.add_route("/api/bodies/split", pc.api_body_split, methods=["POST"], feature="tab.faces", level="write")
@@ -291,6 +312,9 @@ def register(host):
     # Metadata is the source of truth: every (re)index pulls the file's region
     # names back onto the cached rows, so a name is never "written once, read never".
     host.on("file.indexed", lambda rel_path, abs_path=None: pc._sync_names_from_metadata(rel_path))
+    # an edited region list (a face box drawn and named by hand) reaches the people list too
+    host.on("file.metadata_changed", lambda rel_path, abs_path=None, fields=(), **_:
+            pc._sync_names_from_metadata(rel_path) if "regions" in (fields or ()) else None)
 
     def _labels_pool():
         try:

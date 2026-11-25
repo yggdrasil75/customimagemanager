@@ -4,6 +4,8 @@
  *   CIMPeople.facesIn(filename)        -> Promise<[{id,cx,cy,w,h,cluster_id,name,uuid,favorite,hidden}]>
  *   CIMPeople.matchFace(faces, region) -> the cached face for a region (box, else name)
  *   CIMPeople.cropStyle(box, pad)      -> inline background-size/-position cropping a box out of a thumb
+ *   CIMPeople.cropUrl(rel, box, pad, px) -> /api/crop of the padded box, cut from the original
+ *   CIMPeople.cropCss(rel, box, pad, px) -> inline style showing that crop (background-image + cover)
  *   CIMPeople.pick({title, allowRemove}) -> Promise<{person_id|cluster_id|name} | {remove:true} | null>
  *   CIMPeople.changeFace(target, opts) -> pick + POST /api/faces/assign | /api/faces/unassign
  *   CIMPeople.changeRegion(i)          -> the same for currentRegions[i] of the open picture
@@ -30,6 +32,25 @@
     const px = bw >= 1 ? 50 : clamp01((f.cx - bw / 2) / (1 - bw)) * 100;
     const py = bh >= 1 ? 50 : clamp01((f.cy - bh / 2) / (1 - bh)) * 100;
     return `background-size:${100 / bw}% ${100 / bh}%;background-position:${px}% ${py}%`;
+  }
+
+  /** @brief The URL of a face (or body) cut from the ORIGINAL picture: a small face
+   *  in a big photo stays sharp, where a crop of the gallery thumbnail is a blur.
+   *  The padded box is shifted to stay inside the picture, so the face stays centred.
+   *  @param px  the size it is shown at (CSS px); doubled for sharp screens and
+   *             rounded up to a step of 64, so the same few sizes are cached. */
+  function cropUrl(rel, f, pad = 1.6, px = 56) {
+    const bw = Math.min(1, Math.max(+f.w || 0, 0.01) * pad), bh = Math.min(1, Math.max(+f.h || 0, 0.01) * pad);
+    const cx = Math.min(1 - bw / 2, Math.max(bw / 2, +f.cx || 0.5));
+    const cy = Math.min(1 - bh / 2, Math.max(bh / 2, +f.cy || 0.5));
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const size = Math.min(512, Math.ceil(px * Math.max(2, dpr) / 64) * 64);
+    const r = n => n.toFixed(4);
+    return `/api/crop?file=${encodeURIComponent(rel || "")}&cx=${r(cx)}&cy=${r(cy)}&w=${r(bw)}&h=${r(bh)}&size=${size}`;
+  }
+  function cropCss(rel, f, pad = 1.6, px = 56) {
+    return `background-image:url('${cropUrl(rel, f, pad, px)}');background-size:cover;` +
+           `background-position:center;background-repeat:no-repeat`;
   }
 
   /** @brief The cached faces of one picture (one request per file until something changes). */
@@ -219,6 +240,6 @@
   hookRegionList();
   if (document.readyState === "loading") window.addEventListener("DOMContentLoaded", hookRegionList);
 
-  window.CIMPeople = { facesIn, matchFace, isFace, cropStyle, pick, changeFace, changeRegion, search,
+  window.CIMPeople = { facesIn, matchFace, isFace, cropStyle, cropUrl, cropCss, pick, changeFace, changeRegion, search,
                        setFavorite, setHidden, orderPeople, forget: fn => faceCache.delete(fn) };
 })();

@@ -247,3 +247,117 @@ def test_merge_candidates_rank_look_alikes_and_merge_nothing(client, upload, app
     finally:
         db.execute("DELETE FROM face_regions WHERE cluster_id IN (9201, 9202, 9203)")
         db.commit()
+
+
+def test_cluster_faces_pages_every_face_least_certain_first(client, upload, app, ungated):
+    import numpy as np
+    a, b = upload("allfaces_a.png", seed=141), upload("allfaces_b.png", seed=142)
+    db = app._db()
+    db.execute("DELETE FROM face_regions WHERE cluster_id=9301")
+    base = _fake_face_rows(db, a, 9301, 5, 0.0, seed=21)
+    rng = np.random.default_rng(22)                       # one stranger swept in
+    odd = rng.normal(size=512).astype(np.float32); odd /= np.linalg.norm(odd)
+    odd_id = db.execute("INSERT INTO face_regions(rel_path,cx,cy,w,h,embedding,embed_mode,cluster_id) "
+                        "VALUES (?,?,?,?,?,?,?,?)", (b, .5, .5, .1, .1, odd.tobytes(), "arcface", 9301)).lastrowid
+    db.commit()
+    try:
+        j = client.get("/api/faces/cluster_faces?cluster_id=9301&limit=4").get_json()
+        assert j["success"] and j["total"] == 6 and len(j["faces"]) == 4
+        assert j["faces"][0]["id"] == odd_id and j["faces"][0]["dist"] > j["faces"][1]["dist"]
+        rest = client.get("/api/faces/cluster_faces?cluster_id=9301&offset=4&limit=4").get_json()["faces"]
+        assert len(rest) == 2 and not ({f["id"] for f in rest} & {f["id"] for f in j["faces"]})
+        assert len(client.get("/api/faces/cluster_faces?cluster_id=9301&order=newest").get_json()["faces"]) == 6
+        assert client.get("/api/faces/cluster_faces").status_code == 400
+    finally:
+        db.execute("DELETE FROM face_regions WHERE cluster_id=9301")
+        db.commit()
+
+
+def test_a_hand_drawn_named_face_joins_the_people_list(client, upload, app, ungated):
+    import contextlib, os, time
+    from modules.people import personlib
+    fn = upload("hand_face.png", seed=151)
+    db = app._db()
+    try:
+        write_meta(client, fn, tags=[], regions=[box(class_name="face", region_name="Hand Drawn Harriet",
+                                                     cx=.4, cy=.4, w=.2, h=.3)])
+        row = db.execute("SELECT id, cluster_id, name, confirmed FROM face_regions WHERE rel_path=?", (fn,)).fetchone()
+        assert row and row["cluster_id"] >= 0 and row["name"] == "Hand Drawn Harriet" and row["confirmed"] == 1
+        names = [c["name"] for c in client.get("/api/faces/clusters").get_json()["clusters"]]
+        assert "Hand Drawn Harriet" in names
+        for _ in range(100):                     # embedded in the background
+            if db.execute("SELECT embedding FROM face_regions WHERE id=?", (row["id"],)).fetchone()[0] is not None:
+                break
+            time.sleep(0.1)
+        assert db.execute("SELECT embedding FROM face_regions WHERE id=?", (row["id"],)).fetchone()[0] is not None
+        # saving again doesn't add it twice
+        write_meta(client, fn, tags=[], regions=[box(class_name="face", region_name="Hand Drawn Harriet",
+                                                     cx=.4, cy=.4, w=.2, h=.3)])
+        assert db.execute("SELECT COUNT(*) FROM face_regions WHERE rel_path=?", (fn,)).fetchone()[0] == 1
+        # a box drawn over a face the scan already found names that face, no second row
+        db.execute("INSERT INTO face_regions(rel_path,cx,cy,w,h,cluster_id) VALUES (?,?,?,?,?,-1)",
+                   (fn, .8, .8, .1, .1))
+        db.commit()
+        write_meta(client, fn, tags=[], regions=[
+            box(class_name="face", region_name="Hand Drawn Harriet", cx=.4, cy=.4, w=.2, h=.3),
+            box(class_name="face", region_name="Hand Drawn Harriet", cx=.805, cy=.8, w=.1, h=.1)])
+        rows = db.execute("SELECT cx, name FROM face_regions WHERE rel_path=? ORDER BY cx", (fn,)).fetchall()
+        assert [(round(r["cx"], 2), r["name"]) for r in rows] == [(0.4, "Hand Drawn Harriet"), (0.8, "Hand Drawn Harriet")]
+        # while the scan saves a file, its named boxes are the scan's
+        pc._scan_saving.add(fn)
+        try:
+            assert pc._add_hand_face(fn, {"cx": .2, "cy": .7, "w": .1, "h": .1}, "Someone") == 0
+        finally:
+            pc._scan_saving.discard(fn)
+    finally:
+        cids = [r[0] for r in db.execute("SELECT DISTINCT cluster_id FROM face_regions WHERE rel_path=? "
+                                         "AND cluster_id>=0", (fn,))]
+        ph = ",".join("?" * len(cids)) or "NULL"
+        uids = [r[0] for r in db.execute(f"SELECT uuid FROM persons WHERE cluster_id IN ({ph})", cids)]
+        db.execute("DELETE FROM face_regions WHERE rel_path=?", (fn,))
+        db.execute(f"DELETE FROM persons WHERE cluster_id IN ({ph})", cids)
+        db.commit()
+        for u in uids:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(personlib._path(pc.MEDIA_DIR, u))
+        pc.rebuild_persons_cache()
+
+
+def test_covers_posters_and_listed_folders_stay_out_of_people(client, upload, app, ungated):
+    """! @brief Excluded pictures are still scanned (automation runs on them); their faces
+    just don't join a person. A face someone named there stays."""
+    saved = {k: app.state.get(k) for k in ("face_skip_artwork", "face_skip_folders")}
+    try:
+        app.state["face_skip_artwork"] = True
+        app.state["face_skip_folders"] = "wallpapers\n*/scans"
+        assert pc.people_excluded("music/Artist/Album/cover.jpg").startswith("section:")
+        assert pc.people_excluded("movies/Heat (1995)/poster.jpg").startswith("section:")
+        assert pc.people_excluded("books/Dune/cover.jxl").startswith("section:")
+        assert pc.people_excluded("photos/2019/folder.jpg") == "artwork"
+        assert pc.people_excluded("photos/The Matrix (1999)-fanart.jpg") == "artwork"
+        assert pc.people_excluded("wallpapers/a.jpg") == "folder:wallpapers"
+        assert pc.people_excluded("home/scans/x.jpg") == "folder:*/scans"
+        assert pc.people_excluded("photos/2019/IMG_back.jpg") == ""
+        assert pc.people_excluded("wallpapers-old/a.jpg") == ""
+        assert pc._skip_scan_reason("music/Artist/Album/cover.jpg") == ""      # still scanned
+        app.state["face_skip_artwork"] = False
+        assert pc.people_excluded("photos/2019/folder.jpg") == ""
+
+        app.state["face_skip_artwork"] = True
+        cov = upload("cover.png", seed=161, folder="skiptest")
+        keep = upload("skip_keep.png", seed=162, folder="skiptest")
+        db = app._db()
+        _fake_face_rows(db, cov, 9401, 2, 0.0, seed=31)
+        _fake_face_rows(db, keep, 9402, 2, 0.0, seed=32)
+        db.execute("UPDATE face_regions SET name='Named', confirmed=1 WHERE rel_path=? AND cx<0.12", (cov,))
+        db.commit()
+        assert pc.detach_excluded_faces() == 1
+        rows = db.execute("SELECT rel_path, cluster_id, confirmed FROM face_regions WHERE rel_path IN (?, ?)",
+                          (cov, keep)).fetchall()
+        assert len(rows) == 4                                               # nothing deleted
+        assert sorted(r["cluster_id"] for r in rows if r["rel_path"] == cov) == [-1, 9401]
+        assert {r["cluster_id"] for r in rows if r["rel_path"] == keep} == {9402}
+    finally:
+        app.state.update(saved)
+        app._db().execute("DELETE FROM face_regions WHERE rel_path LIKE 'skiptest/%'")
+        app._db().commit()

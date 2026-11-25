@@ -7320,39 +7320,96 @@ def api_jxl_track(filename):
         })
     return jsonify({"success": True, "tracks": out})
 
+## @brief Disk cache of /api/crop results (disposable): decoding a full-size original
+# for every face chip would be slow, and the same chips come back on every visit.
+_CROP_CACHE_DIR = os.path.join(os.path.dirname(DB_PATH), ".crop_cache")
+_CROP_CACHE_MAX = 50000
+
+
+def _crop_cache_prune():
+    """! @brief Drop the oldest half of the crop cache once it outgrows _CROP_CACHE_MAX."""
+    try:
+        names = os.listdir(_CROP_CACHE_DIR)
+        if len(names) <= _CROP_CACHE_MAX:
+            return
+        paths = sorted((os.path.join(_CROP_CACHE_DIR, n) for n in names), key=_getmtime_loose)
+        for p in paths[: len(paths) // 2]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 @app.route("/api/crop")
 @_auth.require_feature("tab.gallery")
 def api_crop():
-    """! @brief A downscaled JPEG of one normalised box of an image.
-    Query: file, cx, cy, w, h.
+    """! @brief A JPEG of one normalised box of an image, cut from the original (a
+    video: from its poster frame), so a small face is as sharp as the file allows.
+    Query: file, cx, cy, w, h, size (longest side in px, 32..512, default 128).
     """
     fn = request.args.get("file", "")
     fp = get_safe_path(MEDIA_DIR, fn)
     if not fp or not os.path.exists(fp):
         return "", 404
     try:
-        img = read_jxl(fp)
-        if img is None:
-            return "", 404
-        bgr = _to_bgr(img); H, W = bgr.shape[:2]
         cx = float(request.args.get("cx", .5)); cy = float(request.args.get("cy", .5))
         w  = float(request.args.get("w", 1.));  h  = float(request.args.get("h", 1.))
-        x1 = max(0, int((cx - w / 2) * W)); y1 = max(0, int((cy - h / 2) * H))
-        x2 = min(W, int((cx + w / 2) * W)); y2 = min(H, int((cy + h / 2) * H))
-        if x2 - x1 < 2 or y2 - y1 < 2:
-            return "", 404
-        crop = bgr[y1:y2, x1:x2]
-        scale = 128 / max(crop.shape[0], crop.shape[1])
-        if scale < 1:
-            crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)),
-                              interpolation=cv2.INTER_AREA)
-        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        if not ok:
-            return "", 500
-        return Response(buf.tobytes(), mimetype="image/jpeg")
-    except Exception as e:
-        access_logger.warning(f"api_crop {fn}: {e}")
-        return "", 500
+        size = max(32, min(512, int(float(request.args.get("size", 128)))))
+    except (TypeError, ValueError):
+        return "", 400
+    mtime = _getmtime_loose(fp)
+    key = hashlib.sha1(f"{fn}|{mtime}|{cx:.5f}|{cy:.5f}|{w:.5f}|{h:.5f}|{size}".encode()).hexdigest()
+    etag = key[:24]
+    inm = request.headers.get("If-None-Match")
+    if inm and etag in [t.strip().strip('"') for t in inm.split(",")]:
+        resp = app.response_class(status=304)
+    else:
+        cached = os.path.join(_CROP_CACHE_DIR, key + ".jpg")
+        data = _read_bytes_loose(cached) if os.path.exists(cached) else None
+        if not data:
+            try:
+                img = read_jxl(fp)
+                if img is None:      # a video, or a format only the thumbnailer reads
+                    tb = _make_thumb_bytes(fp)
+                    img = cv2.imdecode(np.frombuffer(tb, np.uint8), cv2.IMREAD_COLOR) if tb else None
+                    bgr = img
+                else:
+                    bgr = _to_bgr(img)
+                if bgr is None:
+                    return "", 404
+                H, W = bgr.shape[:2]
+                x1 = max(0, int((cx - w / 2) * W)); y1 = max(0, int((cy - h / 2) * H))
+                x2 = min(W, int((cx + w / 2) * W)); y2 = min(H, int((cy + h / 2) * H))
+                if x2 - x1 < 2 or y2 - y1 < 2:
+                    return "", 404
+                crop = bgr[y1:y2, x1:x2]
+                scale = size / max(crop.shape[0], crop.shape[1])
+                if scale < 1:
+                    crop = cv2.resize(crop, (max(1, int(crop.shape[1] * scale)), max(1, int(crop.shape[0] * scale))),
+                                      interpolation=cv2.INTER_AREA)
+                ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if not ok:
+                    return "", 500
+                data = buf.tobytes()
+                try:
+                    os.makedirs(_CROP_CACHE_DIR, exist_ok=True)
+                    with open(cached + ".tmp", "wb") as f:
+                        f.write(data)
+                    os.replace(cached + ".tmp", cached)
+                    if random.random() < 0.01:
+                        _crop_cache_prune()
+                except OSError as e:
+                    access_logger.warning(f"api_crop cache {fn}: {e}")
+            except Exception as e:
+                access_logger.warning(f"api_crop {fn}: {e}")
+                return "", 500
+        resp = Response(data, mimetype="image/jpeg")
+    # the URL names the box and size, and the ETag the file's version
+    resp.headers["Cache-Control"] = "private, max-age=3600"
+    resp.headers["ETag"] = f'"{etag}"'
+    return resp
 
 @app.route("/api/video_tracks/<path:filename>", methods=["GET"])
 @_auth.require_feature("annot.boxes")

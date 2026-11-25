@@ -24,6 +24,30 @@ import shutil
 import pytest
 from cimtest import read_meta, write_meta, box
 
+
+@pytest.fixture(autouse=True)
+def _forget_people_made_here(app):
+    """! @brief Named face boxes written here become people (the people module): drop the
+    ones these tests made, so later tests start without a "jill" or "bob"."""
+    import contextlib
+    db = app._db()
+    try:
+        before = {r[0] for r in db.execute("SELECT uuid FROM persons")}
+    except Exception:
+        yield
+        return
+    yield
+    from modules.people import people_core as pc, personlib
+    new = [(r[0], r[1]) for r in db.execute("SELECT cluster_id, uuid FROM persons") if r[1] not in before]
+    for cid, uid in new:
+        db.execute("DELETE FROM face_regions WHERE cluster_id=?", (cid,))
+        db.execute("DELETE FROM persons WHERE cluster_id=?", (cid,))
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(personlib._path(pc.MEDIA_DIR, uid))
+    db.commit()
+    if new:
+        pc.rebuild_persons_cache()
+
 # Read-packet keys that are legitimately NOT file metadata (derived or per-request).
 VOLATILE = {"iqa_score", "iqa_manual", "brisque", "rating_user", "effective_rating",
             "iqa_stars", "rating_iqa", "iqa_model", "iqa_raw", "analysis_pending"}

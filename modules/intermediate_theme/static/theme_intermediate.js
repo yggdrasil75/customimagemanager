@@ -51,8 +51,11 @@
       const av = document.createElement("span");
       av.className = "iv-avatar";
       if (r && P && fn) {
-        av.setAttribute("style", P.cropStyle(r, 1.4));
-        av.style.backgroundImage = `url('/api/thumb/${encodeURIComponent(fn)}')`;
+        if (P.cropCss) av.setAttribute("style", P.cropCss(fn, r, 1.4, 26));
+        else {
+          av.setAttribute("style", P.cropStyle(r, 1.4));
+          av.style.backgroundImage = `url('/api/thumb/${encodeURIComponent(fn)}')`;
+        }
       } else av.textContent = (c.textContent.trim()[0] || "?").toUpperCase();
       c.insertBefore(av, c.firstChild);
     });

@@ -56,13 +56,15 @@ def scene(client, upload, app, ungated):
     db = app._db()
     files = [upload("assign_1.png", seed=301), upload("assign_2.png", seed=302)]
     for fn in files:
-        write_meta(client, fn, regions=[
-            box(class_name="face", region_type="face", region_name="alice", confirmed=True, **FACE_A),
-            box(class_name="face", region_type="face", region_name="bob", confirmed=True, **FACE_B)])
+        # the cache first, then the names in the sidecar (the order a scan leaves them in)
         for (cid, name, f, seed) in ((A, "alice", FACE_A, 1), (B, "bob", FACE_B, 2)):
             db.execute("INSERT INTO face_regions(rel_path,cx,cy,w,h,embedding,embed_mode,cluster_id,name,confirmed) "
                        "VALUES (?,?,?,?,?,?,?,?,?,1)", (fn, f["cx"], f["cy"], f["w"], f["h"], _vec(seed),
                                                          "arcface", cid, name))
+        db.commit()
+        write_meta(client, fn, regions=[
+            box(class_name="face", region_type="face", region_name="alice", confirmed=True, **FACE_A),
+            box(class_name="face", region_type="face", region_name="bob", confirmed=True, **FACE_B)])
     db.commit()
     made = []
     yield {"files": files, "db": db, "made": made}

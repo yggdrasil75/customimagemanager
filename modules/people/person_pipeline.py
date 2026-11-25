@@ -325,15 +325,19 @@ def step_save(items, o, env):
                  it["extra"] + [_region(p, "person") for p in it["persons"]])
         if not found:
             continue
-        with _timed("meta"):
-            meta = pc.read_metadata(it["abs"])
-            merged = pc._merge_regions(meta["regions"], found)
-            pc.update_file(it["abs"], set={"regions": merged}, meta=meta)
-        with _timed("embed"):
-            if it["faces"]:
-                it["face_ids"] = pc._store_faces(rel, img, it["faces"], it["face_info"],
-                                                 it.get("face_mode") or "none")
-                pc._face_dirty["v"] = True
+        pc._scan_saving.add(rel)
+        try:
+            with _timed("meta"):
+                meta = pc.read_metadata(it["abs"])
+                merged = pc._merge_regions(meta["regions"], found)
+                pc.update_file(it["abs"], set={"regions": merged}, meta=meta)
+            with _timed("embed"):
+                if it["faces"]:
+                    it["face_ids"] = pc._store_faces(rel, img, it["faces"], it["face_info"],
+                                                     it.get("face_mode") or "none")
+                    pc._face_dirty["v"] = True
+        finally:
+            pc._scan_saving.discard(rel)
             if it["persons"] and any(it["body_vecs"]):
                 _bind_detector_faces(it)
                 pc._store_bodies(rel, it["persons"], it["body_vecs"], it["faces"], it["face_ids"])
@@ -374,8 +378,8 @@ def step_match_known(items, o, env):
     eps = float(o.get("max_distance") or 0.35)
     cents = None
     for it in items:
-        if it.get("face_mode") != "arcface":
-            continue
+        if it.get("face_mode") != "arcface" or pc.people_excluded(it["rel"]):
+            continue                      # a cover's faces don't join a person
         kept = pc._user_kept_rows(it["face_ids"])
         for i, (fid, info) in enumerate(zip(it["face_ids"], it["face_info"])):
             if fid is None or fid in kept or info.get("vec") is None:

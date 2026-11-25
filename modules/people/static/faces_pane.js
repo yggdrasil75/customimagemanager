@@ -19,38 +19,10 @@ function _observeLazyThumbs(scope) {
 }
 
 function faceChip(f, size = 56, pad = 1.6) {
-  // Crop a normalised face box out of the full thumbnail.
-  //
-  // The old version scaled the <img> to z*100% and then set
-  //   left: 50 - cx*z*100
-  // mixing two different reference frames: `left` is a % of the CONTAINER, but
-  // the offset needed is a fraction of the SCALED IMAGE (which is z x bigger).
-  // It was off by a factor of z, so any zoomed-in face (z is 10-20x for a small
-  // face) got pushed clean outside the 56px box -- hence blank chips. It also
-  // forced a square aspect on a 3:2 photo, which is why the ones that did land
-  // were squashed / half-rendered.
-  //
-  // background-size + background-position is the right primitive here: sizes are
-  // relative to the element, and `background-position: X% Y%` aligns the X% point
-  // of the IMAGE to the X% point of the BOX -- exactly the mapping we want, and
-  // it stays correct whatever the source aspect ratio is.
-  const bw = Math.max(f.w, 0.01) * pad;    // widen the box a little: a tight crop
-  const bh = Math.max(f.h, 0.01) * pad;    // cuts the chin/hair off and reads badly
-  const zx = 100 / bw;                     // background-size, % of the chip
-  const zy = 100 / bh;
-
-  // Map the face centre to the centre of the chip. With background-position the
-  // percentage is "align this % of the image to that % of the box", so we need
-  // the face centre expressed as a fraction of the OVERFLOW, not of the image:
-  //   pos% = c / (1 - b)   clamped, since b == 1 means no overflow (divide by 0)
-  const px = bw >= 1 ? 50 : clamp01((f.cx - bw / 2) / (1 - bw)) * 100;
-  const py = bh >= 1 ? 50 : clamp01((f.cy - bh / 2) / (1 - bh)) * 100;
-
-  // encodeURIComponent (as gallery.js does): encodeURI leaves # ? % alone,
-  // which is why some chips came up blank. The path goes in a data attribute
-  // and the handler reads this.dataset.rel, so a quote in a filename can't
-  // break the inline JS.
-  const url = '/api/thumb/' + encodeURIComponent(f.rel || '');
+  // cut from the original (CIMPeople.cropUrl): a face that is a few pixels of the
+  // gallery thumbnail stays recognisable; the box is widened by `pad` so the chin
+  // and hair aren't cut off
+  const url = window.CIMPeople.cropUrl(f.rel, f, pad, size);
   const relAttr = escapeHtml(f.rel || '');
   const sel = _faceSel.has(f.id);
   // An outlier (far from the cluster centroid) is the one most likely swept in by
@@ -65,8 +37,7 @@ function faceChip(f, size = 56, pad = 1.6) {
            title="${relAttr}\nclick to find this exact face in the image${f.dist != null ? '\ndistance from centroid: ' + f.dist : ''}"
            onclick="viewFaceImage(this.dataset.rel, ${+f.cx}, ${+f.cy}, ${+f.w}, ${+f.h})" data-rel="${relAttr}"
            data-thumb="${url}"
-           style="background-size:${zx}% ${zy}%;
-                  background-position:${px}% ${py}%"></div>
+           style="background-size:cover;background-position:center"></div>
       <button title="Not this person - remove from cluster"
               onclick="event.stopPropagation();denyFace(${f.id})"
               class="absolute -top-1 -right-1 w-4 h-4 leading-none rounded-full
@@ -102,11 +73,7 @@ function faceChip(f, size = 56, pad = 1.6) {
  *  embedding exists - so they get a green ring and lead the row.
  */
 function bodyChip(b, size = 56) {
-  const bw = Math.max(b.w, 0.01) * 1.15, bh = Math.max(b.h, 0.01) * 1.1;
-  const zx = 100 / bw, zy = 100 / bh;
-  const px = bw >= 1 ? 50 : clamp01((b.cx - bw / 2) / (1 - bw)) * 100;
-  const py = bh >= 1 ? 50 : clamp01((b.cy - bh / 2) / (1 - bh)) * 100;
-  const url = '/api/thumb/' + encodeURIComponent(b.rel || '');
+  const url = window.CIMPeople.cropUrl(b.rel, b, 1.12, size);
   const relAttr = escapeHtml(b.rel || '');
   return `<div class="relative flex-shrink-0 group" style="width:${Math.round(size*0.7)}px;height:${size}px">
       <div class="w-full h-full rounded bg-gray-900 bg-no-repeat cursor-zoom-in
@@ -114,7 +81,7 @@ function bodyChip(b, size = 56) {
            title="${relAttr}${b.bridged ? '\nfound by body only (no usable face here)' : '\nbody bound to a face of this person'}"
            onclick="viewFaceImage(this.dataset.rel, ${+b.cx}, ${+b.cy}, ${+b.w}, ${+b.h})" data-rel="${relAttr}"
            data-thumb="${url}"
-           style="background-size:${zx}% ${zy}%;background-position:${px}% ${py}%"></div>
+           style="background-size:cover;background-position:center"></div>
       <button title="Not this person's body - unbind"
               onclick="event.stopPropagation();denyBody(${b.id})"
               class="absolute -top-1 -right-1 w-4 h-4 leading-none rounded-full
@@ -226,7 +193,12 @@ function _personAttrs(c) {
 }
 
 function _renderFaceCluster(c) {
-  const { main, tail } = _splitConfidentOutliers(c);
+  const exp = _faceExpanded[c.id];
+  if (exp) {                 // while expanded c.faces IS the shown list: the face tools edit it
+    if (!c._sample) { c._sample = c.faces; c.faces = exp.faces; }
+    exp.faces = c.faces;
+  }
+  const { main, tail } = exp ? { main: [], tail: [] } : _splitConfidentOutliers(c);
   return `
       <div id="fcluster_${c.id}" class="bg-gray-800 rounded border ${c.confirmed
           ? 'border-green-700' : 'border-gray-700'} p-2${c.hidden ? ' opacity-60' : ''}" data-name="${(c.name||'').replace(/"/g,'&quot;')}">
@@ -274,14 +246,15 @@ function _renderFaceCluster(c) {
             Not real
           </button>
         </div>
+        ${_faceExpanded[c.id] ? _renderAllFaces(c) : `
         <div class="flex gap-1.5 flex-wrap">
           ${main.map(f => faceChip(f)).join('')}
           ${c.count > c.faces.length
-            ? `<div onclick="filterGalleryByPerson(${c.id})" title="Show all photos of this person"
+            ? `<div onclick="expandPersonFaces(${c.id})" title="Show all ${c.count} faces here"
                     class="w-14 h-14 flex items-center justify-center text-[10px] cursor-pointer
                            text-gray-400 bg-gray-900 hover:bg-gray-700 rounded">
                  +${c.count - c.faces.length}</div>` : ''}
-        </div>
+        </div>`}
         ${(c.bodies && c.bodies.length) ? `
         <div class="mt-2 pt-2 border-t border-gray-700">
           <div class="text-[10px] text-gray-400 mb-1 flex items-center gap-2">
@@ -293,7 +266,7 @@ function _renderFaceCluster(c) {
           </div>
           <div class="flex gap-1.5 flex-wrap">${c.bodies.map(b => bodyChip(b)).join('')}</div>
         </div>` : ''}
-        ${tail.length ? `
+        ${tail.length && !_faceExpanded[c.id] ? `
         <div class="mt-2 pt-2 border-t border-amber-800/60">
           <div class="text-[10px] text-amber-300 mb-1">
             least certain - check these aren't someone else (deny ✕ any that don't belong)
@@ -318,6 +291,107 @@ function _renderFaceCluster(c) {
       </div>`;
 }
 
+// -- every face of one person -------------------------------------------------
+// The listing carries a sample of each person; "+n" pages through all of their
+// faces right here, least certain first, so the face tools (deny, not a face,
+// unknown, change person, select + split) reach a person with thousands of photos.
+const _ALL_FACES_PAGE = 200;
+const _faceExpanded = {};            // cluster id -> {order, faces, total, loading}
+
+async function _fetchPersonFaces(cid, offset, limit) {
+  const exp = _faceExpanded[cid];
+  const q = `/api/faces/cluster_faces?cluster_id=${cid}&order=${exp.order}&offset=${offset}&limit=${limit}`;
+  const d = await (await fetch(q)).json();
+  if (!d || !d.success) throw new Error((d && d.error) || 'failed');
+  exp.total = d.total;
+  (d.faces || []).forEach(f => exp.seen.add(f.id));
+  return d.faces || [];
+}
+
+function _setPersonFaces(cid, faces) {
+  const exp = _faceExpanded[cid], c = _faceClusters.find(x => x.id === cid);
+  if (exp) exp.faces = faces;
+  if (c && c._sample) c.faces = faces;
+}
+
+async function expandPersonFaces(cid, order) {
+  const c = _faceClusters.find(x => x.id === cid);
+  if (!c) return;
+  const prev = _faceExpanded[cid];
+  const exp = _faceExpanded[cid] = { order: order || (prev && prev.order) || 'uncertain',
+                                     faces: (prev && prev.faces) || c.faces, total: c.count, loading: true,
+                                     seen: (prev && prev.seen) || new Set() };
+  _repaintFaceCluster(cid);
+  try {
+    _setPersonFaces(cid, await _fetchPersonFaces(cid, 0, Math.max(_ALL_FACES_PAGE, prev ? prev.faces.length : 0)));
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Could not load the faces: ' + e.message;
+  }
+  exp.loading = false;
+  if (_faceExpanded[cid] === exp) _repaintFaceCluster(cid);
+}
+
+async function morePersonFaces(cid) {
+  const exp = _faceExpanded[cid];
+  if (!exp || exp.loading) return;
+  exp.loading = true;
+  _repaintFaceCluster(cid);
+  try {
+    const more = await _fetchPersonFaces(cid, exp.faces.length, _ALL_FACES_PAGE);
+    const have = new Set(exp.faces.map(f => f.id));
+    _setPersonFaces(cid, exp.faces.concat(more.filter(f => !have.has(f.id))));
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Could not load more faces: ' + e.message;
+  }
+  exp.loading = false;
+  _repaintFaceCluster(cid);
+}
+
+function collapsePersonFaces(cid) {
+  const c = _faceClusters.find(x => x.id === cid);
+  const exp = _faceExpanded[cid];
+  delete _faceExpanded[cid];
+  if (c && c._sample) {
+    // a face removed while expanded stays removed from the sample
+    const now = new Set(c.faces.map(f => f.id));
+    const removed = id => exp && exp.seen.has(id) && !now.has(id);
+    const shown = c._sample.filter(f => !removed(f.id));
+    c.faces = shown.length ? shown : c.faces.slice(0, 60);
+    delete c._sample;
+  }
+  _repaintFaceCluster(cid);
+  const el = document.getElementById('fcluster_' + cid);
+  if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+}
+
+function _renderAllFaces(c) {
+  const exp = _faceExpanded[c.id];
+  const faces = exp.faces;
+  // the same outlier ring as the sample view, over everything loaded
+  const worst = Math.max(0, ...faces.map(f => f.dist || 0));
+  const cut = Math.max(_OUTLIER_FLOOR, worst * _OUTLIER_FRAC);
+  faces.forEach(f => { f._outlier = worst >= _OUTLIER_FLOOR && (f.dist || 0) >= cut; });
+  const total = Math.max(exp.total || 0, faces.length);
+  const left = total - faces.length;
+  const opt = (v, t) => `<option value="${v}"${exp.order === v ? ' selected' : ''}>${t}</option>`;
+  return `
+        <div class="flex items-center gap-2 mb-1.5 text-[11px] text-gray-400 flex-wrap">
+          <span>${faces.length} of ${total} faces</span>
+          <select onchange="expandPersonFaces(${c.id}, this.value)"
+                  class="bg-gray-700 border border-gray-600 rounded px-1 py-0.5 text-[11px]">
+            ${opt('uncertain', 'Least certain first')}${opt('newest', 'Newest photos first')}${opt('oldest', 'Oldest photos first')}
+          </select>
+          <button onclick="filterGalleryByPerson(${c.id})" title="Their photos in the gallery"
+                  class="text-sky-400 hover:text-sky-300">Photos in gallery</button>
+          <button onclick="collapsePersonFaces(${c.id})" class="text-gray-400 hover:text-gray-200">Show fewer</button>
+          ${exp.loading ? '<span>Loading...</span>' : ''}
+        </div>
+        <div class="flex gap-1.5 flex-wrap">${faces.map(f => faceChip(f)).join('')}</div>
+        ${left > 0 ? `<button onclick="morePersonFaces(${c.id})" ${exp.loading ? 'disabled' : ''}
+            class="mt-2 text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">
+            Show ${Math.min(_ALL_FACES_PAGE, left)} more (${left} left)</button>` : ''}`;
+}
+
 /** @brief Clicking a cluster's "+n" filters the gallery to that person's photos. */
 function filterGalleryByPerson(clusterId) {
   const si = document.getElementById('search_input');
@@ -331,7 +405,8 @@ function filterGalleryByPerson(clusterId) {
 async function loadFaces() {
   const el = document.getElementById('faces_list');
   if (!el) return;
-  el.innerHTML = '<div class="text-xs text-gray-500 p-2">Loading...</div>';
+  // a reload keeps the old list until the new one is in, so the scroll position survives
+  if (!el.children.length) el.innerHTML = '<div class="text-xs text-gray-500 p-2">Loading...</div>';
   try {
     const qs = [_faceShowDrawn ? 'show_drawn=1' : '', _faceShowHidden ? 'show_hidden=1' : ''].filter(Boolean).join('&');
     const r = await fetch('/api/faces/clusters' + (qs ? '?' + qs : ''));
@@ -413,8 +488,11 @@ async function loadFaces() {
       return;
     }
 
+    for (const cid of Object.keys(_faceExpanded))
+      if (!_faceClusters.some(c => c.id === +cid)) delete _faceExpanded[cid];
     el.innerHTML = _faceClusters.map(c => _renderFaceCluster(c)).join('');
     _observeLazyThumbs(el);
+    for (const cid of Object.keys(_faceExpanded)) expandPersonFaces(+cid);
   } catch (e) {
     el.innerHTML = '<div class="text-xs text-red-400 p-2">Failed to load faces.</div>';
   }
@@ -575,13 +653,28 @@ async function toggleClusterHidden(cid) {
 }
 
 /** @brief Move one face to another person (or take it off its person) via the picker. */
+let _faceChangingHere = false;   // a change made from this tab: updated in place, no reload
+
 async function changeFacePerson(id, rel) {
-  const res = await CIMPeople.changeFace({ filename: rel, face_id: id });
-  if (res && res.success) {
-    _faceSel.delete(id);
-    document.getElementById('faces_status').textContent =
-      res.name ? `Face moved to ${res.name}.` : 'Face removed from the person.';
+  const fromCid = _faceClusterOf(id);
+  const from = fromCid != null ? _faceClusters.find(x => x.id === fromCid) : null;
+  const face = from && from.faces.find(f => f.id === id);
+  _faceChangingHere = true;
+  let res;
+  try { res = await CIMPeople.changeFace({ filename: rel, face_id: id }); }
+  finally { _faceChangingHere = false; }
+  if (!res || !res.success) return;
+  _faceSel.delete(id);
+  const msg = res.name ? `Face moved to ${res.name}.` : 'Face removed from the person.';
+  const to = res.cluster_id != null ? _faceClusters.find(x => x.id === res.cluster_id) : null;
+  if (to && face && to !== from) {
+    to.faces = [face].concat(to.faces || []);
+    to.count = (to.count || 0) + 1;
+    _repaintFaceCluster(to.id);
   }
+  if (from && to !== from) _dropFaceLocal(id, msg);
+  else if (!to && !from) keepScroll('faces_list', loadFaces);
+  else document.getElementById('faces_status').textContent = msg;
 }
 
 function toggleDrawnClusters() {
@@ -655,13 +748,8 @@ const _MERGE_REASON = { same: 'Same name', first: 'Same first name', similar: 'S
 
 /** @brief A plain face crop (no buttons) for the merge dialog. */
 function _mergeFace(f, size = 44) {
-  const bw = Math.max(f.w, 0.01) * 1.6, bh = Math.max(f.h, 0.01) * 1.6;
-  const px = bw >= 1 ? 50 : clamp01((f.cx - bw / 2) / (1 - bw)) * 100;
-  const py = bh >= 1 ? 50 : clamp01((f.cy - bh / 2) / (1 - bh)) * 100;
-  const url = '/api/thumb/' + encodeURIComponent(f.rel || '');
   return `<span class="inline-block rounded bg-gray-700 shrink-0" style="width:${size}px;height:${size}px;` +
-    `background-image:url('${url}');background-size:${100 / bw}% ${100 / bh}%;` +
-    `background-position:${px}% ${py}%;background-repeat:no-repeat"></span>`;
+    `${window.CIMPeople.cropCss(f.rel, f, 1.6, size)}"></span>`;
 }
 
 function _mergeFaces(c, n, size) {
@@ -951,6 +1039,7 @@ async function rescanFaces() {
   else init();
   // a face moved anywhere (viewer, this tab): refresh the list if it is showing
   window.addEventListener("cim:people-changed", () => {
+    if (_faceChangingHere) return;
     const l = document.getElementById("faces_list");
     if (l && l.children.length) keepScroll("faces_list", loadFaces);
   });

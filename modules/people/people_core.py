@@ -10,6 +10,7 @@ Models come from the faces / bodies modules through their services
 capability sweep come from host.core.
 """
 import json
+import fnmatch
 import os
 import re
 import threading
@@ -232,6 +233,44 @@ def _near_reject(v, rejects) -> bool:
     v = v / (np.linalg.norm(v) or 1.0)
     return bool((1.0 - rejects @ v).min() < _reject_eps())
 
+## @brief Artwork, not photos of people: Kodi / Plex / Jellyfin names for covers,
+# posters and fan art ("poster.jpg", "Movie (2001)-fanart.jpg", "season01-poster.jpg").
+_ARTWORK_RE = re.compile(
+    r"^(?:cover|covers|folder|front|back|poster|fanart|backdrop|background|banner|clearart|clearlogo|logo|"
+    r"landscape|thumb|disc|discart|cdart|albumart\w*|"
+    r"season(?:\d+|-all|-specials)?(?:-(?:poster|banner|fanart|landscape))?)$"     # the whole name
+    r"|[-_.](?:poster|fanart|banner|cover|backdrop|clearlogo|clearart|landscape|discart)$",  # Title-poster
+    re.I)
+
+
+def _skip_folders():
+    return [f.strip().strip("/").replace("\\", "/") for f in
+            re.split(r"[,\n]", str(state.get("face_skip_folders") or "")) if f.strip().strip("/")]
+
+
+def people_excluded(rel: str) -> str:
+    """! @brief Why the faces in a picture stay out of the People tab ('' = they don't):
+    a folder the user listed, or artwork (anything in a library section - album
+    covers, movie posters, book covers - or named like artwork). The picture is
+    still scanned: its face boxes, tags and the rest of the AI automation happen
+    as usual; its faces just never join a person by themselves."""
+    rel = str(rel or "").replace("\\", "/")
+    low = rel.lower()
+    for f in _skip_folders():
+        fl = f.lower()
+        if any(c in fl for c in "*?[") and (fnmatch.fnmatch(low, fl) or fnmatch.fnmatch(low, fl + "/*")):
+            return "folder:" + f
+        if low == fl or low.startswith(fl + "/"):
+            return "folder:" + f
+    if state.get("face_skip_artwork") is not False:
+        sec = HOST.core.library_section(rel)
+        if sec and sec[0]:
+            return "section:" + sec[0]
+        if _ARTWORK_RE.search(os.path.splitext(os.path.basename(rel))[0]):
+            return "artwork"
+    return ""
+
+
 def _skip_scan_reason(rel: str) -> str:
     """! @brief Why an image should get no face scan at all ('' = scan it): flagged
     AI-generated, or carrying one of the user's skip tags."""
@@ -253,6 +292,28 @@ def _skip_scan_reason(rel: str) -> str:
         if hit:
             return "tag:" + sorted(hit)[0]
     return ""
+
+
+def detach_excluded_faces() -> int:
+    """! @brief Take the faces of excluded pictures (people_excluded) out of their
+    people: they stay cached, boxes and all, but belong to nobody. Faces someone
+    named or moved by hand stay where they are: that was a decision about that face.
+    @return faces detached."""
+    db = _db()
+    rels = [r[0] for r in db.execute(
+        "SELECT DISTINCT rel_path FROM face_regions WHERE cluster_id>=0 "
+        "AND COALESCE(confirmed,0)=0 AND COALESCE(user_set,0)=0")]
+    out = [r for r in rels if people_excluded(r)]
+    n = 0
+    for i in range(0, len(out), 400):
+        part = out[i:i + 400]
+        ph = ",".join("?" * len(part))
+        n += db.execute(f"UPDATE face_regions SET cluster_id=-1 WHERE rel_path IN ({ph}) AND cluster_id>=0 "
+                        "AND COALESCE(confirmed,0)=0 AND COALESCE(user_set,0)=0", part).rowcount
+    db.commit()
+    if n:
+        access_logger.info(f"people: {n} face(s) in {len(out)} cover / excluded picture(s) left the People tab")
+    return n
 
 _NOT_A_NAME = {"face", "person", "object", "unknown", "unconfirmed", "confirmed"}
 
@@ -278,10 +339,73 @@ def _sync_names_from_metadata(rel: str) -> int:
                 or name.lower() in {str(r.get(k, "")).lower()
                                     for k in ("class_name", "region_type")}):
             continue
-        n += _rows("face_regions", "rel_path=? AND abs(cx-?)<1e-3 AND abs(cy-?)<1e-3",
-                   (rel, float(r["cx"]), float(r["cy"])), set={"name": name, "confirmed": 1})
+        got = _rows("face_regions", "rel_path=? AND abs(cx-?)<1e-3 AND abs(cy-?)<1e-3",
+                    (rel, float(r["cx"]), float(r["cy"])), set={"name": name, "confirmed": 1})
+        if not got and float(r.get("w") or 0) > 0 and float(r.get("h") or 0) > 0:
+            got = _add_hand_face(rel, r, name)      # a face box drawn and named by hand
+        n += got
     db.commit()
     return n
+
+
+## @brief Files the person pipeline is saving right now (its region write comes before
+# its face rows): a named box in them is the scan's, not one drawn by hand.
+_scan_saving = set()
+
+
+def _add_hand_face(rel, region, name):
+    """! @brief A face box drawn by hand and given a name: cache it as that person's face
+    (the person is made when nobody has the name yet) and embed it in the background,
+    so it shows in the People tab and helps find their other photos.
+    @return 1 when added, else 0."""
+    if rel in _scan_saving:
+        return 0                    # the scan is writing this file; it caches its own rows
+    try:
+        cx, cy, w, h = (float(region[k]) for k in ("cx", "cy", "w", "h"))
+    except (KeyError, TypeError, ValueError):
+        return 0
+    # a box over a face the scan already found names that face (no second row)
+    for fid, fx, fy, fw, fh in _db().execute(
+            "SELECT id, cx, cy, w, h FROM face_regions WHERE rel_path=? AND COALESCE(not_face,0)=0", (rel,)):
+        ix = max(0.0, min(cx + w / 2, fx + fw / 2) - max(cx - w / 2, fx - fw / 2))
+        iy = max(0.0, min(cy + h / 2, fy + fh / 2) - max(cy - h / 2, fy - fh / 2))
+        inter = ix * iy
+        if inter and inter / (w * h + fw * fh - inter) >= 0.5:
+            return _rows("face_regions", "id=? AND COALESCE(user_set,0)=0", (fid,), set={"name": name, "confirmed": 1})
+    row = _face_row(rel, None, region)
+    if row is None:
+        return 0
+    target, nm, _uid = _assign_target({"name": name})
+    if target is None:
+        return 0
+    _rows("face_regions", "id=?", (row[0],), commit=True,
+          set={"cluster_id": target, "name": nm or name, "confirmed": 1, "unknown": 0, "not_face": 0,
+               "user_set": 1})
+    _embed_hand_face_later(row[0])
+    return 1
+
+
+def _embed_hand_face_later(face_id):
+    """! @brief Embed one hand-added face (no detector made it, so it has no vector) off
+    the request thread; without a vector it can't help clustering or look-alikes."""
+    def run():
+        try:
+            r = _db().execute("SELECT rel_path, cx, cy, w, h, embedding FROM face_regions WHERE id=?",
+                              (face_id,)).fetchone()
+            fs = _faces()
+            if not r or r[5] is not None or not fs:
+                return
+            fp = get_safe_path(MEDIA_DIR, r[0])
+            img = read_jxl(fp) if fp else None
+            if img is None:
+                return
+            box = {"class_name": "face", "cx": r[1], "cy": r[2], "w": r[3], "h": r[4]}
+            vecs, mode = fs["embed_faces"](_to_bgr(img), [box], want_shape=False)[:2]
+            if vecs and vecs[0] is not None:
+                _upsert_region_embeddings("face_regions", r[0], [box], vecs, mode)
+        except Exception as e:
+            access_logger.warning(f"embedding hand-added face {face_id}: {e}")
+    threading.Thread(target=run, daemon=True, name=f"hand-face-{face_id}").start()
 
 def _store_bodies(rel: str, persons: list, vecs: list, faces=None, face_ids=None) -> None:
     """! @brief Cache person boxes with their body vectors, each bound to the face row
@@ -448,8 +572,14 @@ def _recluster_table(table: str, default_mode: str, eps_for) -> int:
     if table == "face_regions":
         extra_where = " AND COALESCE(unknown,0)=0 AND COALESCE(not_face,0)=0"
     rows = _db().execute(
-        f"SELECT id,embedding,embed_mode,name,confirmed,cluster_id FROM {table} "
+        f"SELECT id,embedding,embed_mode,name,confirmed,cluster_id,rel_path FROM {table} "
         f"WHERE embedding IS NOT NULL{extra_where}").fetchall()
+    if table == "face_regions":
+        # faces in covers / excluded folders join nobody (unless someone named them)
+        excl = {}
+        rows = [r for r in rows if r[4] or not excl.setdefault(r[6], bool(people_excluded(r[6])))]
+        rows = [r[:6] for r in rows]
+        detach_excluded_faces()
     if not rows:
         return 0
     by_mode = {}
@@ -1935,6 +2065,40 @@ def api_face_unmark():
     push_face_flags(_rels_of_face_ids(ids))
     return jsonify({"success": True, "unmarked": len(ids)})
 
+def api_face_cluster_faces():
+    """! @brief Every face of one person, a page at a time, for working through a
+    big person in the People tab (the cluster listing carries only a sample).
+    Query: cluster_id, offset (0), limit (200, max 500), order: 'uncertain'
+    (farthest from the person's average face first: the likely mistakes),
+    'newest' or 'oldest' (by photo date).
+    @return {"success", "faces": [{id, rel, cx, cy, w, h, dist}], "total", "offset"}."""
+    try:
+        cid = int(request.args.get("cluster_id", -1))
+        offset = max(0, int(request.args.get("offset", 0)))
+        limit = max(1, min(500, int(request.args.get("limit", 200))))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "bad cluster_id / offset / limit"}), 400
+    if cid < 0:
+        return jsonify({"success": False, "error": "cluster_id required"}), 400
+    order = request.args.get("order", "uncertain")
+    rows = _db().execute(
+        "SELECT r.id, r.rel_path, r.cx, r.cy, r.w, r.h, f.d_original_epoch FROM face_regions r "
+        "LEFT JOIN files f ON f.rel_path=r.rel_path "
+        "WHERE r.cluster_id=? AND COALESCE(r.unknown,0)=0 AND COALESCE(r.not_face,0)=0",
+        (cid,)).fetchall()
+    rows = [r for r in rows if HOST.check_path(r[1])]
+    dists = _cluster_outlier_dists([cid])
+    if order == "newest":
+        rows.sort(key=lambda r: (r[6] is None, -(r[6] or 0), r[0]))
+    elif order == "oldest":
+        rows.sort(key=lambda r: (r[6] is None, r[6] or 0, r[0]))
+    else:
+        rows.sort(key=lambda r: (-dists.get(r[0], 0.0), r[0]))
+    page = rows[offset:offset + limit]
+    faces = [{"id": r[0], "rel": r[1], "cx": r[2], "cy": r[3], "w": r[4], "h": r[5],
+              **({"dist": round(dists[r[0]], 4)} if r[0] in dists else {})} for r in page]
+    return jsonify({"success": True, "faces": faces, "total": len(rows), "offset": offset})
+
 def api_face_merge_candidates():
     """! @brief How alike every other face cluster looks to `cluster_id`: cosine
     similarity of the cluster centroids (same embedding only), for the merge picker
@@ -2323,6 +2487,7 @@ def api_face_assign():
           set={"cluster_id": target, "name": name, "confirmed": 1 if name else 0,
                "unknown": 0, "not_face": 0, "user_set": 1})
     push_face_flags([rel])
+    _embed_hand_face_later(fid)                 # a box drawn by hand has no vector yet
     return jsonify({"success": True, "face_id": fid, "cluster_id": target, "old_cluster_id": old,
                     "name": name, "uuid": uid})
 

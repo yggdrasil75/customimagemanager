@@ -35,7 +35,7 @@ test("intermediate: people chips get avatars and search person:<id>", { skip }, 
   const chips = [...b.document.querySelectorAll("#sv_people .sv-person")];
   assert.equal(chips.length, 2);
   assert.ok(chips.every(c => c.querySelector(".iv-avatar")), "every chip has an avatar");
-  assert.match(chips[0].querySelector(".iv-avatar").style.backgroundImage, /\/api\/thumb\/a\.jxl/);
+  assert.match(chips[0].querySelector(".iv-avatar").style.backgroundImage, /\/api\/crop\?file=a\.jxl&cx=/);
   assert.equal(chips[0].dataset.cluster, "42");
   assert.equal(chips[1].dataset.cluster, undefined, "an unclustered face is not a link");
   chips[0].click();
