@@ -220,3 +220,30 @@ def test_face_flags_file_data_round_trip(client, upload, app, ungated):
         assert app.file_data(fn, "people") is None
     finally:
         db.execute("DELETE FROM face_regions WHERE rel_path=?", (fn,)); db.commit()
+
+
+def test_merge_candidates_rank_look_alikes_and_merge_nothing(client, upload, app, ungated):
+    import numpy as np
+    a, b = upload("merge_cand.png", seed=131), upload("merge_cand_b.png", seed=132)
+    db = app._db()
+    db.execute("DELETE FROM face_regions WHERE cluster_id IN (9201, 9202, 9203)")
+    base = _fake_face_rows(db, a, 9201, 3, 0.0, seed=11)
+    _fake_face_rows(db, b, 9203, 3, 0.0, seed=12)                       # someone else
+    rng = np.random.default_rng(13)                                       # the same face again
+    for i in range(3):
+        v = base + rng.normal(scale=0.02, size=512).astype(np.float32); v /= np.linalg.norm(v)
+        db.execute("INSERT INTO face_regions(rel_path,cx,cy,w,h,embedding,embed_mode,cluster_id) "
+                   "VALUES (?,?,?,?,?,?,?,?)", (a, .1 + i * .05, .6, .1, .1, v.tobytes(), "arcface", 9202))
+    db.commit()
+    try:
+        j = client.get("/api/faces/merge_candidates?cluster_id=9201").get_json()
+        assert j["success"]
+        sim = {int(k): v for k, v in j["similar"].items()}
+        assert sim[9202] > 0.9 and sim[9203] < 0.3 and 9201 not in sim
+        counts = dict(db.execute("SELECT cluster_id, COUNT(*) FROM face_regions WHERE cluster_id IN "
+                                 "(9201, 9202, 9203) GROUP BY cluster_id").fetchall())
+        assert counts == {9201: 3, 9202: 3, 9203: 3}                     # ranking only
+        assert not client.get("/api/faces/merge_candidates").get_json()["success"]
+    finally:
+        db.execute("DELETE FROM face_regions WHERE cluster_id IN (9201, 9202, 9203)")
+        db.commit()

@@ -613,44 +613,189 @@ async function markClusterNotReal(cid) {
   keepScroll('faces_list', loadFaces);
 }
 
+// -- merge picker ------------------------------------------------------------
+// Names decide nothing by themselves (three friends can share a first name), so
+// the picker only ranks: same / similar names first, then the clusters whose faces
+// look most alike, and the confirm step puts both people's faces side by side.
+
+/** @brief A name for comparing: lower case, no accents, single spaces. */
+function _mergeNorm(n) {
+  return String(n || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+function _editDistance(a, b) {
+  if (Math.abs(a.length - b.length) > 3) return 99;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++)
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/** @brief How two names relate: 'same', 'first' (same first name only), 'similar'
+ *  (a typo, a nickname that starts the other, one name inside the other) or ''. */
+function _nameRelation(a, b) {
+  const x = _mergeNorm(a), y = _mergeNorm(b);
+  if (!x || !y) return '';
+  if (x === y) return 'same';
+  const xs = x.split(' '), ys = y.split(' ');
+  if (xs[0] === ys[0]) return xs.length > 1 && ys.length > 1 ? 'first' : 'similar';
+  if (Math.min(x.length, y.length) >= 4 && _editDistance(x, y) <= (Math.min(x.length, y.length) >= 8 ? 2 : 1))
+    return 'similar';
+  if (xs[0].length >= 3 && ys[0].length >= 3 && (xs[0].startsWith(ys[0]) || ys[0].startsWith(xs[0]))) return 'similar';
+  if (ys.every(t => xs.includes(t)) || xs.every(t => ys.includes(t))) return 'similar';
+  return '';
+}
+
+const _MERGE_REASON = { same: 'Same name', first: 'Same first name', similar: 'Similar name' };
+
+/** @brief A plain face crop (no buttons) for the merge dialog. */
+function _mergeFace(f, size = 44) {
+  const bw = Math.max(f.w, 0.01) * 1.6, bh = Math.max(f.h, 0.01) * 1.6;
+  const px = bw >= 1 ? 50 : clamp01((f.cx - bw / 2) / (1 - bw)) * 100;
+  const py = bh >= 1 ? 50 : clamp01((f.cy - bh / 2) / (1 - bh)) * 100;
+  const url = '/api/thumb/' + encodeURIComponent(f.rel || '');
+  return `<span class="inline-block rounded bg-gray-700 shrink-0" style="width:${size}px;height:${size}px;` +
+    `background-image:url('${url}');background-size:${100 / bw}% ${100 / bh}%;` +
+    `background-position:${px}% ${py}%;background-repeat:no-repeat"></span>`;
+}
+
+function _mergeFaces(c, n, size) {
+  return (c.faces || []).slice(0, n).map(f => _mergeFace(f, size)).join('');
+}
+
+function _mergeLabel(c) {
+  return c.name ? escapeHtml(c.name) : `<span class="text-gray-400">Unnamed</span>`;
+}
+
+/** @brief The other clusters, ranked for merging into `dstC`, each with its reason. */
+function _mergeRanked(dstC, similar) {
+  const order = { same: 0, first: 1, similar: 2 };
+  return _faceClusters.filter(c => c.id !== dstC.id).map(c => {
+    const rel = dstC.name ? _nameRelation(dstC.name, c.name) : '';
+    const sim = similar[c.id];
+    return { c, rel, sim: typeof sim === 'number' ? sim : null };
+  }).sort((a, b) => {
+    const ra = a.rel ? order[a.rel] : 9, rb = b.rel ? order[b.rel] : 9;
+    if (ra !== rb) return ra - rb;
+    return (b.sim ?? -2) - (a.sim ?? -2) || b.c.count - a.c.count;
+  });
+}
+
+function _mergeRow(r) {
+  const sim = r.sim == null ? '' : `<span class="text-[10px] ${r.sim >= 0.5 ? 'text-emerald-400' : 'text-gray-500'}"
+      title="How alike the two people's faces are on average">faces ${Math.round(Math.max(0, r.sim) * 100)}% alike</span>`;
+  const why = r.rel ? `<span class="text-[10px] px-1.5 py-0.5 rounded ${r.rel === 'same' ? 'bg-sky-800' : 'bg-gray-700'}">${_MERGE_REASON[r.rel]}</span>` : '';
+  return `<button type="button" data-merge-src="${r.c.id}"
+      class="w-full flex items-center gap-2 p-1.5 rounded hover:bg-gray-700 text-left">
+      <span class="flex gap-1">${_mergeFaces(r.c, 4, 40)}</span>
+      <span class="flex-1 min-w-0"><span class="block truncate text-sm">${_mergeLabel(r.c)}</span>
+        <span class="text-[10px] text-gray-500">${r.c.count} face(s)</span></span>
+      <span class="flex flex-col items-end gap-1">${why}${sim}</span></button>`;
+}
+
+function _mergeDialog() {
+  let ov = document.getElementById('merge_dialog');
+  if (ov) ov.remove();
+  ov = document.createElement('div');
+  ov.id = 'merge_dialog';
+  ov.className = 'fixed inset-0 z-[200] bg-black/60 flex items-center justify-center p-4';
+  ov.innerHTML = `<div class="bg-gray-800 border border-gray-600 rounded-lg shadow-xl w-full max-w-xl max-h-[85vh] flex flex-col text-gray-100"></div>`;
+  ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+  document.addEventListener('keydown', function esc(e) {
+    if (e.key === 'Escape') { ov.remove(); document.removeEventListener('keydown', esc); }
+  });
+  document.body.appendChild(ov);
+  return ov;
+}
+
 async function mergeInto(dst) {
-  // Merge another cluster into `dst`. Two-step confirmation: pick the source, then
-  // an explicit confirm - merging two ids (especially two NAMED people) is exactly
-  // the mistake that fuses distinct people, so it should never happen on one click.
   const dstC = _faceClusters.find(c => c.id === dst);
-  const others = _faceClusters.filter(c => c.id !== dst);
-  if (!others.length) { alert('No other clusters to merge.'); return; }
-  const lines = others.map(c =>
-    `  ${c.id}: ${c.name || '(unnamed)'} - ${c.count} face(s)`).join('\n');
-  const raw = prompt(
-    `Merge which cluster INTO "${dstC?.name || dst}" (id ${dst})?\n` +
-    `Enter the id of the person to merge in:\n\n${lines}`);
-  if (raw == null) return;
-  const src = parseInt(raw.trim(), 10);
-  const srcC = _faceClusters.find(c => c.id === src);
-  if (!srcC || src === dst) { alert('Not a valid source cluster.'); return; }
-
-  let warn = `Merge "${srcC.name || '(unnamed)'}" (id ${src}, ${srcC.count} face(s))\n` +
-             `into "${dstC?.name || '(unnamed)'}" (id ${dst})?`;
-  if (srcC.name && dstC?.name && srcC.name !== dstC.name) {
-    warn += `\n\n⚠ These have DIFFERENT names ("${srcC.name}" vs "${dstC.name}").` +
-            `\nMerging says they are the SAME person. Are you sure?`;
-  }
-  if (!confirm(warn)) return;
-
-  document.getElementById('faces_status').textContent = 'Merging...';
-  let d;
+  if (!dstC) return;
+  if (_faceClusters.length < 2) { alert('No other people to merge.'); return; }
+  let similar = {};
   try {
-    d = await (await fetch('/api/faces/merge', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ src, dst, confirm: true })
-    })).json();
-  } catch (e) {
-    document.getElementById('faces_status').textContent = 'Merge failed.'; return;
-  }
-  document.getElementById('faces_status').textContent =
-    d.success ? `Merged ${d.moved} face(s).` : (d.error || 'Failed.');
-  keepScroll('faces_list', loadFaces);
+    const d = await (await fetch('/api/faces/merge_candidates?cluster_id=' + dst)).json();
+    if (d && d.success) similar = d.similar || {};
+  } catch (e) { /* names still rank */ }
+  const ranked = _mergeRanked(dstC, similar);
+  const ov = _mergeDialog();
+  const box = ov.firstElementChild;
+
+  const pick = () => {
+    box.innerHTML = `
+      <div class="p-3 border-b border-gray-700">
+        <div class="flex items-center gap-2 mb-2"><span class="flex gap-1">${_mergeFaces(dstC, 3, 36)}</span>
+          <span class="text-sm">Merge someone into <b>${_mergeLabel(dstC)}</b></span></div>
+        <input id="merge_filter" placeholder="Search by name" autocomplete="off"
+          class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm">
+      </div>
+      <div id="merge_list" class="flex-1 overflow-y-auto p-2"></div>
+      <div class="p-2 border-t border-gray-700 text-right">
+        <button type="button" data-merge-close class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded">Cancel</button></div>`;
+    const list = box.querySelector('#merge_list');
+    const render = q => {
+      const nq = _mergeNorm(q);
+      const rows = nq ? ranked.filter(r => _mergeNorm(r.c.name).includes(nq) || String(r.c.id) === nq) : ranked;
+      const named = rows.filter(r => r.rel), rest = rows.filter(r => !r.rel);
+      const head = t => `<div class="text-[11px] uppercase tracking-wide text-gray-500 px-1.5 pt-2 pb-1">${t}</div>`;
+      list.innerHTML = (named.length ? head('Same or similar names') + named.map(_mergeRow).join('') : '') +
+        (rest.length ? head(similar && Object.keys(similar).length ? 'Most alike first' : 'Everyone else') +
+                       rest.slice(0, nq ? 200 : 60).map(_mergeRow).join('') : '') ||
+        `<div class="p-3 text-sm text-gray-400">Nobody matches.</div>`;
+    };
+    render('');
+    const f = box.querySelector('#merge_filter');
+    f.addEventListener('input', () => render(f.value));
+    f.focus();
+    box.querySelector('[data-merge-close]').onclick = () => ov.remove();
+    list.addEventListener('click', e => {
+      const b = e.target.closest('[data-merge-src]');
+      if (b) confirmStep(ranked.find(r => r.c.id === +b.dataset.mergeSrc));
+    });
+  };
+
+  const confirmStep = r => {
+    const srcC = r.c;
+    let warn = '';
+    if (srcC.name && dstC.name && r.rel !== 'same')
+      warn = r.rel === 'first'
+        ? `Only the first name matches ("${escapeHtml(srcC.name)}" and "${escapeHtml(dstC.name)}"). Check the faces: two people can share a first name.`
+        : `These have different names ("${escapeHtml(srcC.name)}" and "${escapeHtml(dstC.name)}"). Merging says they are the same person.`;
+    else if (r.sim != null && r.sim < 0.3)
+      warn = 'Their faces don\'t look much alike. Check before merging.';
+    const side = (c, label) => `<div class="flex-1 min-w-0"><div class="text-xs text-gray-400 mb-1">${label}</div>
+        <div class="text-sm mb-1 truncate">${_mergeLabel(c)} <span class="text-[10px] text-gray-500">${c.count} face(s)</span></div>
+        <div class="flex flex-wrap gap-1">${_mergeFaces(c, 8, 56)}</div></div>`;
+    box.innerHTML = `
+      <div class="p-3 flex gap-4 overflow-y-auto">${side(srcC, 'Merge')}${side(dstC, 'into')}</div>
+      ${warn ? `<div class="mx-3 mb-2 p-2 rounded bg-amber-900/50 border border-amber-700 text-xs">${warn}</div>` : ''}
+      <div class="p-2 border-t border-gray-700 flex justify-end gap-2">
+        <button type="button" data-merge-back class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded">Back</button>
+        <button type="button" data-merge-go class="text-xs bg-sky-700 hover:bg-sky-600 px-3 py-1.5 rounded font-bold">Same person: merge</button></div>`;
+    box.querySelector('[data-merge-back]').onclick = pick;
+    box.querySelector('[data-merge-go]').onclick = async () => {
+      ov.remove();
+      document.getElementById('faces_status').textContent = 'Merging...';
+      let d;
+      try {
+        d = await (await fetch('/api/faces/merge', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ src: srcC.id, dst, confirm: true })
+        })).json();
+      } catch (e) {
+        document.getElementById('faces_status').textContent = 'Merge failed.'; return;
+      }
+      document.getElementById('faces_status').textContent =
+        d.success ? `Merged ${d.moved} face(s).` : (d.error || 'Failed.');
+      keepScroll('faces_list', loadFaces);
+    };
+  };
+  pick();
 }
 
 function clearFaceSel() {

@@ -5952,6 +5952,21 @@ def _run_upload():
                     access_logger.error(
                         f"upload: xmp patch failed for {rel_path}: {e}")
 
+            # like xmp, but only the capture date / position the file doesn't already
+            # carry itself (an exported photo's sidecar next to its own EXIF)
+            xmp_fill = meta.get("xmp_fallback")
+            if isinstance(xmp_fill, dict) and xmp_fill:
+                try:
+                    own = exif_import.capture_xmp(orig if os.path.exists(orig) else store_path) or {}
+                    fill = {k: v for k, v in xmp_fill.items()
+                            if not (k == "exif:DateTimeOriginal" and k in own)
+                            and not (k.startswith("exif:GPS") and "exif:GPSLatitude" in own)}
+                    if fill:
+                        update_file(store_path, xmp=fill)
+                except Exception as e:
+                    access_logger.error(
+                        f"upload: xmp fallback failed for {rel_path}: {e}")
+
             st = os.stat(store_path)
             unchanged = (st.st_size, st.st_mtime_ns) == (stored_stat.st_size, stored_stat.st_mtime_ns)
             if not _index_file(rel_path, force=True, known_sha=sha if unchanged else None):
@@ -6916,6 +6931,103 @@ def _move_file(rel_path: str, new_rel: str, content: str | None = None) -> tuple
         access_logger.warning(f"_move_file: re-index of {new_rel} failed")
     module_host.emit("file.renamed", old_rel=rel_path, new_rel=new_rel)
     return True, ""
+
+def _move_folder(src_rel: str, dst_rel: str) -> dict:
+    """! @brief Move (or rename) a whole folder: every file in it lands at the same place
+    under dst_rel. Library files and module kinds (books, music, ...) go through
+    _move_file, so their sidecars, rows, albums and module tables follow; any other
+    file is moved as it is. A file whose target exists, or that the access policies
+    don't let this user move, stays where it is and is reported. Folders emptied by
+    the move are removed. Modules with folder-keyed rows (folder comics) hear
+    folder.renamed.
+    @return {"success", "moved", "skipped": [{"rel_path", "error"}], "folder"}"""
+    src_rel = str(src_rel or "").replace("\\", "/").strip("/")
+    dst_rel = str(dst_rel or "").replace("\\", "/").strip("/")
+    src = get_safe_path(MEDIA_DIR, src_rel) if src_rel else None
+    dst = get_safe_path(MEDIA_DIR, dst_rel) if dst_rel else None
+    if not src or not os.path.isdir(src):
+        return {"success": False, "error": "folder not found"}
+    if not dst:
+        return {"success": False, "error": "rejected target"}
+    if any(p.startswith(".") for p in src_rel.split("/") + dst_rel.split("/")):
+        return {"success": False, "error": "the app's own folders can't be moved"}
+    if dst_rel == src_rel:
+        return {"success": True, "moved": 0, "skipped": [], "folder": dst_rel}
+    if (dst_rel + "/").startswith(src_rel + "/"):
+        return {"success": False, "error": "a folder can't move into itself"}
+    if os.path.isfile(dst):
+        return {"success": False, "error": "a file has that name"}
+
+    files = []
+    for dirpath, _dirs, names in os.walk(src):
+        for n in names:
+            files.append(_rel(os.path.join(dirpath, n)))
+    module_kinds = mt.registered_exts("exts")
+    lib = [r for r in files if mt.is_library_file(r)]
+    moved, skipped = 0, []
+    held = set()      # stems of files that stayed: their sidecars stay with them
+
+    def _target(rel):
+        return dst_rel + rel[len(src_rel):]
+
+    def _allowed(rel, new_rel):
+        return module_host.check_path(rel, True) and module_host.check_path(new_rel, True)
+
+    # library files first: each takes its sidecars along
+    for rel in lib:
+        new_rel = _target(rel)
+        if not os.path.exists(get_safe_path(MEDIA_DIR, rel) or ""):
+            continue
+        ok, err = _move_file(rel, new_rel) if _allowed(rel, new_rel) else (False, "not allowed")
+        if ok:
+            moved += 1
+        else:
+            skipped.append({"rel_path": rel, "error": err})
+            held.add(os.path.splitext(rel)[0])
+    reported = {s["rel_path"] for s in skipped}
+    # then what is left: module kinds through _move_file, anything else as a plain file
+    for rel in files:
+        ap = get_safe_path(MEDIA_DIR, rel)
+        if not ap or not os.path.exists(ap) or rel in reported:
+            continue
+        if os.path.splitext(rel)[0] in held and rel.lower().endswith(tuple(mt.SIDECAR_EXTS)):
+            continue      # the sidecar of a file that stayed
+        new_rel = _target(rel)
+        if not _allowed(rel, new_rel):
+            skipped.append({"rel_path": rel, "error": "not allowed"}); continue
+        if os.path.splitext(rel)[1].lower() in module_kinds:
+            ok, err = _move_file(rel, new_rel)
+        else:
+            np = get_safe_path(MEDIA_DIR, new_rel)
+            if os.path.exists(np):
+                ok, err = False, "target exists"
+            else:
+                os.makedirs(os.path.dirname(np), exist_ok=True)
+                shutil.move(ap, np)
+                ok, err = True, ""
+        if ok:
+            moved += 1
+        else:
+            skipped.append({"rel_path": rel, "error": err})
+    os.makedirs(dst, exist_ok=True)
+    # folders the move emptied go (deepest first); one that still holds a skipped file stays
+    for dirpath, _dirs, _names in sorted(os.walk(src), key=lambda t: -len(t[0])):
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass
+    module_host.emit("folder.renamed", old_folder=src_rel, new_folder=dst_rel)
+    return {"success": True, "moved": moved, "skipped": skipped, "folder": dst_rel}
+
+
+@app.route("/api/move_folder", methods=["POST"])
+@_auth.require_feature("data.move", level="write", action="move_folder",
+                       fields=("folder", "new_folder"))
+def api_move_folder():
+    """! @brief POST {folder, new_folder}: move or rename a whole folder (_move_folder)."""
+    d = request.json or {}
+    return jsonify(_move_folder(d.get("folder", ""), d.get("new_folder", "")))
+
 
 @app.route("/api/move", methods=["POST"])
 @_auth.require_feature("data.move", level="write", action="move_file",

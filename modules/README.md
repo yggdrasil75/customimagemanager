@@ -245,6 +245,7 @@ The core emits, modules react; the core never names a module.
 | `upload.before_convert` | `spool_path, filename, rel_path` | the spooled original before it is converted (and `rel_path` it will be stored as); keep what conversion drops (motion photos extract their video) |
 | `upload.stored` | `rel_path, filename` | index a file you own after upload |
 | `file.renamed` | `old_rel, new_rel` | repoint your tables |
+| `folder.renamed` | `old_folder, new_folder` | a whole folder moved (each file already had its `file.renamed`): repoint rows keyed by the folder itself (folder comics) |
 | `user.deleted` / `user.disabled` | `user_id, username` | an account was deleted / disabled (drop or suspend what it owns) |
 | `file.trash` | `rel_path, abs_path, members` -> truthy if moved away | claim a delete: move the file and its sidecars (`members`) out of the library instead of the core removing them (the trash module); DB rows are purged after it either way |
 | `file.deleted` | `rel_path` | drop your rows |

@@ -241,6 +241,7 @@ def register(host):
     host.add_route("/api/faces/unknown_cluster", pc.api_face_unknown_cluster, methods=["POST"], feature="tab.faces", level="write", action='face_unknown_cluster', fields=('cluster_id',))
     host.add_route("/api/faces/not_real_cluster", pc.api_face_not_real_cluster, methods=["POST"], feature="tab.faces", level="write", action='face_not_real_cluster', fields=('cluster_id',))
     host.add_route("/api/faces/unmark", pc.api_face_unmark, methods=["POST"], feature="tab.faces", level="write", action='face_unmark', fields=('ids',))
+    host.add_route("/api/faces/merge_candidates", pc.api_face_merge_candidates, feature="tab.faces")
     host.add_route("/api/faces/merge", pc.api_face_merge, methods=["POST"], feature="tab.faces", level="write", action='face_merge', fields=('src', 'dst'))
     host.add_route("/api/bodies/split", pc.api_body_split, methods=["POST"], feature="tab.faces", level="write")
     host.add_route("/api/faces/assign", pc.api_face_assign, methods=["POST"], feature="tab.faces", level="write", action='face_assign', fields=('filename', 'face_id', 'person_id', 'cluster_id', 'name'))

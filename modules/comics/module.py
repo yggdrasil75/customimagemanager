@@ -90,6 +90,24 @@ def register(host):
     host.on("upload.stored", lambda rel_path, filename: _joined(rel_path))
     host.on("file.renamed", lambda old_rel, new_rel: _joined(new_rel))
 
+    def _folder_renamed(old_folder, new_folder):
+        """! @brief A moved folder takes its comics along: each comic under it is read
+        again from its comic.json at the new place (pages and cover are names inside
+        the folder, so only the folder key changes)."""
+        db = host.db()
+        rows = db.execute("SELECT folder FROM comics WHERE folder=? OR folder LIKE ?",
+                          (old_folder, old_folder + "/%")).fetchall()
+        for r in rows:
+            old = r["folder"]
+            new = new_folder + old[len(old_folder):]
+            data = cc._load_comic_json(new)
+            db.execute("DELETE FROM comics WHERE folder=?", (old,))
+            db.commit()
+            if data is not None:
+                cc._upsert_comic_row(new, data)
+                cc._set_comic_membership(new)
+    host.on("folder.renamed", _folder_renamed)
+
     host.provide_service("comic_pages", {
         "page_bgr": cp.page_bgr, "analyze_page": cp.analyze_page,
         "order_panels": cp.order_panels, "assign_panel": cp._assign_panel,

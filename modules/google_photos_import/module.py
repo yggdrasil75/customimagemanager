@@ -44,7 +44,9 @@ def register(host):
               "favourites and albums come from Takeout's sidecars; a photo in several albums is imported once and "
               "added to each.<br><b>Periodic:</b> Takeout can export every 2 months to Drive/Dropbox/OneDrive/Box. "
               "Sync that into a folder here (rclone, a desktop client), choose the folder, and set a check "
-              "interval: new Takeouts import themselves and only what's new is added.",
+              "interval: new Takeouts import themselves and only what's new is added.<br><b>From your own "
+              "computer:</b> <code>cim-upload --takeout FOLDER</code> (the upload tool) reads the same sidecars "
+              "where the Takeout was downloaded and sends each photo with them, no server folder needed.",
         fields=[
             {"key": "path", "label": "Takeout zip or folder", "kind": "path"},
             {"key": "folder", "label": "Put files in", "kind": "text", "default": "google-photos/{year}",

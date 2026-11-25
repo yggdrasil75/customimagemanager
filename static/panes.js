@@ -86,13 +86,15 @@ function _scheduleLeftTabLayout() {
 }
 window.layoutLeftTabs = _scheduleLeftTabLayout;
 
-/** @brief The bar's tab buttons in order: built-ins, then registered ones. */
+/** @brief The bar's tab buttons in page order: Gallery, Albums, the registered
+ *  ones, then Review - which is always last, so it is the first to go under More. */
 function _leftTabButtons() {
   const bar = document.getElementById('left_tabs_bar');
   if (!bar) return [];
-  const builtin = [...bar.children].filter(el => el.tagName === 'BUTTON');
-  const ext = [...bar.querySelectorAll('[data-ext-area="left_tabs"] [data-ltab]')];
-  return builtin.concat(ext);
+  const review = document.getElementById('tab_review');
+  const tabs = [...bar.querySelectorAll(':scope > button, [data-ext-area="left_tabs"] [data-ltab]')]
+    .filter(b => b !== review);
+  return review && review.parentElement === bar ? tabs.concat(review) : tabs;
 }
 function _leftTabId(btn) {
   return btn.dataset.ltab || (btn.id || '').replace(/^tab_/, '');
@@ -130,7 +132,8 @@ function _layoutLeftTabs() {
       while (fit < inBar.length && sum + widths[fit] <= total) { sum += widths[fit]; fit++; }
     }
   }
-  const hidden = inBar.slice(fit).concat(tools);
+  const review = document.getElementById('tab_review');
+  const hidden = inBar.slice(fit).filter(b => b !== review).concat(tools, inBar.slice(fit).filter(b => b === review));
   inBar.slice(0, fit).forEach(b => { b.style.display = ''; });
   hidden.forEach(b => { b.style.display = 'none'; });
   more.style.display = hidden.length ? '' : 'none';

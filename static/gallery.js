@@ -88,13 +88,18 @@ function renderFolderCrumbs(){
     return `${sep}<button type="button" class="fcrumb${cur?' fcrumb-cur':''}" ${cur?'data-crumb-open="1"':`data-crumb="${_esc(s.path)}"`} title="${cur?'Choose folder':'Go to '+_esc(s.label)}">${_esc(s.label)}</button>`;
   }).join('')
     +(currentFolderRecursive&&currentFolder?'<span class="fcrumb-sub" title="Including subfolders">+sub</span>':'')
-    +'<button type="button" class="fcrumb" data-crumb-open="1" title="Choose folder">&#9662;</button>';
+    +'<button type="button" class="fcrumb" data-crumb-open="1" title="Choose folder">&#9662;</button>'
+    +(currentFolder&&currentFolder!=='/'?'<button type="button" class="fcrumb" data-crumb-move="1" data-feature="data.move" title="Move or rename this folder">Move</button>':'');
   box.querySelectorAll('[data-crumb]').forEach(b=>b.addEventListener('click',e=>{
     e.stopPropagation(); setFolder(b.dataset.crumb);
   }));
   box.querySelectorAll('[data-crumb-open]').forEach(b=>b.addEventListener('click',e=>{
     e.stopPropagation(); toggleFolderTree();
   }));
+  box.querySelectorAll('[data-crumb-move]').forEach(b=>b.addEventListener('click',e=>{
+    e.stopPropagation(); moveCurrentFolder();
+  }));
+  if(window.applyFeatureVisibility) applyFeatureVisibility(box);
   box.title=currentFolder ? `Folder: ${currentFolder==='/'?'(top level)':currentFolder}` : 'All folders';
 }
 
@@ -924,6 +929,26 @@ async function moveCurrentFile(){
   if(r.success){ window.currentFile=null; loadGallery(); }
   else alert('Move failed.');
 }
+/** @brief Move or rename the folder the gallery shows, with everything in it. */
+async function moveCurrentFolder(){
+  const from=currentFolder;
+  if(!from || from==='/') return;
+  const to=prompt(`Move folder "${from}" to:`, from);
+  if(to===null) return;
+  const dest=to.trim().replace(/^\/+|\/+$/g,'');
+  if(!dest || dest===from) return;
+  const r=await fetch('/api/move_folder',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({folder:from,new_folder:dest})}).then(r=>r.json()).catch(()=>({success:false,error:'network error'}));
+  if(!r.success){ alert('Move failed: '+(r.error||'')); return; }
+  const skipped=r.skipped||[];
+  if(skipped.length) alert(`Moved ${r.moved} file(s). ${skipped.length} stayed in "${from}":\n`
+    +skipped.slice(0,10).map(s=>`${s.rel_path}: ${s.error}`).join('\n')+(skipped.length>10?'\n...':''));
+  else if(typeof showToast==='function') showToast(`Moved ${r.moved} file(s) to ${r.folder}.`);
+  await loadFolders();
+  setFolder(r.folder);
+}
+window.moveCurrentFolder=moveCurrentFolder;
+
 async function deleteCurrentFile(){
   if(!window.currentFile) return;
   await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},

@@ -1935,6 +1935,45 @@ def api_face_unmark():
     push_face_flags(_rels_of_face_ids(ids))
     return jsonify({"success": True, "unmarked": len(ids)})
 
+def api_face_merge_candidates():
+    """! @brief How alike every other face cluster looks to `cluster_id`: cosine
+    similarity of the cluster centroids (same embedding only), for the merge picker
+    to rank look-alikes. Ranking only: nothing is merged here.
+    @return {"success", "similar": {cluster_id: similarity -1..1}}."""
+    try:
+        target = int(request.args.get("cluster_id", -1))
+    except (TypeError, ValueError):
+        target = -1
+    if target < 0:
+        return jsonify({"success": False, "error": "cluster_id required"})
+    rows = _db().execute(
+        "SELECT cluster_id, embed_mode, embedding FROM face_regions WHERE cluster_id>=0 "
+        "AND embedding IS NOT NULL AND COALESCE(unknown,0)=0 AND COALESCE(not_face,0)=0").fetchall()
+    sums = {}
+    for cid, mode, blob in rows:
+        v = np.frombuffer(blob, np.float32)
+        if not v.size:
+            continue
+        n = float(np.linalg.norm(v)) or 1.0
+        key = (cid, mode or "", v.size)
+        if key in sums:
+            sums[key] += v / n
+        else:
+            sums[key] = (v / n).astype(np.float32)
+    cents = {}
+    for (cid, mode, size), acc in sums.items():
+        n = float(np.linalg.norm(acc)) or 1.0
+        cents.setdefault(cid, {})[(mode, size)] = acc / n
+    mine = cents.get(target) or {}
+    similar = {}
+    for cid, by in cents.items():
+        if cid == target:
+            continue
+        shared = [k for k in by if k in mine]
+        if shared:
+            similar[cid] = round(max(float(np.dot(mine[k], by[k])) for k in shared), 3)
+    return jsonify({"success": True, "similar": similar})
+
 def api_face_merge():
     """! @brief Merge face cluster `src` into `dst` (both become one).
 

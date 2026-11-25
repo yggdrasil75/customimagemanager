@@ -11,6 +11,10 @@ reaches a server that has no public address over Remote access's direct link
 self-contained `cim-upload` executable (packaging/build_upload.py), which has
 everything inside. Without a pairing nothing changes.
 
+Google Takeout (--takeout): point it at the downloaded takeout-*.zip files or
+the extracted folder; each photo goes up with its date, place, description,
+people, favourite flag and albums from the Takeout sidecars.
+
 Exit codes: 0 all uploaded (or expected duplicates), 1 some failed after
 retries, 2 all failed (connection or configuration).
 """
@@ -403,7 +407,8 @@ def chunked_upload(http, filepath, fname, folder, metadata, mode, validate=False
     return status, body
 
 
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.jxl', '.gif', '.apng'}
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.jxl', '.gif', '.apng',
+                    '.heic', '.heif', '.hif', '.avif'}
 VIDEO_EXTENSIONS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
                     '.mpeg', '.wmv', '.flv', '.ts', '.ogv'}
 AUDIO_EXTENSIONS = {'.mp3', '.flac', '.aac', '.ogg', '.oga', '.opus',
@@ -768,20 +773,25 @@ def _use_chunked(session, size, chunked):
 
 def upload_file(filepath, source_dir, classes_map, endpoint, max_attempts,
                 initial_backoff, session, dest="", mode="auto", chunked="auto",
-                validate=False, resume=None):
-    """! @brief Upload one file with retries. @return an UploadResult."""
-    rel_dir = os.path.relpath(os.path.dirname(filepath), source_dir)
-    parts   = [p for p in (dest, rel_dir if rel_dir != "." else "") if p]
-    folder  = "/".join(parts).replace('\\', '/')
-    fname   = os.path.basename(filepath)
+                validate=False, resume=None, plan=None):
+    """! @brief Upload one file with retries. @return an UploadResult.
+    @param plan  {"folder", "name", "metadata"} to send instead of what the file's
+                 place under source_dir and its .txt sidecar say (a Takeout item).
+    """
     size    = os.path.getsize(filepath)
     use_chunks = _use_chunked(session, size, chunked)
     resume = resume if resume is not None else {}
-
-    regions, description, tags = parse_sidecar(filepath, classes_map)
-    metadata = {}
-    if regions or description or tags:
-        metadata = {"tags": tags, "description": description, "regions": regions}
+    if plan is not None:
+        folder, fname, metadata = plan["folder"], plan["name"], plan["metadata"]
+    else:
+        rel_dir = os.path.relpath(os.path.dirname(filepath), source_dir)
+        parts   = [p for p in (dest, rel_dir if rel_dir != "." else "") if p]
+        folder  = "/".join(parts).replace('\\', '/')
+        fname   = os.path.basename(filepath)
+        regions, description, tags = parse_sidecar(filepath, classes_map)
+        metadata = {}
+        if regions or description or tags:
+            metadata = {"tags": tags, "description": description, "regions": regions}
 
     last_error  = ""
     last_code   = ""
@@ -927,7 +937,7 @@ def print_summary(results, verbose_duplicates, elapsed=None, not_allowed=None,
     print("  Duplicates: {}  (skipped - already on server)".format(dupes))
     print("  Skipped:    {}  (permanent rejection)".format(skipped))
     if not_allowed:
-        print("  Not sent:   {}  (kind the section does not take)".format(len(not_allowed)))
+        print("  Not sent:   {}  (listed below)".format(len(not_allowed)))
     print("  Failed:     {}  (gave up after retries)".format(failed))
     if chunked:
         print("  Chunked:    {}  (resumable sessions)".format(chunked))
@@ -942,9 +952,10 @@ def print_summary(results, verbose_duplicates, elapsed=None, not_allowed=None,
     print("-" * 60)
 
     if not_allowed:
-        print("\nNot sent (the section does not take them):")
+        print("\nNot sent:")
         for path, why in not_allowed:
-            print("  {}: {}".format(os.path.basename(path), why))
+            print("  {}: {}".format(path if "/" in path and not os.path.isabs(path)
+                                    else os.path.basename(path), why))
 
     if deleted is not None and deleted.get("kept"):
         print("\nSource files kept:")
@@ -1173,8 +1184,8 @@ def _print_dry_run(source_dir, to_send, not_allowed, dest, delete_source):
 def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
                 verbose_dupes, aggressive=False, username="", password="",
                 verify_tls=True, dest="", mode="auto", chunked="auto", validate=False,
-                delete_source=False, dry_run=False):
-    """! @brief Upload a folder tree. @return the exit code."""
+                delete_source=False, dry_run=False, takeout=False, takeout_edited="both"):
+    """! @brief Upload a folder tree (or, with takeout, a Google Takeout). @return the exit code."""
     source_dir = os.path.abspath(source_dir)
     if not os.path.isdir(source_dir):
         print("Error: '{}' is not a directory.".format(source_dir))
@@ -1182,6 +1193,10 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
     if delete_source and mode != "sync":
         print("Error: --delete-source needs --mode sync (only an inline receipt proves "
               "the server stored the file).")
+        return 2
+    if takeout and delete_source:
+        print("Error: --delete-source can't be used with --takeout (album copies and zips "
+              "hold the same photo more than once).")
         return 2
     if delete_source and not validate:
         validate = True
@@ -1204,7 +1219,21 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
     section, _ = dest_section(dest, sections)
     classes_map = load_classes(source_dir)
     all_files = _walk(source_dir)
-    files, not_allowed, warnings = plan_files(source_dir, all_files, dest, sections, aggressive)
+    planned = {}
+    if takeout:
+        section, warnings = None, []
+        items, not_allowed = takeout_plan(takeout_entries(source_dir), dest or "google-photos",
+                                          takeout_edited)
+        files = [e for e, _ in items]
+        planned = dict((id(e), p) for e, p in items)
+        print("[*] Google Takeout: {} photo(s) / video(s) to send, {} left out; dates, places, "
+              "descriptions, people, favourites and albums come from the sidecars.".format(
+                  len(files), len(not_allowed)))
+    else:
+        files, not_allowed, warnings = plan_files(source_dir, all_files, dest, sections, aggressive)
+        if looks_like_takeout(source_dir):
+            print("[*] This looks like a Google Takeout: add --takeout to send each photo with its "
+                  "date, place, people and albums from the Takeout's .json files.")
     if section:
         spec = sections[section]
         print("[*] Destination is the {} section: every file is sent as it is ({} are its items).".format(
@@ -1212,9 +1241,14 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
         for w in warnings:
             log_error("layout: " + w)
     if not files:
-        print("No media files found." if not not_allowed else
-              "Nothing to send: {} file(s) are of a kind the section does not take.".format(
-                  len(not_allowed)))
+        if takeout:
+            print("No photos or videos found in the Takeout." if not not_allowed else
+                  "Nothing to send: all {} item(s) were left out ({}).".format(
+                      len(not_allowed), not_allowed[0][1]))
+        else:
+            print("No media files found." if not not_allowed else
+                  "Nothing to send: {} file(s) are of a kind the section does not take.".format(
+                      len(not_allowed)))
         if session:
             session.logout()
         return 0
@@ -1223,6 +1257,17 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
         print("[*] Aggressive mode: uploading all non-sidecar files, including "
               "misnamed / extension-less ones (server will attempt conversion).")
 
+    if dry_run and takeout:
+        for e in files:
+            p = planned[id(e)]
+            extra = [t for t in p["metadata"]["tags"]] + ["album:" + a for a in p["metadata"].get("albums", [])]
+            print("  {} -> {}/{}{}".format(e.vpath, p["folder"], p["name"],
+                                           "  [{}]".format(", ".join(extra)) if extra else ""))
+        for vpath, why in not_allowed:
+            print("  left out: {} ({})".format(vpath, why))
+        if session:
+            session.logout()
+        return 0
     if dry_run:
         _print_dry_run(source_dir, files, not_allowed, dest, delete_source)
         if session:
@@ -1255,10 +1300,16 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
     started = time.time()
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = dict(
-            (ex.submit(upload_file, fp, source_dir, classes_map, endpoint, max_attempts,
-                       initial_backoff, session, dest, mode, chunked, validate, resume), fp)
-            for fp in files)
+        if takeout:
+            futures = dict(
+                (ex.submit(upload_planned, e, planned[id(e)], classes_map, endpoint, max_attempts,
+                           initial_backoff, session, mode, chunked, validate, resume), e)
+                for e in files)
+        else:
+            futures = dict(
+                (ex.submit(upload_file, fp, source_dir, classes_map, endpoint, max_attempts,
+                           initial_backoff, session, dest, mode, chunked, validate, resume), fp)
+                for fp in files)
         for future in as_completed(futures):
             completed += 1
             r = future.result()
@@ -1282,6 +1333,381 @@ def bulk_upload(source_dir, server_url, workers, max_attempts, initial_backoff,
     if failed_count > 0:
         return 1
     return 0
+
+
+# -- Google Takeout (--takeout) ----------------------------------------------
+# The same reading as the server's Google Takeout importer, done here so a
+# Takeout goes up from the machine it was downloaded to. Input: the extracted
+# Takeout folder, the takeout-*.zip files as downloaded, or a mix (one export
+# is split over many zips and a sidecar can sit in another zip than its photo).
+#   * sidecars: <name>.json, <name>.supplemental-metadata.json, truncated
+#     (".supplemental-met.json", ".sup.json"), with the duplicate counter moved
+#     (IMG(1).jpg <-> IMG.jpg(1).json); long names truncated, so the sidecar's
+#     "title" is the original name;
+#   * an album folder (with its metadata.json title) holds COPIES: identical
+#     files go up once, in every album they appear in;
+#   * "-edited" copies (localised) share the original's sidecar;
+#   * live photos: the video beside a still with the same stem gets the still's
+#     date and albums;
+#   * trashed items (sidecar "trashed", a Trash / Bin folder) are left out.
+TAKEOUT_MEDIA = MEDIA_EXTENSIONS - AUDIO_EXTENSIONS - BOOK_EXTENSIONS
+TAKEOUT_YEAR_RE = re.compile(r"(?:^|\D)((?:19|20)\d\d)\s*$")
+TAKEOUT_SUPP = "supplemental-metadata"
+TAKEOUT_EDITED = ("-edited", "-bearbeitet", "-modifié", "-modifie", "-modificato", "-editado", "-editada",
+                  "-bewerkt", "-edytowane", "-redigerad", "-redigeret", "-redigert", "-muokattu", "-upraveno",
+                  "-szerkesztett", "-编辑", "-編集済み", "-편집됨", "-изменено")
+TAKEOUT_TRASH = {"trash", "bin", "papierkorb", "corbeille", "papelera", "cestino", "prullenbak", "kosz",
+                 "lixeira", "papperskorg", "roskakori", "koš", "корзина", "ゴミ箱", "휴지통", "回收站"}
+
+
+class TakeoutEntry(object):
+    """! @brief One file of the export: loose on disk or a zip member."""
+
+    def __init__(self, vpath, size, path, member=None, crc=None):
+        self.vpath, self.size, self.path, self.member = vpath, size, path, member
+        self.name = vpath.rsplit("/", 1)[-1]
+        self.folder = vpath.rsplit("/", 1)[0] if "/" in vpath else ""
+        self._crc = crc
+
+    def read(self):
+        if self.member is None:
+            with open(self.path, "rb") as fh:
+                return fh.read()
+        import zipfile
+        with zipfile.ZipFile(self.path) as z:
+            return z.read(self.member)
+
+    def key(self):
+        """! @brief (size, CRC32): equal for an album's copy of a photo."""
+        if self._crc is None:
+            import zlib
+            crc = 0
+            with open(self.path, "rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    crc = zlib.crc32(block, crc)
+            self._crc = crc
+        return (self.size, self._crc)
+
+    def materialize(self, tmpdir):
+        """! @brief A path to upload from: the file itself, or the member unpacked."""
+        if self.member is None:
+            return self.path
+        import zipfile
+        out = os.path.join(tmpdir, self.name)
+        with zipfile.ZipFile(self.path) as z, z.open(self.member) as src, open(out, "wb") as dst:
+            for block in iter(lambda: src.read(1 << 20), b""):
+                dst.write(block)
+        return out
+
+
+def takeout_entries(source_dir):
+    """! @brief Every file of the export: loose files by their path under source_dir,
+    zip members by their path inside the zip (so all the zips merge into one tree)."""
+    import zipfile
+    out = []
+    for path in _walk(source_dir):
+        if path.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(path) as z:
+                    for info in z.infolist():
+                        if not info.is_dir():
+                            out.append(TakeoutEntry(info.filename.replace("\\", "/"), info.file_size,
+                                                    path, info.filename, info.CRC))
+            except (zipfile.BadZipFile, OSError) as e:
+                log_error("takeout: can't read {}: {}".format(path, e))
+            continue
+        rel = os.path.relpath(path, source_dir).replace("\\", "/")
+        out.append(TakeoutEntry(_tk_anchor(rel), os.path.getsize(path), path))
+    return out
+
+
+def _tk_anchor(rel):
+    """! @brief A loose file's path from its 'Takeout' folder on, as inside the zips.
+    The zips may be unpacked all into one folder or each into its own
+    takeout-...-001/ folder (Windows' Extract All), with or without the
+    Takeout/ folder inside: every layout gives the same path."""
+    parts = rel.split("/")
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i].lower() == "takeout":
+            return "/".join(parts[i:])
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i].lower().startswith("takeout-"):
+            return "Takeout/" + "/".join(parts[i + 1:])
+    return rel
+
+
+def _tk_counter(b):
+    m = re.match(r"^(.*)\((\d+)\)$", b)
+    return (m.group(1), int(m.group(2))) if m else (b, None)
+
+
+def takeout_json_target(json_name):
+    """! @brief 'IMG.jpg.supplemental-metadata(1).json' -> ('IMG.jpg', 1),
+    'IMG.jpg(1).json' -> ('IMG.jpg', 1), 'IMG.jpg.sup.json' -> ('IMG.jpg', None)."""
+    base, n = _tk_counter(json_name[:-5])
+    if "." in base:
+        head, last = base.rsplit(".", 1)
+        if "." in head and last and TAKEOUT_SUPP.startswith(last.lower()):
+            base = head
+            if n is None:
+                base, n = _tk_counter(base)
+    return base, n
+
+
+def _tk_with_counter(name, n):
+    st, ext = os.path.splitext(name)
+    return "{}({}){}".format(st, n, ext)
+
+
+def _tk_edited_original(name):
+    st, ext = os.path.splitext(name)
+    low = st.lower()
+    for suf in TAKEOUT_EDITED:
+        if low.endswith(suf):
+            return st[:len(st) - len(suf)] + ext
+    return None
+
+
+def _tk_is_video(name):
+    return os.path.splitext(name)[1].lower() in VIDEO_EXTENSIONS
+
+
+def _tk_taken(data):
+    """! @brief The sidecar's capture time as an XMP date (UTC), or None."""
+    ts = ((data or {}).get("photoTakenTime") or {}).get("timestamp")
+    try:
+        if ts in (None, "", "0"):
+            return None
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(ts)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _tk_gps_coord(value, pos, neg):
+    v = abs(float(value))
+    d = int(v)
+    return "{},{:.6f}{}".format(d, (v - d) * 60, pos if float(value) >= 0 else neg)
+
+
+def _tk_gps(data):
+    """! @brief The sidecar's position as XMP tokens ({} when it has none)."""
+    for k in ("geoData", "geoDataExif"):
+        g = (data or {}).get(k) or {}
+        try:
+            lat, lon = float(g.get("latitude")), float(g.get("longitude"))
+        except (TypeError, ValueError):
+            continue
+        if (abs(lat) < 1e-9 and abs(lon) < 1e-9) or abs(lat) > 90 or abs(lon) > 180:
+            continue
+        out = {"exif:GPSLatitude": _tk_gps_coord(lat, "N", "S"),
+               "exif:GPSLongitude": _tk_gps_coord(lon, "E", "W")}
+        try:
+            if g.get("altitude") not in (None, "") and float(g["altitude"]) != 0:
+                out["exif:GPSAltitude"] = float(g["altitude"])
+        except (TypeError, ValueError):
+            pass
+        return out
+    return {}
+
+
+def _tk_json(entry):
+    try:
+        d = json.loads(entry.read().decode("utf-8", "replace"))
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def _tk_is_sidecar(d):
+    return "title" in d and ("photoTakenTime" in d or "creationTime" in d)
+
+
+def takeout_scan(entries):
+    """! @brief -> [(entry, data, albums, edited, trashed, has_edited_twin, companions)],
+    one per distinct photo / video (album copies folded in)."""
+    folders = {}
+    for e in entries:
+        folders.setdefault(e.folder, []).append(e)
+    records = []
+    companions_of, companion_ids = {}, set()
+    for folder, es in folders.items():
+        fname = folder.rsplit("/", 1)[-1]
+        media = dict((e.name, e) for e in es if os.path.splitext(e.name)[1].lower() in TAKEOUT_MEDIA)
+        if not media:
+            continue
+        album_title, sidecars = None, []
+        for e in es:
+            if not e.name.lower().endswith(".json"):
+                continue
+            d = _tk_json(e)
+            if d is None:
+                continue
+            if _tk_is_sidecar(d):
+                sidecars.append((e, d))
+            elif d.get("title") and not album_title:
+                album_title = str(d["title"]).strip()
+        is_year = bool(TAKEOUT_YEAR_RE.search(fname)) and not album_title
+        trash = fname.strip().lower() in TAKEOUT_TRASH
+
+        match, leftovers, stems = {}, [], {}
+        for n in media:
+            stems.setdefault(os.path.splitext(n)[0], []).append(n)
+        for je, d in sidecars:
+            target, cnt = takeout_json_target(je.name)
+            title = str(d.get("title") or "")
+            cands = [_tk_with_counter(target, cnt), _tk_with_counter(title, cnt)] if cnt else [target, title]
+            if cnt is None and "." not in target and len(stems.get(target, [])) == 1:
+                cands.append(stems[target][0])          # old style: IMG_1234.json
+            hit = next((c for c in cands if c in media and c not in match), None)
+            if hit:
+                match[hit] = d
+            else:
+                leftovers.append((cnt, title or target, d))
+        for cnt, title, d in leftovers:                  # truncated long names
+            tst, text = os.path.splitext(title)
+            for mn in media:
+                if mn in match:
+                    continue
+                mst, mext = os.path.splitext(mn)
+                core = re.sub(r"\(\d+\)$", "", mst)
+                if mext.lower() != text.lower() or len(core) < 10 or not tst.startswith(core):
+                    continue
+                if cnt is not None and not mst.endswith("({})".format(cnt)):
+                    continue
+                match[mn] = d
+                break
+
+        by_stem = {}
+        for n, e in media.items():
+            by_stem.setdefault(os.path.splitext(n)[0].lower(), []).append(e)
+        for es2 in by_stem.values():
+            imgs = [e for e in es2 if not _tk_is_video(e.name)]
+            vids = [e for e in es2 if _tk_is_video(e.name)]
+            if len(imgs) == 1 and vids:
+                companions_of[id(imgs[0])] = vids
+                companion_ids.update(id(v) for v in vids)
+
+        with_edit = set(o for o in (_tk_edited_original(n) for n in media) if o and o in media)
+        for n, e in media.items():
+            d = match.get(n)
+            orig = _tk_edited_original(n)
+            edited = bool(orig and orig in media)
+            if edited:
+                d = d or match.get(orig)
+            if d is None and id(e) in companion_ids:
+                parent = next((p for p in media.values()
+                               if id(e) in set(id(v) for v in companions_of.get(id(p), []))), None)
+                d = match.get(parent.name) if parent else None
+            records.append((e, d, album_title, is_year, edited, trash, n in with_edit))
+
+    # one item per distinct content; only same-size files need their CRC
+    sizes = {}
+    for r in records:
+        sizes[r[0].size] = sizes.get(r[0].size, 0) + 1
+    groups = {}
+    for r in records:
+        groups.setdefault(r[0].key() if sizes[r[0].size] > 1 else (r[0].size, id(r[0])), []).append(r)
+    out = []
+    for recs in groups.values():
+        if all(id(r[0]) in companion_ids for r in recs):
+            continue                                     # goes up with its still
+        recs.sort(key=lambda r: (r[1] is None, not r[3], r[0].vpath))
+        entry, data, _a, _y, edited = recs[0][:5]
+        data = data or next((r[1] for r in recs if r[1]), None) or {}
+        albums = list(dict.fromkeys(r[2] for r in recs if r[2]))
+        comps, seen = [], set()
+        for r in recs:
+            for v in companions_of.get(id(r[0]), []):
+                if (v.size, v.vpath) not in seen:
+                    seen.add((v.size, v.vpath))
+                    comps.append(v)
+        out.append((entry, data, albums, edited, any(r[5] for r in recs) or bool(data.get("trashed")),
+                    any(r[6] for r in recs), comps))
+    return out
+
+
+def takeout_plan(entries, dest="google-photos", edited_mode="both", people_prefix="people:"):
+    """! @brief What goes up: [(entry, {"folder", "name", "metadata"})] and
+    [(vpath, why)] for what is left out. Each item lands in <dest>/<year taken>."""
+    plan, left_out = [], []
+    for entry, data, albums, edited, trashed, has_edit, comps in takeout_scan(entries):
+        if trashed:
+            left_out.append((entry.vpath, "in Google Photos' trash"))
+            continue
+        if edited_mode == "original" and edited:
+            left_out.append((entry.vpath, "edited copy (--takeout-edited original)"))
+            continue
+        if edited_mode == "edited" and has_edit and not edited:
+            left_out.append((entry.vpath, "original of an edited photo (--takeout-edited edited)"))
+            continue
+        taken = _tk_taken(data)
+        year = taken[:4] if taken else None
+        if not year:
+            m = TAKEOUT_YEAR_RE.search(entry.folder.rsplit("/", 1)[-1])
+            year = m.group(1) if m else "unknown-date"
+        name = entry.name
+        title = str(data.get("title") or "")
+        st, ext = os.path.splitext(name)
+        tst, text = os.path.splitext(title)
+        core = re.sub(r"\(\d+\)$", "", st)
+        if title and text.lower() == ext.lower() and len(tst) > len(core) and tst.startswith(core) \
+                and not edited and "/" not in title and "\\" not in title:
+            name = title                                 # Takeout truncated the file name
+        tags = []
+        if data.get("favorited"):
+            tags.append("favorite")
+        if data.get("archived"):
+            tags.append("archived")
+        if edited:
+            tags.append("edited")
+        tags += ["{}{}".format(people_prefix, str(p.get("name")).strip())
+                 for p in data.get("people") or [] if isinstance(p, dict) and p.get("name")]
+        meta = {"tags": list(dict.fromkeys(tags)), "description": str(data.get("description") or ""),
+                "regions": []}
+        if albums:
+            meta["albums"] = albums
+        xmp = {}
+        if taken:
+            xmp["exif:DateTimeOriginal"] = taken
+        xmp.update(_tk_gps(data))
+        if xmp:
+            meta["xmp_fallback"] = xmp                    # the file's own EXIF wins
+        folder = "/".join(p for p in (dest, year) if p)
+        plan.append((entry, {"folder": folder, "name": name, "metadata": meta}))
+        for v in comps:
+            cm = dict(meta, tags=list(dict.fromkeys(meta["tags"] + ["live-photo"])))
+            plan.append((v, {"folder": folder, "name": v.name, "metadata": cm}))
+    return plan, left_out
+
+
+def looks_like_takeout(source_dir):
+    """! @brief A Google Takeout in source_dir (for a hint when --takeout is missing)."""
+    for root, dirs, files in os.walk(source_dir):
+        if any(f.lower().startswith("takeout-") and f.lower().endswith(".zip") for f in files):
+            return True
+        if any(f.endswith(".supplemental-metadata.json") for f in files):
+            return True
+        if os.path.relpath(root, source_dir).count(os.sep) > 3:
+            dirs[:] = []
+    return False
+
+
+def upload_planned(entry, plan, classes_map, endpoint, max_attempts, initial_backoff, session,
+                   mode, chunked, validate, resume):
+    """! @brief upload_file for a Takeout item: a zip member is unpacked to a
+    temporary file first and removed after."""
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="cim-takeout-") if entry.member is not None else None
+    try:
+        path = entry.materialize(tmp)
+        r = upload_file(path, "", classes_map, endpoint, max_attempts, initial_backoff, session,
+                        "", mode, chunked, validate, resume, plan=plan)
+        r.filepath = entry.vpath
+        return r
+    finally:
+        if tmp:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 # -- remote link (Remote access on the server) ------------------------------
@@ -1608,6 +2034,16 @@ def main():
     auth_group.add_argument("--no-verify-tls", action="store_true",
         help="Skip TLS certificate verification (self-signed https servers).")
 
+    tk_group = parser.add_argument_group("Google Takeout")
+    tk_group.add_argument("--takeout", action="store_true",
+        help="source_dir is a Google Takeout of Google Photos (the extracted folder, the "
+             "takeout-*.zip files as downloaded, or both): each photo goes up once with its "
+             "date, place, description, people, favourite flag and albums from the .json "
+             "sidecars, into <--dest, default google-photos>/<year>. A date or place the photo's "
+             "own EXIF already has is kept.")
+    tk_group.add_argument("--takeout-edited", choices=("both", "original", "edited"), default="both",
+        help="Edited copies (IMG-edited.jpg): send both, only the originals, or only the "
+             "edited copy where there is one.")
     link_group = parser.add_argument_group("away from home (Remote access on the server)")
     link_group.add_argument("--pair", nargs="?", const="", default=None, metavar="CODE",
         help="Pair this uploader like the phone app: without CODE, print this uploader's pairing "
@@ -1675,6 +2111,8 @@ def main():
             validate        = args.validate,
             delete_source   = args.delete_source,
             dry_run         = args.dry_run,
+            takeout         = args.takeout,
+            takeout_edited  = args.takeout_edited,
         )
     finally:
         if tunnel is not None:
