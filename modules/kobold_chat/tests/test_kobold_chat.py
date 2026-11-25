@@ -192,8 +192,9 @@ def test_viewers_get_read_tools_only(app, client, kobold, accounts):
 
 def test_tool_loop_runs_tools_as_the_user(app, client, kobold, accounts, upload):
     with as_(app, accounts["kc_alice"], **{"data.upload": "write"}):
-        mine = upload("kcmine_secret.png", seed=31)
-    assert mine.startswith("users/kc_alice/")
+        mine = upload("kcmine_secret.png", seed=31, scope="private")
+    # private: stored where it was sent, but only its owner passes the ACL
+    assert mine == "kcmine_secret.jxl"
     # bob asks; the search must not find alice's personal file
     kobold.replies = [{"tool_calls": [tool_call("search_library", {"text": "kcmine_secret"})]},
                       {"content": "nothing"}]
@@ -390,6 +391,23 @@ def test_attachments_respect_permissions(app, client, kobold, accounts):
     names = {t["function"]["name"] for t in kobold.requests[0]["tools"]}
     assert "save_attachment" not in names and "list_attachments" not in names
     assert "save_attachment" not in kobold.requests[0]["messages"][0]["content"]
+
+
+def test_private_attachment_outside_the_personal_tree(app, client, kobold, accounts):
+    alice, bob = accounts["kc_alice"], accounts["kc_bob"]
+    parts = [{"type": "image_url", "image_url": {"url": "data:image/png;base64," + _png(43)}}]
+    kobold.replies = [{"tool_calls": [tool_call("save_attachment", {
+        "attachment": "a1", "path": "kcshared/kcprivpic", "private": True})]}, {"content": "ok"}]
+    with as_(app, alice, **{"data.upload": "write"}):
+        client.post("/chat/v1/chat/completions", json=_chat_with(parts))
+    out = json.loads([m for m in kobold.requests[1]["messages"] if m["role"] == "tool"][0]["content"])
+    assert out["scope"] == "private" and out["stored"].startswith("kcshared/kcprivpic"), out
+    kobold.requests.clear()
+    kobold.replies = [{"tool_calls": [tool_call("search_library", {"text": "kcprivpic"})]}, {"content": "x"}]
+    with as_(app, bob):
+        client.post("/chat/v1/chat/completions", json=_chat_with([{"type": "text", "text": "find"}]))
+    found = json.loads([m for m in kobold.requests[1]["messages"] if m["role"] == "tool"][0]["content"])
+    assert found["results"] == []
 
 
 def test_paths_are_confined():

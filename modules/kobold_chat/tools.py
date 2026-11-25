@@ -44,6 +44,8 @@ TEXT_EXTS = {".txt", ".md", ".csv", ".tsv", ".json", ".srt", ".vtt", ".ass", ".n
              ".cue", ".log", ".xml", ".htm", ".html", ".yaml", ".yml", ".ini"}
 _BAD_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 _PERSONAL_ROOT = "users"
+## @brief The ownership module's per-user "Uploads default to" setting.
+UPLOAD_PREF = "upload_default"
 
 ACTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS chat_actions (
@@ -536,16 +538,25 @@ class ChatTools:
                                 for a in self.attachments()],
                 "note": "save_attachment stores one of these in the library"}
 
-    def upload_scope(self, folder):
-        """! @brief (folder, scope) for core.upload_file: inside the requester's personal tree
-        the folder is given relative to it with scope "personal" (the ownership policy puts
-        it back), anywhere else as it is with scope "public"."""
+    def upload_scope(self, folder, private=None):
+        """! @brief (folder, scope) for core.upload_file, so the file lands at the path asked for.
+        Inside the requester's personal tree the folder goes relative to it with scope
+        "personal" (the ownership policy puts it back). Anywhere else it goes as it is:
+        "private" (only the owner passes) or "public" when `private` says so, else the
+        account's own "Uploads default to" - except a personal default, which would move
+        the file into the personal tree, so that becomes private."""
         root = self._personal_root()
         if root and (folder == root or folder.startswith(root + "/")):
             return folder[len(root):].strip("/"), "personal"
-        return folder, "public"
+        if private is not None:
+            return folder, "private" if private else "public"
+        try:
+            pref = str(self.host.user_setting(UPLOAD_PREF) or "").strip().lower()
+        except Exception:
+            pref = ""
+        return folder, {"personal": "private", "private": "private"}.get(pref, "public")
 
-    def save_attachment(self, attachment, path):
+    def save_attachment(self, attachment, path, private=None):
         """! @brief Store an attached file at a library path, as an upload by the requester."""
         if not self.has("data.upload", "write"):
             raise ToolError("this account may not upload")
@@ -565,14 +576,14 @@ class ChatTools:
                 data = base64.b64decode(data, validate=False)
             except (ValueError, TypeError):
                 raise ToolError("the attachment's data could not be decoded")
-        sub, scope = self.upload_scope(folder)
+        sub, scope = self.upload_scope(folder, private)
         g.cim_write = True  # a mutating request, as the access policies expect
         resp, code = self.core.upload_file(FileStorage(io.BytesIO(data), filename=name), name,
                                            {"folder": sub, "scope": scope}, size=len(data))
         payload = resp.get_json(silent=True) or {}
         if not payload.get("success"):
             raise ToolError(payload.get("error") or f"upload failed ({code})")
-        out = {"attachment": att["id"], "requested": rel,
+        out = {"attachment": att["id"], "requested": rel, "scope": scope,
                "stored": payload.get("filename") or payload.get("predicted"),
                "queued": bool(payload.get("queued")), "duplicate": bool(payload.get("duplicate"))}
         if out["duplicate"]:
@@ -772,7 +783,10 @@ class ChatTools:
           "suggest_location for the path). The file is stored as the chat sent it; the extension is "
           "added when the path has none.",
           _schema({"attachment": _s("attachment id, e.g. a1"),
-                   "path": _s("library path including the file name")}, ["attachment", "path"]),
+                   "path": _s("library path including the file name"),
+                   "private": {"type": "boolean", "description": "outside the personal folder: true = only "
+                               "this user can see it, false = public; leave out for the account's default"}},
+                  ["attachment", "path"]),
           self.save_attachment, needs=[("data.upload", "write")])
         t("action_status", "The state of edit proposals (pending, done, denied, failed).",
           _schema({"action_id": _i("one proposal, or 0 for the latest")}), self.action_status)

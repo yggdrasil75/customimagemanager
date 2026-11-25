@@ -5430,21 +5430,38 @@ def api_upload():
     if 'file' not in request.files:
         return jsonify({"success": False, "error_code": "no_file",
                         "error": "No file part in request."}), 400
-    file   = request.files['file']
+    file = request.files['file']
+    return _upload_file(file, file.filename, request.form,
+                        size=request.content_length or 0,
+                        want_sha=(request.headers.get("X-Content-SHA256") or "").strip().lower(),
+                        mode=request.form.get("mode", "auto"))
+
+def _upload_file(file, filename, form, size=0, want_sha="", mode="auto"):
+    """! @brief Store one uploaded file the way /api/upload does, for the current user.
+    Runs the access policies' folder redirect (personal / public scope), the module
+    refusals (quotas), the storage guard and the duplicate check, then spools and
+    ingests the file inline or through the queue.
+    @param file      anything with save(path) (a werkzeug FileStorage)
+    @param filename  the name the sender gave it
+    @param form      the form fields: folder, scope, metadata (a dict works)
+    @param size      the size in bytes, when known, for the module refusals
+    @param want_sha  the sender's sha256 of the bytes, checked when given
+    @param mode      "sync", "spool" or "auto"
+    @return the response tuple, as /api/upload answers it.
+    """
     # access policies may redirect the target folder
-    folder = module_host.upload_folder(request.form.get("folder", "").strip(), request.form)
+    folder = module_host.upload_folder(str(form.get("folder", "") or "").strip(), form)
     tdir   = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
     if not tdir:
         return jsonify({"success": False, "error_code": "bad_folder",
                         "error": "Folder path is outside media directory."}), 400
 
-    orig_name = mt.clean_filename(file.filename, folder=folder) or "upload.bin"
-    metadata  = request.form.get("metadata", "{}") or "{}"
+    orig_name = mt.clean_filename(filename, folder=folder) or "upload.bin"
+    metadata  = form.get("metadata", "{}") or "{}"
     pred      = _predicted_rel(tdir, orig_name)
 
     # a module may refuse the upload before anything is written (storage quotas):
     # a handler answers with the reason as a string
-    size = request.content_length or 0
     for reason in module_host.emit("upload.check", folder=folder, filename=orig_name, size=size):
         if reason:
             return jsonify({"success": False, "error_code": "refused", "error": str(reason)}), 413
@@ -5475,13 +5492,11 @@ def api_upload():
                         "error": "Could not stage upload."}), 500
 
     # optional end-to-end check: the client sent the sha256 of what it meant to send
-    want_sha = (request.headers.get("X-Content-SHA256") or "").strip().lower()
     if want_sha:
         bad = _spool_checksum_error(spool_path, want_sha)
         if bad:
             return bad
-    return _ingest_spooled(spool_path, orig_name, folder, metadata, pred,
-                           request.form.get("mode", "auto"))
+    return _ingest_spooled(spool_path, orig_name, folder, metadata, pred, mode)
 
 def _spool_checksum_error(path, want_sha):
     """! @brief Compare a staged file with the sha256 the client computed.
@@ -8722,7 +8737,7 @@ _core_api = SimpleNamespace(
     album_create=_album_create, album_add=_album_add, album_remove=_album_remove,
     album_set_description=_album_set_description, album_set_cover=_album_set_cover,
     album_list=lambda: _album_list(),
-    move_file=_move_file,
+    move_file=_move_file, upload_file=_upload_file,
     get_file_row=_get_file_row, thumb_bytes=thumb_bytes, thumb_reset=_thumb_reset,
     files_where=_files_where,
     user_setting=lambda key, username=None: _user_setting(key, username),
