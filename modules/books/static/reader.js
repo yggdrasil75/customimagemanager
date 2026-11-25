@@ -48,6 +48,12 @@ async function openReader(book, jumpSection) {
   _rd('reader_empty').classList.add('hidden');
   _rd('reader_flow').classList.add('hidden');
   _rd('reader_paged').classList.add('hidden');
+  // the previous book's chapters go, whatever this book turns out to be
+  readerToc = [];
+  readerSectionCount = 0;
+  renderToc();
+  _rd('reader_toc').classList.add('hidden');
+  _rd('reader_toc_btn')?.classList.toggle('hidden', readerMode === 'paged');
 
   loadReaderPrefs();
   applyReaderStyle();
@@ -233,12 +239,12 @@ async function showPage(n) {
   // wrapper takes its size from the image, so the overlay tracks whatever the
   // fit setting does without anyone measuring pixels.
   wrap.innerHTML = nums.map(i => `
-    <div class="relative inline-block flex-shrink-0" data-pagewrap="${i}">
+    <div class="relative" data-pagewrap="${i}">
       <img src="/api/books/page/${encodeURI(readerBook.rel_path)}?n=${i}"
-           data-page="${i}" alt="page ${i + 1}"
-           class="reader-page block" style="${_pageFitStyle()}">
+           data-page="${i}" alt="page ${i + 1}" class="reader-page block">
       <div data-overlay="${i}" class="absolute inset-0 hidden"></div>
     </div>`).join('');
+  _applyPageFit();
 
   // Prefetch the next turn so a page flip on a spinning disk isn't a stall.
   const ahead = n + _spreadStep();
@@ -335,11 +341,27 @@ function _escAttr(s) {
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-function _pageFitStyle() {
+/** @brief Size the shown pages to the pane. The page wrappers are sized against
+ *  #reader_pages (the pane) and each image fills its wrapper, so "fit width"
+ *  really is the pane's width (half of it each in a spread) and "fit height" its
+ *  height - not the page image's own size. */
+function _applyPageFit() {
+  const box = _rd('reader_pages');
+  if (!box) return;
   const fit = _rd('rs_fit')?.value || 'width';
-  if (fit === 'width') return 'max-width:100%;height:auto';
-  if (fit === 'height') return 'max-height:calc(100vh - 160px);width:auto';
-  return 'max-width:none;height:auto';
+  const n = box.querySelectorAll('[data-pagewrap]').length || 1;
+  const gap = 4 * (n - 1);                       // gap-1 between pages
+  box.style.height = fit === 'height' ? '100%' : '';
+  box.querySelectorAll('[data-pagewrap]').forEach(w => {
+    w.style.cssText = fit === 'width' ? `flex:0 0 calc((100% - ${gap}px) / ${n});min-width:0`
+                    : fit === 'height' ? 'flex:0 1 auto;height:100%;min-width:0'
+                    : 'flex:0 0 auto';
+  });
+  box.querySelectorAll('.reader-page').forEach(img => {
+    img.style.cssText = fit === 'width' ? 'width:100%;height:auto'
+                      : fit === 'height' ? 'height:100%;width:auto;max-width:none'
+                      : 'max-width:none;width:auto;height:auto';
+  });
 }
 
 /* ==========================================================================
@@ -515,8 +537,7 @@ function applyReaderStyle() {
   }
   const paged = _rd('reader_paged');
   if (paged) paged.style.background = theme.bg === '#ffffff' ? '#e5e7eb' : '#000';
-  document.querySelectorAll('.reader-page').forEach(img =>
-    img.setAttribute('style', _pageFitStyle()));
+  _applyPageFit();
 
   saveReaderPrefs();
 }

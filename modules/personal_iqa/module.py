@@ -682,7 +682,7 @@ def register(host):
     host.provide_model(
         "iqa", "personal", label="Personal (learned from my ratings)", family="personal_iqa",
         speed="balanced",
-        note="Predicts your taste. Rate >=50 images, Retrain in Settings > Personal IQA;",
+        note="Predicts your taste. Rate >=50 images, Retrain in Settings > Personal IQA; enabled once it beats the base model on validation.",
         loader=_scorer, available=_available,
         reason="not trained yet, or not better than the base IQA on validation - see Settings > Personal IQA",
         settings=[{"key": "personal_iqa_base", "label": "Base IQA model (feature)", "kind": "select", "options": _iqa_options},

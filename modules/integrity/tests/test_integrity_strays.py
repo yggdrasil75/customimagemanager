@@ -265,3 +265,21 @@ def test_rules():
     assert not checks.auto_purge_ok("mislabeled", 0, now)
     assert checks.reason_code(checks.detail("zero_byte", "x")) == "zero_byte"
     assert checks.reason_code("free text") == ""
+
+
+def test_unsupported_issue_goes_once_a_module_handles_the_extension(host, client, stray_dir):
+    """An .mp3 flagged "unsupported extension" while the music module was off (no
+    librosa) is resolved once music handles .mp3, without waiting for a full walk to
+    pass the file again."""
+    if not host.media.is_audio("x.mp3"):
+        pytest.skip("music module off: .mp3 really is unsupported here")
+    rel = _put(stray_dir, "song_from_before.mp3", b"ID3" + b"\0" * 64)
+    host.db().execute(
+        "INSERT OR REPLACE INTO integrity_issues (rel_path, kind, detail, first_seen, last_seen) "
+        "VALUES (?, 'invalid', ?, ?, ?)",
+        (rel, checks.detail("unsupported", "unsupported extension .mp3"), time.time(), time.time()))
+    host.db().commit()
+    assert _issue(host, rel)["resolved"] is None
+    j = client.get("/api/integrity/issues").get_json()
+    assert rel not in [i["rel_path"] for i in j["issues"]]
+    assert _issue(host, rel)["resolved"] is not None

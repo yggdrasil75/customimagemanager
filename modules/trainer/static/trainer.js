@@ -605,17 +605,17 @@
       const tags = ['dropped', 'added', 'dup_pred', 'dup_gt', 'tightened', 'loosened', 'shifted']
         .filter(k => cc[k]).map(k => chip(k, cc[k])).join('') +
         (wc ? `<span class="tr-chip" style="background:#ec489922;color:#ec4899">wrong class ${wc}</span>` : '');
-      return `<div class="tr-vrow" id="tr_vrow_${i}" onclick="trPickByPath('${im.rel_path.replace(/'/g, "\\'")}')">
+      return `<div class="tr-vrow" id="tr_vrow_${i}" onclick="trPickByPath(${_jsArg(im.rel_path)})">
         <img class="tr-vthumb" src="${im.thumb}" loading="lazy">
         <div class="flex-1 min-w-0">
           <div class="truncate text-gray-300">${im.is_new ? '🆕 ' : ''}${im.rel_path}</div>
           <div>IoU ${fmt(im.mean_iou)} ${tags || '<span class=\"text-green-400 tr-chip\">clean</span>'}</div>
         </div>
         ${im.is_new ? '' : `<button class="text-xs bg-sky-700 hover:bg-sky-600 px-2 py-1 rounded"
-          onclick="event.stopPropagation();trSnap('${im.rel_path.replace(/'/g, "\\'")}')"
+          onclick="event.stopPropagation();trSnap(${_jsArg(im.rel_path)})"
           title="Keep your boxes, but move each to the model's box where they overlap >= Snap IoU, and drop your duplicate boxes. Model-only boxes are not added.">Snap</button>`}
         <button class="text-xs bg-green-700 hover:bg-green-600 px-2 py-1 rounded"
-          onclick="event.stopPropagation();trAccept('${im.rel_path.replace(/'/g, "\\'")}')"
+          onclick="event.stopPropagation();trAccept(${_jsArg(im.rel_path)})"
           title="Write the model's predicted boxes as this image's new label">Accept</button>
       </div>`;
     }).join('') || '<p class="text-gray-500 text-xs">No images validated.</p>';

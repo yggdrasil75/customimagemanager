@@ -14,6 +14,11 @@
      the server's pick replaces it once /api/theme loads. #}
   <script>(function(){try{var s=localStorage.getItem("cim.scheme");if(s!=="light"&&s!=="dark")s=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.body.dataset.scheme=s;document.documentElement.style.colorScheme=s}catch(e){}})()</script>
 
+  {# The top-right corner belongs to the core: the account, the bell and the avatar
+     live here (the "corner" area), and corner.js keeps the header row of whatever
+     pane runs under it clear of it. #}
+  <div id="cim_corner"><span data-ext-area="corner" class="contents"></span></div>
+
   <!-- Left column: its own header on top, then the search/gallery pane -->
   <div id="left_pane" class="flex flex-col h-full bg-gray-900 border-r border-gray-700 z-10"
     style="width:32%;min-width:300px;max-width:60vw;padding-bottom:20px">

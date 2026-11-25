@@ -493,3 +493,12 @@ canvas {
 .cim-table .num, .cim-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .cim-table td.clip { max-width: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cim-table td.nowrap { white-space: nowrap; }
+/* -- the top-right corner (corner.js) ------------------------------------------------
+   Core-owned: whichever pane runs under it gets its header row padded clear
+   (.cim-corner-clear), so no module has to know the corner is there. */
+#cim_corner {
+  position: fixed; top: 6px; right: 10px; z-index: 9999;
+  display: flex; gap: 8px; align-items: center;
+  font: 12px system-ui; color: var(--cim-gray-300, #cbd5e1);
+}
+.cim-corner-clear { padding-right: calc(var(--cim-corner-w, 0px) + 20px) !important; }

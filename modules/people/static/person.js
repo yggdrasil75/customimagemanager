@@ -311,7 +311,7 @@ function _paintTagSuggestions(cid) {
   const chip = s => {
     const present = have.has(s.tag.toLowerCase());
     return `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${present ? 'bg-gray-800 text-gray-500' : 'bg-gray-700 text-gray-200 cursor-pointer hover:bg-blue-700'}"
-        ${present ? 'title="already added"' : `onclick="addPersonListItems(${cid},'tags','${esc(s.tag)}')" title="click to add"`}>
+        ${present ? 'title="already added"' : `onclick="addPersonListItems(${cid},'tags',${_jsArg(s.tag)})" title="click to add"`}>
         ${present ? '' : '<span class="text-blue-300">+</span>'}${esc(s.tag)}
         <span class="text-gray-500">${s.count}</span></span>`;
   };

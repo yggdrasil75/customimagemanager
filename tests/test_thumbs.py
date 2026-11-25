@@ -3,6 +3,8 @@
 quality and format; a change invalidates thumbs.db and the in-memory LRU, and
 "Regenerate now" rebuilds them in the background job."""
 import io
+import os
+import time
 
 import cv2
 import numpy as np
@@ -91,3 +93,29 @@ def test_regenerate_thumbnails_job(app, client, upload, thumb_settings):
     st = jobs.status()
     assert not st["running"] and st["converted"] >= 1 and not st["errors"]
     assert app._thumbdb().execute("SELECT 1 FROM thumbs WHERE rel_path=?", (rel,)).fetchone()
+
+
+def test_a_broken_file_is_not_sent_to_the_browser_or_decoded_again(app, client, monkeypatch):
+    """A file no thumbnail can be made from answers 422 "could not load file": a broken
+    .jxl isn't handed to the browser to fail there (and in a JXL extension) again, and
+    scrolling past it again doesn't decode it again."""
+    rel = "broken_thumb_test.jxl"
+    ap = os.path.join(app.MEDIA_DIR, rel)
+    with open(ap, "wb") as f:
+        f.write(b"\xff\x0a not really a jpeg xl")
+    calls = []
+    real = app._make_thumb_bytes
+    monkeypatch.setattr(app, "_make_thumb_bytes", lambda p: calls.append(p) or real(p))
+    try:
+        for _ in range(3):
+            r = client.get(f"/api/thumb/{rel}")
+            assert r.status_code == 422 and r.data == b"could not load file"
+            assert r.mimetype == "text/plain"
+        assert len(calls) == 1
+        # a new version of the file is tried again
+        os.utime(ap, (time.time() + 5, time.time() + 5))
+        client.get(f"/api/thumb/{rel}")
+        assert len(calls) == 2
+    finally:
+        os.remove(ap)
+        app._thumb_failed.pop(rel, None)

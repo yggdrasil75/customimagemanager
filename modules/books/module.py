@@ -143,6 +143,7 @@ def register(host):
                                           "comic_page_names": bi.comic_page_names,
                                           "render_pdf_page": bi.render_pdf_page})
 
+    # Search: book and comic tiles in the gallery (the core puts them in its order).
     host.register_search_provider(book_routes.query_books, feature="tab.books")
     host.register_search_provider(book_routes.query_comics)
 
@@ -153,11 +154,12 @@ def register(host):
     host.on("upload.duplicate_check",
             lambda sha, filename: book_routes.sha_exists(sha) if mt.is_book(filename) else None)
     host.on("upload.stored",
-            lambda rel_path, filename: book_routes.index_one(rel_path) if mt.is_book(filename)
-            else book_routes.reindex_folder(rel_path) if filename.lower().endswith(".opf") else None)
+            lambda rel_path, filename: book_routes.reindex_folder(rel_path) if filename.lower().endswith(".opf")
+            else book_routes.index_one(rel_path) if mt.is_uploadable_book(filename) else None)
     host.on("file.deleted", lambda rel_path: book_routes.remove_book(rel_path))
     host.on("file.renamed",
-            lambda old_rel, new_rel: book_routes.rename_book(old_rel, new_rel) if mt.is_book(old_rel) else None)
+            lambda old_rel, new_rel: book_routes.rename_book(old_rel, new_rel)
+            if mt.is_book_candidate(old_rel) else None)
 
     # Background indexer, once the server is up.
     host.on_startup(book_routes.start_background)

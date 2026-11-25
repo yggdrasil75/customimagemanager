@@ -1,6 +1,8 @@
-/* health.js - the integrity module's Review sections: "Corrupt files" (health.py damage),
- * "Wrong metadata" (size tags vs pixels) and "Library issues" (integrity's own: missing,
- * changed without a new date, broken sidecars, invalid files / rows; admins only).
+/* health.js - the integrity module's Review sections: "Corrupt files" (health.py damage,
+ * and integrity's files that can't be read: empty, undecodable, changed under the same
+ * date, broken sidecars), "Wrong metadata" (size tags vs pixels) and "Library issues"
+ * (integrity's readable-but-wrong files: missing, unsupported / mislabeled, leftovers;
+ * admins only).
  * Damaged images / videos, worst first, with a level filter, a damage bar and
  * Open / Re-check / Ignore / Delete per file; the count joins the Review badge. */
 (function () {
@@ -31,6 +33,48 @@
     return p >= 10 ? p.toFixed(0) + "%" : p >= 1 ? p.toFixed(1) + "%" : p.toFixed(2) + "%";
   };
   const isAdmin = () => !!(window.CIMAuth && CIMAuth.user && CIMAuth.user.is_admin);
+
+  // Integrity's findings split two ways: a file that can't be read (empty, doesn't
+  // decode, changed under the same date, a broken sidecar) is corrupt and shows under
+  // "Corrupt files"; a file that reads but is wrong for the library (missing, an
+  // unsupported or mislabeled extension, a leftover) is a library issue.
+  const UNREADABLE_KINDS = ["corrupt", "decode", "sidecar"];
+  const UNREADABLE_CODES = ["zero_byte", "undecodable", "bad_dims"];
+  const reasonCode = d => { const m = /^([a-z_]+):/.exec(d || ""); return m ? m[1] : ""; };
+  const unreadable = i => UNREADABLE_KINDS.includes(i.kind) ||
+    ((i.kind === "invalid" || i.kind === "invalid_row") && UNREADABLE_CODES.includes(reasonCode(i.detail)));
+  /** @brief Integrity's open issues ([] for non-admins: the route answers 403). */
+  async function fetchIssues() {
+    try {
+      const r = await fetch("/api/integrity/issues");
+      if (!r.ok) return [];
+      const d = await r.json();
+      return d && d.success ? d.issues || [] : [];
+    } catch (e) { return []; }
+  }
+  /** @brief One integrity issue: name, detail, Re-check and Accept / Dismiss. */
+  function issueRow(i) {
+    return `<div class="flex items-center gap-2 py-0.5 border-b border-gray-700/60 text-[11px]" data-ii-row="${esc(i.rel_path)}">
+      <span class="truncate text-gray-200 flex-1 min-w-0" title="${esc(i.rel_path)}">${esc(i.rel_path)}</span>
+      <span class="truncate text-[10px] text-gray-500 max-w-[45%]" title="${esc(i.detail || "")}">${esc(i.detail || "")}</span>
+      <button type="button" data-ii-act="recheck" class="bg-gray-700 hover:bg-gray-600 px-1.5 py-0.5 rounded flex-shrink-0">Re-check</button>
+      <button type="button" data-ii-act="accept" class="bg-gray-700 hover:bg-gray-600 px-1.5 py-0.5 rounded flex-shrink-0"
+        title="${i.kind === "corrupt" ? "The file's current content is right: store its hash" : "Dismiss"}">${i.kind === "corrupt" ? "Accept" : "Dismiss"}</button>
+    </div>`;
+  }
+  /** @brief Re-check / Accept on an issue row inside `box`; then `again()`. */
+  async function issueAction(ev, again) {
+    const b = ev.target.closest("[data-ii-act]");
+    if (!b) return false;
+    const rel = b.closest("[data-ii-row]").getAttribute("data-ii-row");
+    b.disabled = true;
+    const act = b.getAttribute("data-ii-act");
+    const res = await post(act === "recheck" ? "/api/integrity/recheck" : "/api/integrity/accept", { rel_path: rel });
+    if (!res.success) toast((act === "recheck" ? "Re-check" : "Accept") + " failed: " + (res.error || ""));
+    if (typeof refreshReviewCount === "function") refreshReviewCount();
+    again();
+    return true;
+  }
 
   /** @brief One damaged file: thumbnail, name, level + bar, detail, actions. */
   function row(it) {
@@ -93,7 +137,8 @@
     if (!d || !d.success) return 0;
     const counts = d.counts || {};
     const all = LEVELS.reduce((n, l) => n + (counts[l] || 0), 0) + (counts.unknown || 0);
-    if (!all && !showIgnored) return 0;
+    const bad = (await fetchIssues()).filter(unreadable);
+    if (!all && !bad.length && !showIgnored) return 0;
     box.className = "mb-3";
     const opts = LEVELS.map(l => `<option value="${l}"${l === minLevel ? " selected" : ""}>${l}${l === "unreadable" ? "" : " or worse"} (${
       LEVELS.slice(LEVELS.indexOf(l)).reduce((n, x) => n + (counts[x] || 0), 0) + (l === "minor" ? (counts.unknown || 0) : 0)})</option>`).join("") +
@@ -105,7 +150,7 @@
     box.innerHTML = `<div class="bg-gray-800 rounded border border-rose-800 p-2">
       <div class="flex flex-wrap items-center gap-2 mb-1">
         <span class="font-bold text-sm text-rose-300">Corrupt files</span>
-        <span class="text-[10px] text-gray-500">${all}</span>
+        <span class="text-[10px] text-gray-500">${all + bad.length}</span>
         ${chips}
         <span class="ml-auto flex items-center gap-2 text-[11px]">
           <select data-cf-min class="bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[11px]">${opts}</select>
@@ -116,6 +161,8 @@
       <div class="text-[10px] text-gray-500 mb-1">${esc(progressLine(d.progress))}. Damage = share of the picture or of the frames that is lost or broken.</div>
       <div class="max-h-96 overflow-y-auto pr-1">${d.items.map(row).join("") ||
         '<div class="text-[11px] text-gray-500 py-1">Nothing at this level.</div>'}</div>${more}
+      ${bad.length ? `<div class="text-[11px] font-bold text-gray-300 mt-2">Can't be read <span class="text-gray-500 font-normal">${bad.length}</span></div>
+      <div class="max-h-64 overflow-y-auto pr-1">${bad.map(issueRow).join("")}</div>` : ""}
     </div>`;
     wire(box);
     // while a repair runs, look again in a few seconds
@@ -123,7 +170,7 @@
     if (d.items.some(it => it.repair && it.repair.state === "running")) {
       box._repairPoll = setTimeout(() => { if (box.isConnected) render(box); }, 4000);
     }
-    return showIgnored ? Math.max(1, all) : all;
+    return showIgnored ? Math.max(1, all + bad.length) : all + bad.length;
   }
 
   /** @brief Hook the section's controls (re-wired on every render). */
@@ -133,6 +180,7 @@
     const ign = box.querySelector("[data-cf-ign]");
     if (ign) ign.addEventListener("change", () => { showIgnored = ign.checked; limit = PAGE; render(box); });
     box.onclick = async ev => {
+      if (await issueAction(ev, () => render(box))) return;
       const b = ev.target.closest("[data-cf-act]");
       if (!b || !box.contains(b)) return;
       const act = b.getAttribute("data-cf-act");
@@ -176,12 +224,14 @@
     limit = PAGE;
     return render(box);
   }
-  /** @brief Badge counter: damaged files not ignored. */
+  /** @brief Badge counter: damaged files not ignored, and files that can't be read. */
   async function counter() {
+    let n = 0;
     try {
       const d = await fetch("/api/corrupt/list?limit=0").then(r => r.json());
-      return d && d.success ? d.total || 0 : 0;
-    } catch (e) { return 0; }
+      n = d && d.success ? d.total || 0 : 0;
+    } catch (e) { n = 0; }
+    return n + (await fetchIssues()).filter(unreadable).length;
   }
 
   // -- Wrong metadata: size tags that disagree with the pixels -------------------------
@@ -283,60 +333,33 @@
   if (window.registerReviewCounter) window.registerReviewCounter(metaCounter);
   else (window._reviewCounters = window._reviewCounters || []).push(metaCounter);
   // -- Library issues: integrity's own findings (admins; the route answers 403 otherwise) --
-  const ISSUE_TITLE = { missing: "Missing from disk", corrupt: "Changed without a new date (bit rot?)",
-    sidecar: "Broken XMP sidecars", invalid: "Invalid files in the media folder",
-    invalid_row: "Invalid library rows", decode: "Did not decode (old check)" };
-  const ISSUE_ORDER = ["missing", "corrupt", "sidecar", "invalid", "invalid_row", "decode"];
+  const ISSUE_TITLE = { missing: "Missing from disk", invalid: "Files the library doesn't take",
+    invalid_row: "Library rows that don't fit their file" };
+  const ISSUE_ORDER = ["missing", "invalid", "invalid_row"];
 
   async function renderIssues(box) {
-    let d;
-    try {
-      const r = await fetch("/api/integrity/issues");
-      if (!r.ok) return 0;
-      d = await r.json();
-    } catch (e) { return 0; }
-    if (!d || !d.success || !(d.issues || []).length) return 0;
+    const issues = (await fetchIssues()).filter(i => !unreadable(i));
+    if (!issues.length) return 0;
     const by = {};
-    for (const i of d.issues) (by[i.kind] = by[i.kind] || []).push(i);
+    for (const i of issues) (by[i.kind] = by[i.kind] || []).push(i);
     const kinds = ISSUE_ORDER.filter(k => by[k]).concat(Object.keys(by).filter(k => !ISSUE_ORDER.includes(k)));
     box.className = "mb-3";
     box.innerHTML = `<div class="bg-gray-800 rounded border border-sky-800 p-2">
       <div class="flex items-center gap-2 mb-1">
         <span class="font-bold text-sm text-sky-300">Library issues</span>
-        <span class="text-[10px] text-gray-500">${d.issues.length}</span>
+        <span class="text-[10px] text-gray-500">${issues.length}</span>
         <span class="ml-auto text-[10px] text-gray-500">purge and scan options: Settings &rarr; Integrity checks</span>
       </div>
       <div class="max-h-96 overflow-y-auto pr-1">${kinds.map(k => `
         <div class="text-[11px] font-bold text-gray-300 mt-1">${esc(ISSUE_TITLE[k] || k)} <span class="text-gray-500 font-normal">${by[k].length}</span></div>
-        ${by[k].map(i => `<div class="flex items-center gap-2 py-0.5 border-b border-gray-700/60 text-[11px]" data-ii-row="${esc(i.rel_path)}">
-          <span class="truncate text-gray-200 flex-1 min-w-0" title="${esc(i.rel_path)}">${esc(i.rel_path)}</span>
-          <span class="truncate text-[10px] text-gray-500 max-w-[45%]" title="${esc(i.detail || "")}">${esc(i.detail || "")}</span>
-          <button type="button" data-ii-act="recheck" class="bg-gray-700 hover:bg-gray-600 px-1.5 py-0.5 rounded flex-shrink-0">Re-check</button>
-          <button type="button" data-ii-act="accept" class="bg-gray-700 hover:bg-gray-600 px-1.5 py-0.5 rounded flex-shrink-0"
-            title="${k === "corrupt" ? "The file's current content is right: store its hash" : "Dismiss"}">${k === "corrupt" ? "Accept" : "Dismiss"}</button>
-        </div>`).join("")}`).join("")}</div>
+        ${by[k].map(issueRow).join("")}`).join("")}</div>
     </div>`;
-    box.onclick = async ev => {
-      const b = ev.target.closest("[data-ii-act]");
-      if (!b) return;
-      const rel = b.closest("[data-ii-row]").getAttribute("data-ii-row");
-      b.disabled = true;
-      const act = b.getAttribute("data-ii-act");
-      const res = await post(act === "recheck" ? "/api/integrity/recheck" : "/api/integrity/accept", { rel_path: rel });
-      if (!res.success) toast((act === "recheck" ? "Re-check" : "Accept") + " failed: " + (res.error || ""));
-      if (typeof refreshReviewCount === "function") refreshReviewCount();
-      renderIssues(box);
-    };
-    return d.issues.length;
+    box.onclick = ev => issueAction(ev, () => renderIssues(box));
+    return issues.length;
   }
   async function issuesSection(box) { return renderIssues(box); }
   async function issuesCounter() {
-    try {
-      const r = await fetch("/api/integrity/issues");
-      if (!r.ok) return 0;
-      const d = await r.json();
-      return d && d.success ? (d.issues || []).length : 0;
-    } catch (e) { return 0; }
+    return (await fetchIssues()).filter(i => !unreadable(i)).length;
   }
   if (window.registerReviewSection) window.registerReviewSection(issuesSection);
   else (window._reviewSections = window._reviewSections || []).push(issuesSection);

@@ -154,6 +154,7 @@ def make_cover(rel_path, abs_path, fmt, meta=None):
     except Exception as e:
         _log().warning(f"books: cover for {rel_path}: {e}")
         return False, None
+    _note_cover_style(rel_path)
     written = False
     if fmt in bmw.COVER_FMTS and abs_path and os.path.exists(abs_path):
         res = bmw.write_cover(abs_path, fmt, jpg)
@@ -163,6 +164,84 @@ def make_cover(rel_path, abs_path, fmt, meta=None):
         if written:
             _log().info(f"books: {rel_path} had no cover; generated one into the file")
     return written, jpg
+
+
+def _note_cover_style(rel_path, ours=True):
+    _db().execute("INSERT OR REPLACE INTO book_cover_style (rel_path, style, ours) VALUES (?, ?, ?)",
+                  (rel_path, book_cover.STYLE, 1 if ours else 0))
+    _db().commit()
+
+
+def _store_cover(rp, ap, jpg, file_changed):
+    """! @brief A cover's shelf thumbnail into the cache and the book's row."""
+    jpg = bi.make_cover_jpeg(jpg) if jpg else None
+    if not jpg:
+        return False
+    name = bi.cover_cache_name(rp)
+    try:
+        with open(os.path.join(_cache_dir(), name), "wb") as f:
+            f.write(jpg)
+    except OSError as e:
+        _log().warning(f"books: cover cache for {rp}: {e}")
+        return False
+    upd = {"cover": name}
+    if file_changed:
+        try:
+            st = os.stat(ap)
+            upd.update(mtime=st.st_mtime, size=st.st_size)
+        except OSError:
+            pass
+    sets = ", ".join(f"{k}=?" for k in upd)
+    _db().execute(f"UPDATE books SET {sets} WHERE rel_path=?", (*upd.values(), rp))
+    _db().commit()
+    return True
+
+
+def redraw_generated_covers(limit=50) -> int:
+    """! @brief Covers drawn by an older book_cover.STYLE, drawn again: the ones recorded
+    in book_cover_style, and older EPUB / OPF / FB2 covers recognised by their
+    cim-cover name (made before covers were recorded). A book's own cover is never
+    replaced. @return how many books were looked at (0 = done)."""
+    if not CTX.get("generate_covers", lambda: True)():
+        return 0
+    db = _db()
+    rows = db.execute(
+        "SELECT b.rel_path, b.fmt, s.ours FROM books b "
+        "LEFT JOIN book_cover_style s ON s.rel_path = b.rel_path "
+        "WHERE b.kind='book' AND b.reader!='paged' AND COALESCE(b.cover, '')<>'' "
+        "AND ((s.rel_path IS NULL AND b.fmt IN ('epub', 'opf-folder', 'fb2')) "
+        "     OR (s.ours = 1 AND s.style < ?)) "
+        "ORDER BY b.rel_path LIMIT ?", (book_cover.STYLE, limit)).fetchall()
+    for r in rows:
+        rp, fmt = r["rel_path"], r["fmt"]
+        ap = _abs(rp)
+        if not ap or not os.path.exists(ap):
+            _note_cover_style(rp, ours=bool(r["ours"]))
+            continue
+        _redraw_one(rp, ap, fmt, known=bool(r["ours"]))
+    return len(rows)
+
+
+def _redraw_one(rp, ap, fmt, known):
+    """! @brief Redraw one book's generated cover (in its file when it holds one)."""
+    row = _db().execute("SELECT title, authors, series, series_index FROM books WHERE rel_path=?",
+                        (rp,)).fetchone()
+    title = (row["title"] if row and row["title"] else "") or os.path.splitext(os.path.basename(rp))[0]
+    try:
+        authors = json.loads(row["authors"] or "[]") if row else []
+    except ValueError:
+        authors = []
+    jpg = book_cover.generate(title, authors, (row["series"] if row else "") or "",
+                              row["series_index"] if row else None)
+    replaced = False
+    if fmt in ("epub", "opf-folder", "fb2"):
+        try:
+            replaced = bmw.replace_generated_cover(ap, fmt, jpg)
+        except Exception as e:
+            _log().warning(f"books: redrawing the cover of {rp}: {e}")
+    if replaced or known:
+        _store_cover(rp, ap, jpg, file_changed=replaced)
+    _note_cover_style(rp, ours=replaced or known)
 
 
 def backfill_covers(limit=50) -> int:
@@ -180,26 +259,8 @@ def backfill_covers(limit=50) -> int:
         if not ap or not os.path.exists(ap):
             continue
         written, jpg = make_cover(rp, ap, fmt)
-        jpg = bi.make_cover_jpeg(jpg) if jpg else None
-        if not jpg:
+        if not _store_cover(rp, ap, jpg, file_changed=written):
             continue
-        name = bi.cover_cache_name(rp)
-        try:
-            with open(os.path.join(_cache_dir(), name), "wb") as f:
-                f.write(jpg)
-        except OSError as e:
-            _log().warning(f"books: cover cache for {rp}: {e}")
-            continue
-        upd = {"cover": name}
-        if written:
-            try:
-                st = os.stat(ap)
-                upd.update(mtime=st.st_mtime, size=st.st_size)
-            except OSError:
-                pass
-        sets = ", ".join(f"{k}=?" for k in upd)
-        db.execute(f"UPDATE books SET {sets} WHERE rel_path=?", (*upd.values(), rp))
-        db.commit()
         n += 1
     return n
 
@@ -225,15 +286,6 @@ def _upsert_book(rel_path, abs_path, verdict, force=False) -> bool:
     fmt = verdict.fmt or "unknown"
     kind = verdict.kind or "book"
     meta = bi.read_metadata(abs_path, fmt)
-
-    # A text-free PDF is a scan: treat it as a comic so the reader picks
-    # fit-width spreads instead of a font-size slider.
-    if fmt == "pdf" and kind == "book":
-        try:
-            if bi.pdf_is_probably_comic(abs_path):
-                kind = "comic"
-        except Exception:
-            pass
 
     reader = bi.reader_for(fmt, kind)
     if reader == "paged" and fmt == "epub":
@@ -403,9 +455,12 @@ def _index_background(force=False):
             except Exception as e:
                 _log().error(f"book triage {rel}: {e}")
 
-        # books shelved before covers were generated (or while it was off)
+        # books shelved before covers were generated (or while it was off), and
+        # covers drawn in an older style
         try:
             while backfill_covers(50):
+                pass
+            while redraw_generated_covers(50):
                 pass
         except Exception as e:
             _log().warning(f"books: cover backfill: {e}")
@@ -517,6 +572,7 @@ def rename_book(old_rel: str, new_rel: str) -> bool:
               "book_progress", "book_bookmarks", "book_triage"):
         _uf(table=t, where=("rel_path=?", (old_rel,)), set={"rel_path": new_rel}, commit=False)
     _uf(new_rel, table="books", set={"cover": new_cover}, commit=False)
+    db.execute("UPDATE OR REPLACE book_cover_style SET rel_path=? WHERE rel_path=?", (new_rel, old_rel))
     db.commit()
     return True
 
@@ -593,6 +649,7 @@ def _purge_book(rel_path):
     for t in ("books", "book_authors", "book_sections", "book_chunks",
               "book_progress", "book_bookmarks"):
         _uf(rel_path, table=t, remove=True, commit=False)
+    db.execute("DELETE FROM book_cover_style WHERE rel_path=?", (rel_path,))
     db.commit()
 
 # ==============================================================================

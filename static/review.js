@@ -153,7 +153,7 @@ function _reviewThumb(it, queue){
   return `<div class="relative flex-shrink-0 group" style="width:72px;height:72px"
        title="${relAttr}\nclick to open in the editor">
       <div class="w-full h-full rounded bg-gray-900 bg-center bg-cover cursor-zoom-in ${flagRing}"
-           onclick="selectFile('${relAttr}')"
+           onclick="selectFile(${_jsArg(rel)})"
            data-thumb="${url}"></div>
       ${badgeHtml}
     </div>`;

@@ -202,7 +202,7 @@ function bookCard(b) {
     ? '<span class="absolute bottom-1 left-1 text-[9px] bg-amber-700 px-1 rounded" title="Text unavailable">⚠</span>'
     : '';
   return `
-    <div onclick="openBook('${_esc(b.rel_path).replace(/'/g, "\\'")}')"
+    <div onclick="openBook(${_jsArg(b.rel_path)})"
          class="cursor-pointer group" title="${_esc(b.title)}${authors ? ' - ' + _esc(authors) : ''}">
       <div class="relative aspect-[2/3] bg-gray-800 rounded overflow-hidden
                   border border-gray-700 group-hover:border-blue-500 transition">
@@ -227,7 +227,7 @@ async function booksLoadAuthors() {
   const d = await r.json();
   if (!d.success) return;
   list.innerHTML = d.authors.map(a => `
-    <div onclick="booksFilterBy('author', '${_esc(a.name).replace(/'/g, "\\'")}')"
+    <div onclick="booksFilterBy('author', ${_jsArg(a.name)})"
          class="px-3 py-2 rounded hover:bg-gray-800 cursor-pointer flex justify-between
                 items-center border-b border-gray-800">
       <span class="text-sm">${_esc(a.name)}</span>
@@ -243,7 +243,7 @@ async function booksLoadSeries() {
   const d = await r.json();
   if (!d.success) return;
   list.innerHTML = d.series.map(s => `
-    <div onclick="booksFilterBy('series', '${_esc(s.name).replace(/'/g, "\\'")}')"
+    <div onclick="booksFilterBy('series', ${_jsArg(s.name)})"
          class="px-3 py-2 rounded hover:bg-gray-800 cursor-pointer flex justify-between
                 items-center border-b border-gray-800">
       <span class="text-sm">${_esc(s.name)}</span>
@@ -286,7 +286,7 @@ async function booksSemanticSearch(q) {
     _bq('books_pager')?.classList.add('hidden');
     return;
   }
-  const open = rp => `openBook('${_esc(rp).replace(/'/g, "\\'")}')`;
+  const open = rp => `openBook(${_jsArg(rp)})`;
   const head = matches.length ? `
     <div class="mb-3 border border-gray-800 rounded overflow-hidden">
       ${matches.map(b => `
@@ -299,13 +299,13 @@ async function booksSemanticSearch(q) {
   const note = d.note ? `<div class="text-amber-400 text-xs px-1 pb-2">${_esc(d.note)}</div>` : '';
   list.innerHTML = head + note + results.map(b => `
     <div class="mb-3 border border-gray-800 rounded overflow-hidden">
-      <div onclick="openBook('${_esc(b.rel_path).replace(/'/g, "\\'")}')"
+      <div onclick="openBook(${_jsArg(b.rel_path)})"
            class="px-3 py-2 bg-gray-800 hover:bg-gray-750 cursor-pointer flex items-center gap-2">
         <span class="text-sm font-bold truncate flex-1">${_esc(b.title)}</span>
         <span class="text-[10px] text-indigo-300">${(b.score * 100).toFixed(0)}%</span>
       </div>
       ${(b.passages || []).map(p => `
-        <div onclick="openBook('${_esc(b.rel_path).replace(/'/g, "\\'")}', ${p.section})"
+        <div onclick="openBook(${_jsArg(b.rel_path)}, ${p.section})"
              class="px-3 py-2 text-[11px] text-gray-400 leading-relaxed border-t border-gray-800
                     hover:bg-gray-850 cursor-pointer">
           ...${_esc(p.text)}...
@@ -535,7 +535,7 @@ function renderSubjects(subjects) {
   const el = _bq('book_subjects');
   if (!el) return;
   el.innerHTML = subjects.map(s => `
-    <button onclick="booksPromoteSubject('${_esc(s).replace(/'/g, "\\'")}')"
+    <button onclick="booksPromoteSubject(${_jsArg(s)})"
       title="Add to your tags"
       class="text-[9px] bg-gray-800 hover:bg-gray-700 border border-gray-700 px-1.5 py-0.5
              rounded text-gray-400">${_esc(s)}</button>`).join('');
@@ -622,6 +622,7 @@ async function booksFindSimilar() {
   if (!currentBook) return;
   const seed = [currentBook.title, (currentBook.authors || []).join(' '),
                 currentBook.description].filter(Boolean).join('. ').slice(0, 800);
+  // a one-off passage search: the Passages toggle stays as the user left it
   _bq('books_search').value = seed.slice(0, 80);
   booksSemanticSearch(seed);
 }
@@ -867,7 +868,7 @@ async function loadBookmarks() {
   if (!el || !d.success) return;
   el.innerHTML = d.bookmarks.map(b => `
     <div class="flex items-center gap-1 text-[11px] px-1.5 py-1 rounded hover:bg-gray-800">
-      <span onclick="readerGoto('${_esc(b.locator)}')"
+      <span onclick="readerGoto(${_jsArg(b.locator)})"
             class="flex-1 truncate cursor-pointer text-gray-300">${_esc(b.label || b.locator)}</span>
       <button onclick="deleteBookmark(${b.id})" class="text-gray-500 hover:text-red-400 px-1">✕</button>
     </div>`).join('') ||
@@ -908,17 +909,17 @@ async function openTriageModal() {
       <div class="text-[10px] text-gray-500 bg-gray-900 rounded p-1.5 mb-2 font-mono
                   max-h-16 overflow-hidden">${_esc(it.preview || '(no text preview)')}</div>
       <div class="flex gap-1 flex-wrap">
-        <button onclick="triageDecide('${_esc(it.rel_path).replace(/'/g, "\\'")}','book')"
+        <button onclick="triageDecide(${_jsArg(it.rel_path)},'book')"
           class="text-[10px] bg-green-700 hover:bg-green-600 px-2 py-1 rounded font-bold">
           It's a book</button>
-        <button onclick="triageDecide('${_esc(it.rel_path).replace(/'/g, "\\'")}','not_book')"
+        <button onclick="triageDecide(${_jsArg(it.rel_path)},'not_book')"
           class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Not a book</button>
         <span class="flex-1"></span>
-        <button onclick="triageDecideAll('${_esc(it.ext)}','${_esc(it.reason).replace(/'/g, "\\'")}','book')"
+        <button onclick="triageDecideAll(${_jsArg(it.ext)},${_jsArg(it.reason)},'book')"
           class="text-[10px] bg-green-900 hover:bg-green-800 px-2 py-1 rounded"
           title="Apply 'book' to every pending file with this extension and reason">
           All like this → book</button>
-        <button onclick="triageDecideAll('${_esc(it.ext)}','${_esc(it.reason).replace(/'/g, "\\'")}','not_book')"
+        <button onclick="triageDecideAll(${_jsArg(it.ext)},${_jsArg(it.reason)},'not_book')"
           class="text-[10px] bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded"
           title="Apply 'not a book' to every pending file with this extension and reason">
           All like this → skip</button>

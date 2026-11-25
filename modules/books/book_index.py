@@ -752,6 +752,13 @@ def ensure_tables(db):
         );
         CREATE INDEX IF NOT EXISTS idx_bpage_path ON book_pages(rel_path);
 
+        -- Covers this app drew (book_cover.STYLE): redrawn when the style changes.
+        CREATE TABLE IF NOT EXISTS book_cover_style (
+            rel_path TEXT PRIMARY KEY,
+            style    INTEGER,
+            ours     INTEGER DEFAULT 1      -- 0: checked, the book has its own cover
+        );
+
         -- The triage queue: files we refused to guess about. `decision` is
         -- NULL until a human answers; then 'book' or 'not_book'.
         CREATE TABLE IF NOT EXISTS book_triage (
@@ -766,6 +773,9 @@ def ensure_tables(db):
             created  REAL
         );
     """)
+    # A PDF is a book: PDFs shelved as comics by an older text-amount guess open in
+    # the book reader again (its paged mode has fit width / height and spreads).
+    db.execute("UPDATE books SET kind='book' WHERE fmt='pdf' AND kind='comic'")
     db.commit()
 
 # ==============================================================================
@@ -2339,29 +2349,3 @@ def page_count_for(abs_path: str, fmt: str) -> int | None:
     if fmt in COMIC_ARCHIVE_EXTS or fmt in ('cbz', 'cbr', 'cb7', 'cbt', 'cba'):
         return len(comic_page_names(abs_path, fmt))
     return None
-
-def pdf_is_probably_comic(abs_path: str) -> bool:
-    """! @brief A PDF whose first pages carry almost no extractable text is a scan - i.e.
-    a comic/manga rip, not a novel. Decides `kind` so the reader defaults to the
-    right chrome (spreads + fit-width vs columns + font size)."""
-    doc = _open_pdf(abs_path)
-    if doc is None:
-        return False
-    try:
-        n = min(5, doc.page_count)
-        if n == 0:
-            return False
-        total = 0
-        for i in range(n):
-            try:
-                total += len(doc.load_page(i).get_text().strip())
-            except Exception:
-                pass
-        return (total / n) < 120
-    except Exception:
-        return False
-    finally:
-        try:
-            doc.close()
-        except Exception:
-            pass

@@ -1,8 +1,7 @@
 /* notifications.js - the header bell of the notifications module.
  *
- * A bell with an unread badge sits in the signed-in user badge
- * (#cim-user-badge); with auth off, when no badge shows up, it goes next to
- * the status line (#status_text) instead. Clicking it opens a right-aligned
+ * A bell with an unread badge sits in the core's top-right corner
+ * (#cim_corner, window.CIMCorner), left of the account. Clicking it opens a right-aligned
  * dropdown of the newest items; clicking an item marks it read and follows
  * its link (an album item opens the album). The unread count is polled every
  * poll_seconds while the page is visible, and new arrivals raise a toast. */
@@ -185,28 +184,13 @@
     return b;
   }
 
-  /** @brief Put the bell in the user badge, else (auth off) next to the status line. */
+  /** @brief Put the bell in the core's top-right corner (left of the account). */
   function mount() {
-    let tries = 0;
     const tick = () => {
       if (st.stopped || st.bell) return;
-      const badge = document.getElementById('cim-user-badge');
-      if (badge) {
-        badge.prepend(makeBell());
-      } else if (++tries < 40) {
-        setTimeout(tick, 100);
-        return;
-      } else {
-        const status = document.getElementById('status_text');
-        const bell = makeBell();
-        if (status && status.parentElement) {
-          bell.style.marginLeft = '8px';
-          status.parentElement.appendChild(bell);
-        } else {
-          bell.classList.add('cim-notif-floating');
-          document.body.appendChild(bell);
-        }
-      }
+      const bell = makeBell();
+      if (window.CIMCorner) window.CIMCorner.add(bell, true);
+      else { bell.classList.add('cim-notif-floating'); document.body.appendChild(bell); }
       if (window.CIMFeatures) window.CIMFeatures.apply(st.bell.parentElement);
       setUnread(st.unread);
       poll();

@@ -715,6 +715,39 @@ def write_cover(abs_path, fmt, jpeg):
         return {"written": False, "error": f"{type(e).__name__}: {e}"}
 
 
+def replace_generated_cover(abs_path, fmt, jpeg):
+    """! @brief Swap a cover this app generated earlier (stored as COVER_NAME) for a new
+    drawing. A cover the book came with is never touched.
+    @return True when a generated cover was there and was replaced."""
+    if fmt == "epub":
+        with zipfile.ZipFile(abs_path) as z:
+            member = next((n for n in z.namelist()
+                           if n == COVER_NAME or n.endswith("/" + COVER_NAME)), None)
+        if not member:
+            return False
+        _rewrite_zip(abs_path, {member: jpeg})
+        return True
+    if fmt == "opf-folder":
+        img = os.path.join(os.path.dirname(abs_path), COVER_NAME)
+        if not os.path.exists(img):
+            return False
+        _atomic_replace(img, lambda tmp: open(tmp, "wb").write(jpeg))
+        return True
+    if fmt == "fb2":
+        import base64
+        ET.register_namespace("", FB2_NS)
+        ET.register_namespace("l", "http://www.w3.org/1999/xlink")
+        tree = ET.parse(abs_path)
+        b = next((x for x in tree.getroot().findall("{%s}binary" % FB2_NS)
+                  if x.get("id") == COVER_NAME), None)
+        if b is None:
+            return False
+        b.text = base64.b64encode(jpeg).decode("ascii")
+        _atomic_replace(abs_path, lambda tmp: tree.write(tmp, encoding="utf-8", xml_declaration=True))
+        return True
+    return False
+
+
 def write(abs_path, fmt, fields, comicinfo=None):
     """! @brief Write `fields` into the book at `abs_path`.
     @return {"written": bool, "target": path or "sidecar", "error": str}.

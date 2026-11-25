@@ -30,7 +30,7 @@ URL_PREFIX = "/static/build/"
 
 ## @brief The page's own scripts, in load order (app.html emits them from here).
 CORE_JS = [
-    "auth.js", "features.js", "globals.js", "scroll_keep.js", "viewer.js", "gallery.js",
+    "corner.js", "auth.js", "features.js", "globals.js", "scroll_keep.js", "viewer.js", "gallery.js",
     "upload.js", "albums.js", "panes.js", "panes_resize.js",
     "vendor/three.min.js", "vendor/OBJLoader.js", "vendor/OrbitControls.js",
     "editor.js", "ai_tools.js", "review.js", "tiers.js", "info.js", "user_settings.js",

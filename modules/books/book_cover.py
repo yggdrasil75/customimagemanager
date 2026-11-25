@@ -15,6 +15,10 @@ from PIL import Image, ImageDraw, ImageFont
 ## @brief Cover size in pixels (2:3, what readers and stores expect).
 SIZE = (600, 900)
 MARGIN = 54
+## @brief Bumped when the drawing changes: covers made by an older style are redrawn.
+STYLE = 2
+## @brief Where the colour band sits (fraction of the height): the title stays above it.
+BAND_Y = 0.62
 
 
 def _font(size):
@@ -65,15 +69,18 @@ def _wrap(draw, text, font, width, max_lines):
     return lines
 
 
-def _fit(draw, text, width, max_lines, sizes):
-    """! @brief The largest font size whose wrap fits in max_lines; (font, lines)."""
+def _fit(draw, text, width, max_lines, sizes, height=None, leading=1.18):
+    """! @brief The largest font size whose wrap fits in max_lines (and in `height`
+    pixels, when given); (font, lines). The smallest size wraps with an ellipsis."""
     for s in sizes:
         f = _font(s)
         lines = _wrap(draw, text, f, width, 99)
-        if len(lines) <= max_lines:
+        if len(lines) <= max_lines and (height is None or len(lines) * s * leading <= height):
             return f, lines
-    f = _font(sizes[-1])
-    return f, _wrap(draw, text, f, width, max_lines)
+    s = sizes[-1]
+    f = _font(s)
+    fit = max_lines if height is None else max(1, min(max_lines, int(height // (s * leading))))
+    return f, _wrap(draw, text, f, width, fit)
 
 
 def generate(title, authors=None, series="", series_index=None, quality=88):
@@ -90,18 +97,14 @@ def generate(title, authors=None, series="", series_index=None, quality=88):
     inner = w - 2 * MARGIN
 
     # a band and a rule, so it reads as a cover and not a blank page
-    d.rectangle([0, int(h * 0.62), w, int(h * 0.62) + 10], fill=band)
+    band_y = int(h * BAND_Y)
+    d.rectangle([0, band_y, w, band_y + 10], fill=band)
     d.rectangle([MARGIN, MARGIN, MARGIN + 90, MARGIN + 6], fill=band)
 
-    tf, tlines = _fit(d, title, inner, 6, (96, 84, 72, 64, 56, 48, 42, 36, 30))
-    y = MARGIN + 40
-    step = int(tf.size * 1.18) if hasattr(tf, "size") else 40
-    for ln in tlines:
-        d.text((MARGIN, y), ln, font=tf, fill=ink)
-        y += step
-
+    # the series line (if any) sits under the title; both stay above the band
+    sf = _font(28)
+    slines = []
     if series:
-        sf = _font(28)
         idx = ""
         if series_index not in (None, "", 0):
             try:
@@ -109,9 +112,18 @@ def generate(title, authors=None, series="", series_index=None, quality=88):
                 idx = " %s" % (int(v) if v.is_integer() else v)
             except (TypeError, ValueError):
                 idx = ""
-        for ln in _wrap(d, "%s%s" % (series, idx), sf, inner, 2):
-            d.text((MARGIN, y + 12), ln, font=sf, fill=soft)
-            y += 34
+        slines = _wrap(d, "%s%s" % (series, idx), sf, inner, 2)
+    top = MARGIN + 36
+    room = band_y - 28 - top - (12 + 34 * len(slines) if slines else 0)
+    tf, tlines = _fit(d, title, inner, 5, (64, 56, 50, 44, 38, 34, 30, 26), height=room)
+    y = top
+    step = int(tf.size * 1.18) if hasattr(tf, "size") else 40
+    for ln in tlines:
+        d.text((MARGIN, y), ln, font=tf, fill=ink)
+        y += step
+    for ln in slines:
+        d.text((MARGIN, y + 12), ln, font=sf, fill=soft)
+        y += 34
 
     if authors:
         who = ", ".join(authors[:2]) + (" and others" if len(authors) > 2 else "")

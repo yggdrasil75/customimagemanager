@@ -55,8 +55,7 @@
     if (document.getElementById('cim-user-badge')) return;
     const b = document.createElement('div');
     b.id = 'cim-user-badge';
-    b.style.cssText = 'position:fixed;top:6px;right:10px;z-index:9999;' +
-      'font:12px system-ui;color:var(--cim-gray-300, #cbd5e1);display:flex;gap:8px;align-items:center';
+    b.style.cssText = 'display:flex;gap:8px;align-items:center';
     const admin = '';
     b.innerHTML =
       '<span title="' + (state.user.source || '') + ' account">' +
@@ -64,16 +63,9 @@
       (state.user.is_admin ? ' \u2605' : '') + '</span>' + admin +
       '<button id="cim-logout-btn" style="background:var(--cim-gray-600, #4b5563);color:var(--cim-gray-200, #e5e7eb);' +
       'border:0;border-radius:6px;padding:3px 8px;cursor:pointer">Logout</button>';
-    document.body.appendChild(b);
+    // the core's top-right corner (corner.js keeps whatever is under it clear)
+    if (window.CIMCorner) window.CIMCorner.add(b); else document.body.appendChild(b);
     document.getElementById('cim-logout-btn').onclick = state.logout;
-    /** @brief The badge floats over the top-right corner. Publish its width so a
-     *  layout whose header runs under that corner can leave room for it:
-     *  padding-right: calc(var(--cim-user-badge-w, 0px) + 16px).
-     */
-    const publish = () => document.documentElement.style.setProperty(
-      '--cim-user-badge-w', Math.ceil(b.getBoundingClientRect().width) + 'px');
-    publish();
-    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(publish).observe(b);
   }
 
   // --- admin user-management panel ----------------------------------------

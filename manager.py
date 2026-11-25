@@ -3979,7 +3979,8 @@ def _make_thumb_bytes(abs_path: str) -> bytes | None:
     return _thumb_from_array(img)
 
 def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
-    """! @brief A thumbnail response (LRU, cache, then generated); the file itself or 404 when none can be made."""
+    """! @brief A thumbnail response (LRU, cache, then generated); the file itself when
+    browsers show its format, else 422 "could not load file"."""
     if mtime is None:
         mtime = _getmtime_loose(abs_path)
 
@@ -4011,14 +4012,32 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
             return resp
     got = thumb_bytes(rel_path, abs_path, mtime)
     if got is None:
-        return "", 404
+        resp = app.response_class("could not load file", status=422, mimetype="text/plain")
+        resp.headers["Cache-Control"] = "private, max-age=3600"   # don't re-ask on every scroll
+        return resp
     return _finish(*got)
+
+
+## @brief rel_path -> mtime of files no thumbnail could be made from.
+_thumb_failed: dict = {}
+
+
+def _thumb_raw_fallback(abs_path: str):
+    """! @brief The file itself as its thumbnail, only when browsers show the format
+    natively; anything else (a broken JXL, say) would only reach the browser to fail
+    there again. @return (bytes, mimetype) or None."""
+    if os.path.splitext(abs_path)[1].lower() not in mt.SAFE_EXTS.get('image', ()):
+        return None
+    raw = _read_bytes_loose(abs_path)
+    if raw is None:
+        return None
+    return raw, mt.mime_for(abs_path) or 'application/octet-stream'
 
 
 def thumb_bytes(rel_path: str, abs_path: str, mtime: float | None = None):
     """! @brief A file's thumbnail (LRU, cache, then generated).
-    @return (bytes, mimetype): the file itself when no thumbnail can be made;
-            None when unreadable.
+    @return (bytes, mimetype): the file itself when no thumbnail can be made and
+            browsers can show it; None otherwise.
     """
     if mtime is None:
         mtime = _getmtime_loose(abs_path)
@@ -4030,11 +4049,17 @@ def thumb_bytes(rel_path: str, abs_path: str, mtime: float | None = None):
     if data:
         _thumb_lru_put(rel_path, mtime, data)
         return data, _thumb_mime(data)
+    bad = _thumb_failed.get(rel_path)
+    if bad is not None and bad == mtime:
+        return _thumb_raw_fallback(abs_path)
     data = _make_thumb_bytes(abs_path)
     if data is None:
-        raw = _read_bytes_loose(abs_path)
-        if raw is None: return None
-        return raw, mt.mime_for(abs_path) or 'application/octet-stream'
+        # once per file version: a broken file is not decoded again on every scroll
+        if len(_thumb_failed) > 4096:
+            _thumb_failed.clear()
+        _thumb_failed[rel_path] = mtime
+        access_logger.warning(f"thumbnail: could not load {rel_path}")
+        return _thumb_raw_fallback(abs_path)
     if gen == _thumb_gen[0]:
         _thumb_put(rel_path, data, mtime, gen)
         _thumb_lru_put(rel_path, mtime, data)
@@ -5854,7 +5879,9 @@ def _run_upload():
 
             # books: index this one file now, not a whole-tree walk per upload
             module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
-            if mt.is_book(fname) or in_ext in mt.media_group('book', 'sidecar'):
+            # every book format an uploader may send (a PDF too), not only the
+            # unambiguous ones: anything else here would be indexed as an image
+            if mt.is_uploadable_book(fname) or in_ext in mt.media_group('book', 'sidecar'):
                 resp = {"success": True, "filename": rel_path, "media_kind": "book"}
                 if corrected_from is not None:
                     resp["corrected_extension"] = {"from": corrected_from,

@@ -531,9 +531,29 @@ def register(host):
                     heavy += 1
             ws["dir"] = None
 
+    def resolve_now_supported():
+        """! @brief "unsupported extension" issues recorded while the module for that kind
+        was off (music without librosa, say): resolved once a module handles the
+        extension, instead of waiting for a full walk to pass the file again."""
+        rows = host.db().execute(
+            "SELECT rel_path FROM integrity_issues WHERE kind='invalid' AND resolved IS NULL "
+            "AND detail LIKE 'unsupported:%'").fetchall()
+        media = host.media
+        known = media.registered_exts("exts")
+        done = [r["rel_path"] for r in rows
+                if os.path.splitext(r["rel_path"])[1].lower() in known
+                or media.library_section(r["rel_path"])[0] is not None]
+        if done:
+            now = time.time()
+            for rel in done:
+                clear(rel, ["invalid"], now)
+            log.info(f"integrity: {len(done)} file(s) no longer unsupported (a module handles them now)")
+        return len(done)
+
     def walk_finish(ws):
         """! @brief A walk is done: resolve unindexed "invalid" issues it did not see again
         (renamed, removed, fixed) and store the cycle's counts."""
+        resolve_now_supported()
         root = ws.get("root") or ""
         where = "kind='invalid' AND resolved IS NULL AND last_seen < ? " \
                 "AND rel_path NOT IN (SELECT rel_path FROM files)"
@@ -928,6 +948,7 @@ def register(host):
     def api_issues():
         """! @brief GET /api/integrity/issues?resolved=1: issues (open ones only by default) + status."""
         resolved = request.args.get("resolved") in ("1", "true", "yes")
+        resolve_now_supported()
         sql = "SELECT * FROM integrity_issues"
         if not resolved:
             sql += " WHERE resolved IS NULL"

@@ -182,3 +182,92 @@ def test_books_without_a_sort_value_sort_like_files_without_one(client, upload, 
     assert _book(client, j["filename"])
     got = _gallery(client, "sort:-tags", folder="mix2")
     assert got[0] == tagged and got[1:] == [plain, j["filename"]], got
+
+
+# -- generated covers ---------------------------------------------------------------
+def test_a_long_title_stays_above_the_band():
+    """The title used to run 6 lines at up to 96px, straight through the band."""
+    from modules.books import book_cover as bc
+    from PIL import Image
+    title = "010 - Fall of the Hulks - The Savage She-Hulks 001 2010 " * 3
+    im = Image.open(io.BytesIO(bc.generate(title, ["Someone"], "A Series", 3))).convert("L")
+    band_y = int(bc.SIZE[1] * bc.BAND_Y)
+    # the strip right above the band is background only: no glyph pixels in it
+    strip = im.crop((bc.MARGIN, band_y - 20, bc.SIZE[0] - bc.MARGIN, band_y - 2))
+    assert max(strip.getdata()) - min(strip.getdata()) < 40
+
+
+def _epub_with(names: dict, cover=None):
+    """An EPUB holding `names` (under OEBPS/); `cover` names the one its OPF declares."""
+    b = io.BytesIO()
+    meta = f'<meta name="cover" content="cov"/>' if cover else ""
+    item = f'<item id="cov" href="{cover}" media-type="image/png"/>' if cover else ""
+    opf = ('<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0">'
+           f'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>T</dc:title>{meta}</metadata>'
+           f'<manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>{item}</manifest>'
+           '<spine><itemref idref="c1"/></spine></package>')
+    with zipfile.ZipFile(b, "w") as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr("META-INF/container.xml",
+                   '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" '
+                   'version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" '
+                   'media-type="application/oebps-package+xml"/></rootfiles></container>')
+        z.writestr("OEBPS/content.opf", opf)
+        z.writestr("OEBPS/c1.xhtml", f"<html><body>{_PARA}</body></html>")
+        for n, data in names.items():
+            z.writestr("OEBPS/" + n, data)
+    return b.getvalue()
+
+
+def test_old_generated_covers_are_redrawn_and_real_ones_left_alone(tmp_path):
+    from modules.books import book_meta_write as bmw
+    ours = tmp_path / "ours.epub"
+    ours.write_bytes(_epub_with({bmw.COVER_NAME: b"old drawing"}))
+    real = tmp_path / "real.epub"
+    real.write_bytes(_epub_with({"cover.jpg": b"the publisher's cover"}))
+    assert bmw.replace_generated_cover(str(ours), "epub", b"new drawing")
+    assert not bmw.replace_generated_cover(str(real), "epub", b"new drawing")
+    with zipfile.ZipFile(ours) as z:
+        assert z.read("OEBPS/" + bmw.COVER_NAME) == b"new drawing"
+    with zipfile.ZipFile(real) as z:
+        assert z.read("OEBPS/cover.jpg") == b"the publisher's cover"
+        assert "OEBPS/" + bmw.COVER_NAME not in z.namelist()
+
+
+def test_redraw_pass_records_whose_cover_it_is(client, upload, prefs, app):
+    from modules.books import book_cover as bc, book_meta_write as bmw
+    prefs(target=".epub", mode="none")
+    rel_ours = _up(upload, _epub_with({bmw.COVER_NAME: _png(5)}), "redraw_ours.epub")
+    rel_real = _up(upload, _epub_with({"cover.png": _png(6)}, cover="cover.png"), "redraw_real.epub")
+    assert _book(client, rel_ours) and _book(client, rel_real)
+    db = app.module_host.db()
+    for rp in (rel_ours, rel_real):          # as if shelved before covers were recorded
+        db.execute("DELETE FROM book_cover_style WHERE rel_path=?", (rp,))
+        db.execute("UPDATE books SET cover='x.jpg' WHERE rel_path=?", (rp,))
+    db.commit()
+    while br.redraw_generated_covers(50):
+        pass
+    rows = {r["rel_path"]: (r["style"], r["ours"]) for r in
+            db.execute("SELECT * FROM book_cover_style WHERE rel_path IN (?, ?)", (rel_ours, rel_real))}
+    assert rows[rel_ours] == (bc.STYLE, 1)
+    assert rows[rel_real] == (bc.STYLE, 0)
+    with zipfile.ZipFile(br._abs(rel_ours)) as z:
+        drawn = z.read(next(n for n in z.namelist() if n.endswith(bmw.COVER_NAME)))
+    assert drawn[:3] == b"\xff\xd8\xff"       # the new JPEG drawing replaced the old one
+    assert br.redraw_generated_covers(50) == 0
+
+
+def test_a_pdf_without_text_is_still_a_book(client, upload, prefs):
+    """PDFs open in the book reader, never the comic reader: no guessing from how
+    much text the first pages carry (a scanned novel is a book)."""
+    fitz = pytest.importorskip("pymupdf")
+    prefs(target=".epub", mode="none")
+    doc = fitz.open()
+    for _ in range(3):
+        doc.new_page(width=1400, height=900).draw_rect(fitz.Rect(10, 10, 1390, 890), color=(1, 0, 0))
+    rel = _up(upload, doc.tobytes(), "pictures_only.pdf")    # a book at upload, not an image
+    assert _book(client, rel)
+    b = client.get(f"/api/books/detail?rel_path={rel}").get_json()["book"]
+    assert b["kind"] == "book" and b["reader"] == "paged"
+    assert not [f for f in client.get("/api/list").get_json()["files"]
+                if f.get("filename") == rel and f.get("kind") == "image"]

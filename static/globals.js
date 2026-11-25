@@ -141,6 +141,10 @@ function syncTagMirror(){
  */
 function _esc(s){ return String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+/** @brief A value as a JS string argument inside an inline handler attribute:
+ *  onclick="openBook(${_jsArg(path)})". JSON-quoted, then HTML-escaped, so a quote
+ *  or apostrophe in the value can't end the string or the attribute. */
+function _jsArg(s){ return _esc(JSON.stringify(String(s ?? ''))); }
 function tagIsConfirmed(t){ return !String(t).startsWith('?'); }
 function tagName(t){ t=String(t); return t.startsWith('?')?t.slice(1):t; }
 function renderTags(){
@@ -306,6 +310,17 @@ let galleryFiles = [];           // current page's file list, in render order
 const CIMLazy=(()=>{
   const NEAR='300px', FAR='1500px';
   const tracked=new Set();
+  // thumbnails that failed: shown as such, not fetched again on every scroll past
+  const failed=new Set();
+  function markFailed(el){
+    el.querySelector('.skeleton')?.remove();
+    if(el.querySelector('.cim-thumb-failed')) return;
+    const m=document.createElement('div');
+    if(getComputedStyle(el).position==='static') el.style.position='relative';
+    m.className='cim-thumb-failed absolute inset-0 flex items-center justify-center text-center p-1 text-[10px] text-gray-500 bg-gray-800';
+    m.textContent="Couldn't load file";
+    el.appendChild(m);
+  }
   const hasIO=typeof IntersectionObserver!=='undefined';
   function show(el){
     if(el.tagName==='IMG'){
@@ -317,8 +332,9 @@ const CIMLazy=(()=>{
     if(el.dataset.thumb){ el.style.backgroundImage=`url('${el.dataset.thumb}')`; return; }
     const img=el.querySelector('img'), u=el.dataset.src;
     if(!img || !u || img.getAttribute('src')) return;
+    if(failed.has(u)){ markFailed(el); return; }
     img.onload=()=>{ img.classList.add('loaded'); el.querySelector('.skeleton')?.remove(); };
-    img.onerror=()=>{ el.querySelector('.skeleton')?.remove(); };
+    img.onerror=()=>{ failed.add(u); markFailed(el); };
     img.src=u;
   }
   function hide(el, r){
