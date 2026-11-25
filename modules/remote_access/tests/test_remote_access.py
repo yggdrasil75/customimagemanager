@@ -9,6 +9,7 @@ import base64
 import hashlib
 import os
 import random
+import socket
 import struct
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import time
 import pytest
 from werkzeug.serving import make_server
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from modules.remote_access import dht as dhtmod
@@ -212,10 +214,12 @@ class FakeNode(asyncio.DatagramProtocol):
     """! @brief A minimal BEP 5 / BEP 44 node: answers get with every other node and
     the stored item, stores verified puts."""
 
-    def __init__(self, swarm):
+    def __init__(self, swarm, router=False):
         self.id = os.urandom(20)
         self.swarm = swarm
         self.items = {}
+        # like router.bittorrent.com: BEP 5 only - find_node answers, anything else is 204
+        self.router = router
 
     def connection_made(self, transport):
         self.transport = transport
@@ -225,7 +229,12 @@ class FakeNode(asyncio.DatagramProtocol):
         q, a, t = msg[b"q"], msg[b"a"], msg[b"t"]
         r = {"id": self.id}
         others = b"".join(n.id + bytes([127, 0, 0, 1]) + struct.pack("!H", n.port) for n in self.swarm if n is not self)
-        if q == b"get":
+        if self.router and q != b"find_node":
+            self.transport.sendto(dhtmod.bencode({"t": t, "y": "e", "e": [204, "Method Unknown"]}), addr)
+            return
+        if q == b"find_node":
+            r.update(nodes=others)
+        elif q == b"get":
             r.update(nodes=others, token=b"tok")
             it = self.items.get(a[b"target"])
             if it:
@@ -242,6 +251,14 @@ class FakeNode(asyncio.DatagramProtocol):
         self.transport.sendto(dhtmod.bencode({"t": t, "y": "r", "r": r}), addr)
 
 
+async def _start_router(loop, swarm):
+    """! @brief A BEP 5-only bootstrap router that knows the swarm (not part of it)."""
+    r = FakeNode(swarm, router=True)
+    tr, _ = await loop.create_datagram_endpoint(lambda: r, local_addr=("127.0.0.1", 0))
+    r.port = tr.get_extra_info("sockname")[1]
+    return r, tr
+
+
 def test_found_through_the_dht_alone():
     async def go():
         loop = asyncio.get_running_loop()
@@ -251,7 +268,8 @@ def test_found_through_the_dht_alone():
             tr, _ = await loop.create_datagram_endpoint(lambda n=n: n, local_addr=("127.0.0.1", 0))
             n.port = tr.get_extra_info("sockname")[1]
             swarm.append(n)
-        boot = ["127.0.0.1:%d" % swarm[0].port]
+        router, rtr = await _start_router(loop, swarm)
+        boot = ["127.0.0.1:%d" % router.port]
         target, tport = await _echo_target()
         server, client = await _pair(tport, use_dht=True)
         for node in (server, client):
@@ -264,9 +282,12 @@ def test_found_through_the_dht_alone():
         port = await client.serve_local()
         code, _ = await _http(port, "/api/family_share/inbound/ping")
         assert code == b"200"
+        # the router was only an entry point: never kept as a node
+        assert all(a[1] != router.port for a, _ in client.dht.good.values())
         client.close()
         server.close()
         target.close()
+        rtr.close()
     run(go(), timeout=90)
 
 
@@ -318,6 +339,58 @@ def test_dht_is_a_light_client_cached_nearest_rate_limit_and_warm_restart(tmp_pa
         assert loop.time() - t0 >= 0.35
         me.close()
     run(go(), timeout=60)
+
+
+def test_dht_stale_cache_falls_back_to_the_routers():
+    """! @brief A cache whose nodes have all gone away (a phone or server back after a
+    long sleep) must not end the lookup: the routers are asked, dead nodes dropped."""
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        swarm = []
+        for _ in range(12):
+            n = FakeNode(swarm)
+            tr, _ = await loop.create_datagram_endpoint(lambda n=n: n, local_addr=("127.0.0.1", 0))
+            n.port = tr.get_extra_info("sockname")[1]
+            swarm.append(n)
+
+        class Sink(asyncio.DatagramProtocol):
+            to = None
+
+            def datagram_received(self, data, a):
+                if self.to is not None:
+                    self.to.handle(data, a)
+
+        async def resolve(h, p):
+            return [(h, p)]
+        router, rtr = await _start_router(loop, swarm)
+        boot = ["127.0.0.1:%d" % router.port]
+        sinks = []
+        for _ in range(2):
+            sk = Sink()
+            tr, _ = await loop.create_datagram_endpoint(lambda sk=sk: sk, local_addr=("127.0.0.1", 0))
+            sinks.append((sk, tr))
+        writer = dhtmod.Dht(sinks[0][1].sendto, resolve, bootstrap=boot, allow_private=True, qps=200, burst=50)
+        sinks[0][0].to = writer
+        key = Ed25519PrivateKey.generate()
+        assert await writer.put(key, b"s", b"hello", 7) > 0
+        # a reader whose cache holds only dead nodes (2*K of them: the routers would not be asked up front)
+        reader = dhtmod.Dht(sinks[1][1].sendto, resolve, bootstrap=boot, allow_private=True, qps=200, burst=50)
+        sinks[1][0].to = reader
+        dead = []
+        for _ in range(dhtmod.K * 2):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.bind(("127.0.0.1", 0))
+            dead.append(s)                          # bound, never answers
+            reader.good[os.urandom(20)] = (("127.0.0.1", s.getsockname()[1]), time.monotonic())
+        assert await reader.get(dhtmod.raw_ed_pub(key), b"s") == (b"hello", 7)
+        assert not any(a[1] in {s.getsockname()[1] for s in dead} for a, _ in reader.good.values())
+        for s in dead:
+            s.close()
+        for _, tr in sinks:
+            tr.close()
+        rtr.close()
+    run(go(), timeout=90)
 
 
 # -- the module in the app -------------------------------------------------------

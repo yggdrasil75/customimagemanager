@@ -355,6 +355,8 @@ class Dht(private val send: (ByteArray, InetSocketAddress) -> Unit,
         private set
     private val pending = ConcurrentHashMap<String, CompletableFuture<Map<String, Any>?>>()
     private val good = ConcurrentHashMap<String, Pair<ByteArray, InetSocketAddress>>()
+    /** The bootstrap routers' addresses: entry points, never kept as nodes. */
+    private val routerAddrs: MutableSet<InetSocketAddress> = ConcurrentHashMap.newKeySet()
     fun nodeCount(): Int = good.size
     /** Queries sent (status). */
     @Volatile var sent = 0L
@@ -417,7 +419,8 @@ class Dht(private val send: (ByteArray, InetSocketAddress) -> Unit,
             "r" -> {
                 val r = msg["r"] as? Map<String, Any>
                 val nid = r?.get("id") as? ByteArray
-                if (nid != null && nid.size == 20) good[nid.joinToString("") { "%02x".format(it) }] = nid to LinkProto.norm(from)
+                if (nid != null && nid.size == 20 && LinkProto.norm(from) !in routerAddrs)
+                    good[nid.joinToString("") { "%02x".format(it) }] = nid to LinkProto.norm(from)
                 fut.complete(r)
             }
             "e" -> fut.complete(mapOf("__error" to (msg["e"] ?: "")))
@@ -458,14 +461,28 @@ class Dht(private val send: (ByteArray, InetSocketAddress) -> Unit,
         return out
     }
 
-    /** @brief Iterative get toward target: -> (id, addr, reply) closest first. */
+    /** @brief The bootstrap routers into `known` (IPv4, one address each). */
+    private fun addRouters(known: MutableMap<InetSocketAddress, ByteArray?>) {
+        for (spec in bootstrap) {
+            val hp = LinkProto.splitHostPort(spec, 6881) ?: continue
+            LinkProto.resolve(hp.first, hp.second).firstOrNull { it.address is Inet4Address }?.let {
+                val a = LinkProto.norm(it)
+                routerAddrs.add(a)
+                known[a] = null                                    // a router, even if an old cache listed it
+                good.entries.removeIf { e -> e.value.second == a }
+            }
+        }
+    }
+
+    /** @brief Iterative get toward target: -> (id, addr, reply) closest first. Starts from
+     *  the cached nodes; the routers are asked when fewer than K are cached, or when the
+     *  cached ones run out before K answered (a saved table gone stale while the phone
+     *  was away). A cached node that times out is dropped from the cache. */
     fun lookup(target: ByteArray): List<Triple<ByteArray, InetSocketAddress, Map<String, Any>>> {
         val known = LinkedHashMap<InetSocketAddress, ByteArray?>()
         good.values.sortedBy { dist(it.first, target) }.take(K * 2).forEach { known[it.second] = it.first }
-        if (known.size < K) for (spec in bootstrap) {
-            val hp = LinkProto.splitHostPort(spec, 6881) ?: continue
-            LinkProto.resolve(hp.first, hp.second).firstOrNull { it.address is Inet4Address }?.let { known.putIfAbsent(it, null) }
-        }
+        var routersIn = false
+        if (known.size < K) { addRouters(known); routersIn = true }
         val asked = HashSet<InetSocketAddress>()
         val replies = LinkedHashMap<InetSocketAddress, Pair<ByteArray, Map<String, Any>>>()
         val deadline = System.currentTimeMillis() + LOOKUP_TIMEOUT_MS
@@ -475,18 +492,28 @@ class Dht(private val send: (ByteArray, InetSocketAddress) -> Unit,
                 .filter { it.key !in asked }
                 .filter { e -> e.value == null || closest.size < K || dist(e.value!!, target) < closest.last() }
                 .take(ALPHA).map { it.key }
-            if (batch.isEmpty()) break
+            if (batch.isEmpty()) {
+                if (!routersIn && replies.size < K) { routersIn = true; addRouters(known); continue }
+                break
+            }
             asked.addAll(batch)
             val until = System.currentTimeMillis() + QUERY_TIMEOUT_MS
-            val futs = batch.map { it to query(it, "get", mapOf("target" to target)) }
-            for ((a, f) in futs) {
-                val r = await(a, f, until) ?: continue
+            // a bootstrap router (no id yet) only knows BEP 5: ask it find_node and keep just
+            // the nodes it names; BEP 44 "get" goes to real nodes, which may hold the item
+            val futs = batch.map { a ->
+                val router = known[a] == null
+                Triple(a, router, query(a, if (router) "find_node" else "get", mapOf("target" to target)))
+            }
+            for ((a, router, f) in futs) {
+                val r = await(a, f, until)
+                if (r == null) { known[a]?.let { good.remove(tkey(it)) }; continue }
                 if (r.containsKey("__error")) continue
+                (r["nodes"] as? ByteArray)?.let { parseNodes(it).forEach { (n, na) -> known.putIfAbsent(na, n) } }
+                if (router) continue
                 val nid = r["id"] as? ByteArray ?: continue
                 if (nid.size != 20) continue
                 known[a] = nid
                 replies[a] = nid to r
-                (r["nodes"] as? ByteArray)?.let { parseNodes(it).forEach { (n, na) -> known.putIfAbsent(na, n) } }
             }
         }
         val out = replies.entries.map { Triple(it.value.first, it.key, it.value.second) }.sortedBy { dist(it.first, target) }

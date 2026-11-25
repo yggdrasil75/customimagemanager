@@ -74,6 +74,7 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
     var pingMsg by remember { mutableStateOf("") }
     var account by remember { mutableStateOf(prefs.accountLabel()) }
     val caps by CapsStore.flow.collectAsState()
+    val capsError by CapsStore.error.collectAsState()
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
         val err = withContext(Dispatchers.IO) { runCatching { Api(prefs).ping() }.exceptionOrNull() }
@@ -94,8 +95,13 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
         val c = caps
         if (c != null) {
             val mods = c.modules.filterValues { it }.keys.sorted().joinToString(", ")
-            Text(if (c.v2) "Phone API v${c.api}: $mods" else "Older server (photos only) - update it for music, video and books.",
-                color = Color.Gray, fontSize = 12.sp)
+            val known = CapsStore.known(ctx)
+            Text(when {
+                    c.v2 -> "Phone API v${c.api}: $mods"
+                    known -> "Older server (photos only) - update it for music, video and books."
+                    else -> "Couldn't ask the server what it offers" +
+                        (if (capsError.isNotEmpty()) ": $capsError" else "") + ". Photos only until it answers."
+                }, color = if (c.v2 || known) Color.Gray else MaterialTheme.colorScheme.error, fontSize = 12.sp)
         }
         Text("Server key ${Crypto.fingerprint(prefs.serverPub ?: ByteArray(32))}\nThis phone ${Crypto.fingerprint(prefs.publicKey)}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color.Gray)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

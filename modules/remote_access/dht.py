@@ -10,7 +10,8 @@ routing tables.
 Being a light, polite client:
   * a persistent node id and node cache (state_path): a restart starts warm
     instead of walking from the bootstrap routers again;
-  * routers are only asked when fewer than K known nodes answer;
+  * routers are only asked when fewer than K known nodes answer (a cache whose
+    nodes have all gone away falls back to them; a node that times out is dropped);
   * the K nodes closest to each target (with their write tokens) are kept for
     NEAR_TTL: a repeat get / put asks just those few nodes, and only a miss falls
     back to a full iterative lookup;
@@ -160,6 +161,7 @@ class Dht:
         self.id = os.urandom(20)
         self.pending = {}
         self.good = {}                 # node id -> (addr, last answer)
+        self.router_addrs = set()      # bootstrap routers: entry points, never kept as nodes
         self.near = {}                 # target -> (when, [(id, addr, token | None)])
         self._tid = int.from_bytes(os.urandom(2), "big")
         self.qps, self.burst = float(qps), float(burst)
@@ -236,7 +238,7 @@ class Dht:
         if msg.get(b"y") == b"r" and isinstance(msg.get(b"r"), dict):
             r = msg[b"r"]
             nid = r.get(b"id")
-            if isinstance(nid, bytes) and len(nid) == 20:
+            if isinstance(nid, bytes) and len(nid) == 20 and addr not in self.router_addrs:
                 self.good[nid] = (addr, time.monotonic())
                 if len(self.good) > 400:
                     for k, _ in sorted(self.good.items(), key=lambda kv: kv[1][1])[:100]:
@@ -265,21 +267,34 @@ class Dht:
             self.pending.pop((t, addr), None)
 
     # -- lookups -------------------------------------------------------------------
+    async def _routers(self):
+        """! @brief The bootstrap routers' addresses (IPv4, one each)."""
+        out = []
+        for spec in self.bootstrap:
+            host, _, port = spec.rpartition(":")
+            for a in (await self.resolve(host, int(port)))[:1]:
+                if ":" not in a[0]:
+                    out.append(a)
+        self.router_addrs.update(out)
+        for k in [k for k, (a, _) in self.good.items() if a in self.router_addrs]:
+            self.good.pop(k, None)
+        return out
+
     async def _seeds(self, target):
+        """! @brief (seed nodes nearest target, routers already added): the cached nodes,
+        plus the routers when fewer than K are cached."""
         seeds = sorted(self.good.items(), key=lambda kv: distance(kv[0], target))[:K * 2]
         out = [(nid, a) for nid, (a, _) in seeds]
         if len(out) < K:
-            for spec in self.bootstrap:
-                host, _, port = spec.rpartition(":")
-                for a in (await self.resolve(host, int(port)))[:1]:
-                    if ":" not in a[0]:
-                        out.append((None, a))
-        return out
+            out += [(None, a) for a in await self._routers()]
+            return out, True
+        return out, False
 
     async def lookup(self, target):
         """! @brief Iterative "get" toward target. -> list of (id, addr, reply), closest first."""
         known = {}                     # addr -> id (None for bootstrap routers)
-        for nid, a in await self._seeds(target):
+        seeds, routers_in = await self._seeds(target)
+        for nid, a in seeds:
             known.setdefault(a, nid)
         asked, replies = set(), {}
         deadline = asyncio.get_running_loop().time() + LOOKUP_TIMEOUT
@@ -301,21 +316,36 @@ class Dht:
                 if len(batch) >= ALPHA:
                     break
             if not batch:
+                # the cached nodes ran out before K answered (a stale cache after a long
+                # sleep): walk from the routers instead of giving up
+                if not routers_in and len(replies) < K:
+                    routers_in = True
+                    for a in await self._routers():
+                        known[a] = None              # a router, even if an old cache listed it
+                    continue
                 break
             asked.update(batch)
-            results = await asyncio.gather(*(self.query(a, "get", {"target": target}) for a in batch))
+            # a bootstrap router (no id yet) only knows BEP 5: ask it find_node and keep
+            # just the nodes it names; BEP 44 "get" goes to real nodes, which may hold the item
+            routers = {a for a in batch if known.get(a) is None}
+            results = await asyncio.gather(*(self.query(a, "find_node" if a in routers else "get",
+                                                        {"target": target}) for a in batch))
             for a, r in zip(batch, results):
                 if not r or b"__error" in r:
+                    if known.get(a) is not None and not r:
+                        self.good.pop(known[a], None)      # timed out: no longer a seed
+                    continue
+                nodes = r.get(b"nodes")
+                if isinstance(nodes, bytes):
+                    for n_id, n_addr in parse_nodes(nodes, self.allow_private):
+                        known.setdefault(n_addr, n_id)
+                if a in routers:
                     continue
                 nid = r.get(b"id")
                 if not isinstance(nid, bytes) or len(nid) != 20:
                     continue
                 known[a] = nid
                 replies[a] = (nid, r)
-                nodes = r.get(b"nodes")
-                if isinstance(nodes, bytes):
-                    for n_id, n_addr in parse_nodes(nodes, self.allow_private):
-                        known.setdefault(n_addr, n_id)
         out = sorted(((nid, a, r) for a, (nid, r) in replies.items()), key=lambda x: distance(x[0], target))
         if out:
             self.near[target] = (time.monotonic(), [(nid, a, r.get(b"token")) for nid, a, r in out[:K]])

@@ -21,6 +21,9 @@ object Remote {
     val DEFAULT_STUN = listOf("stun.l.google.com:19302", "stun.cloudflare.com:3478")
     private const val DIRECT_TTL_MS = 60_000L
     private const val CONFIG_TTL_MS = 6 * 3600_000L
+    /** How often to re-read the server's config while the phone has no way out (no gateway,
+     *  DHT off): turning the DHT on at the server should reach the phone before it leaves. */
+    private const val CONFIG_TTL_NO_ROUTE_MS = 10 * 60_000L
     private const val LINK_IDLE_MS = 3 * 60_000L
 
     private var link: Link? = null
@@ -51,12 +54,12 @@ object Remote {
         }
         if (!prefs.remoteEnabled) {
             // still learn, now and then, whether the server offers it (that turns it on here)
-            if (now - prefs.remoteConfigAt > CONFIG_TTL_MS) fetchConfig(prefs, url)
+            if (now - prefs.remoteConfigAt > configTtl(prefs)) fetchConfig(prefs, url)
             if (!prefs.remoteEnabled) return url
         }
         if (now - directAt > DIRECT_TTL_MS) { directOk = reachable(url); directAt = now }
         if (directOk) {
-            if (now - prefs.remoteConfigAt > CONFIG_TTL_MS) fetchConfig(prefs, url)
+            if (now - prefs.remoteConfigAt > configTtl(prefs)) fetchConfig(prefs, url)
             prefs.linkStatus = "Direct: $url answers"
             return url
         }
@@ -68,6 +71,10 @@ object Remote {
 
     /** @brief Settings -> "Test remote link": build the link even at home and ping through it. */
     fun test(prefs: Prefs): String {
+        // re-read the server's gateways / DHT setting first (when its URL answers), so a
+        // change made at the server is what gets tested
+        val url = prefs.serverUrl.trimEnd('/')
+        if (url.isNotEmpty() && reachable(url)) fetchConfig(prefs, url)
         val l = synchronized(this) { ensureLink(prefs) }
         val j = Api(prefs, "http://127.0.0.1:" + l.localPort).ping()
         return "Linked via ${l.pathNote}; reached ${j.optString("name")}"
@@ -100,6 +107,9 @@ object Remote {
     }
 
     private fun lines(s: String) = s.split('\n', ',').map { it.trim() }.filter { it.isNotEmpty() }
+
+    private fun configTtl(prefs: Prefs): Long =
+        if (lines(prefs.remoteGateways).isEmpty() && !prefs.remoteDht) CONFIG_TTL_NO_ROUTE_MS else CONFIG_TTL_MS
 
     private fun reachable(url: String): Boolean = if (url.isEmpty()) false else try {
         val u = URI(url)

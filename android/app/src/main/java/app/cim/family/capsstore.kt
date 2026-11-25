@@ -12,6 +12,13 @@ import org.json.JSONObject
 object CapsStore {
     private val state = MutableStateFlow<Caps?>(null)
     val flow: StateFlow<Caps?> get() = state
+    private val err = MutableStateFlow("")
+    /** Why the last refresh failed ("" after a success): the screens show it, since the
+     *  photos-only fallback looks just like an old server otherwise. */
+    val error: StateFlow<String> get() = err
+
+    /** @brief True once the server has answered inbound/caps (an old server's 404 counts). */
+    fun known(ctx: Context): Boolean = Prefs.get(ctx).capsJson.isNotEmpty()
 
     /** @brief The last known caps (Prefs when not loaded yet; v1 when never fetched). */
     fun current(ctx: Context): Caps {
@@ -25,8 +32,12 @@ object CapsStore {
     /** @brief Blocking: ask the server. Returns the new caps, or throws (the old ones stay). */
     fun refresh(ctx: Context): Caps {
         val prefs = Prefs.get(ctx)
-        val c = ApiV2(prefs).fetchCaps()
+        val c = try { ApiV2(prefs).fetchCaps() } catch (e: Exception) {
+            err.value = e.message ?: e.javaClass.simpleName
+            throw e
+        }
         prefs.capsJson = c.toJson().toString()
+        err.value = ""
         state.value = c
         return c
     }
