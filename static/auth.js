@@ -98,7 +98,7 @@
         'padding:6px;border-radius:6px;border:1px solid var(--cim-gray-700, #374151);background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb)">' +
         '<label style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="cim-na">admin</label>' +
         '<select id="cim-na-role" title="role" style="padding:6px;border-radius:6px;border:1px solid var(--cim-gray-700, #374151);background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb)"></select>' +
-        '<select id="cim-na-group" title="group" style="padding:6px;border-radius:6px;border:1px solid var(--cim-gray-700, #374151);background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb)"></select>' +
+        '<button id="cim-na-group" type="button" title="groups" data-gids="[]" style="padding:6px;border-radius:6px;border:1px solid var(--cim-gray-700, #374151);background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);cursor:pointer">groups: none \u25be</button>' +
         '<button id="cim-add" style="background:var(--cim-accent-500, #4f7cff);color:#fff;border:0;border-radius:6px;' +
         'padding:6px 12px;cursor:pointer">Add</button></div>' +
         '<hr style="border:0;border-top:1px solid var(--cim-gray-700, #374151);margin:18px 0">' +
@@ -149,15 +149,20 @@
     if (ngRole && !ngRole.options.length) ngRole.innerHTML = roleOptions('custom');
     const t = document.getElementById('cim-grp-table');
     if (!t) return;
-    t.innerHTML = '<tr style="text-align:left;color:var(--cim-gray-400, #9ca3af)"><th>Group</th><th>Role</th>' +
+    t.innerHTML = '<tr style="text-align:left;color:var(--cim-gray-400, #9ca3af)"><th>Group</th><th>Members</th><th>Role</th>' +
+      '<th title="Directory group DN: LDAP / AD members of it join this group at sign-in">LDAP group DN</th>' +
       xfFor('group').map(f => '<th>' + esc(f.label) + '</th>').join('') + '<th></th></tr>';
     _groups.forEach(g => {
       const tr = document.createElement('tr');
       tr.style.borderTop = '1px solid var(--cim-gray-700, #374151)';
       tr.innerHTML =
         '<td style="padding:5px 0">' + esc(g.name) + '</td>' +
+        '<td>' + (g.member_count != null ? g.member_count : '') + '</td>' +
         '<td><select data-grole="' + g.id + '" style="background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);' +
         'border:1px solid var(--cim-gray-700, #374151);border-radius:5px;padding:2px">' + roleOptions(g.role) + '</select></td>' +
+        '<td><input data-gdn="' + g.id + '" value="' + esc(g.ldap_dn || '') + '" placeholder="CN=...,OU=..." ' +
+        'style="width:100%;min-width:90px;background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);' +
+        'border:1px solid var(--cim-gray-700, #374151);border-radius:5px;padding:2px"></td>' +
         xfFor('group').map(f => '<td>' + xfSelect(f, (g.extra || {})[f.key], 'data-gxf="' + f.key + '" data-gid="' + g.id + '"') + '</td>').join('') +
         '<td style="text-align:right;white-space:nowrap">' +
         '<button data-gfeat="' + g.id + '" style="background:var(--cim-accent2-800, #3730a3);color:var(--cim-accent2-100, #e0e7ff);border:0;' +
@@ -170,6 +175,11 @@
       const r2 = await post('/api/auth/groups/update', { id: +s.dataset.grole, role: s.value });
       if (!r2.ok) err((await r2.json()).error || 'Update failed');
       refreshGroups(); refreshUsers();
+    });
+    t.querySelectorAll('[data-gdn]').forEach(s => s.onchange = async () => {
+      const r2 = await post('/api/auth/groups/update', { id: +s.dataset.gdn, ldap_dn: s.value });
+      if (!r2.ok) err((await r2.json()).error || 'Update failed');
+      refreshGroups();
     });
     t.querySelectorAll('[data-gxf]').forEach(s => s.onchange = async () => {
       const r2 = await post('/api/auth/groups/update', { id: +s.dataset.gid, extra: { [s.dataset.gxf]: s.value } });
@@ -200,14 +210,42 @@
   function err(m) { const e = document.getElementById('cim-um-err'); if (e) e.textContent = m || ''; }
 
   function roleOptions(sel) {
-    const roles = (_catalog && _catalog.roles) || ['admin', 'uploader', 'viewer', 'custom'];
+    const roles = (_catalog && _catalog.roles) || ['admin', 'custom', 'user', 'uploader', 'viewer'];
     return roles.map(r =>
       '<option value="' + r + '"' + (r === sel ? ' selected' : '') + '>' + r + '</option>').join('');
   }
-  function groupOptions(sel) {
-    return '<option value="">- none -</option>' + _groups.map(g =>
-      '<option value="' + g.id + '"' + (g.id === sel ? ' selected' : '') + '>' +
-      esc(g.name) + '</option>').join('');
+  /** @brief Button text for a set of group ids ("groups: a, b" / "groups: none"). */
+  function groupLabel(ids) {
+    const names = (ids || []).map(id => (_groups.find(g => g.id === id) || {}).name).filter(Boolean);
+    return 'groups: ' + (names.length ? names.join(', ') : 'none') + ' \u25be';
+  }
+  /** @brief A checkbox popover under `btn` to pick several groups; onDone(ids) on close. */
+  function pickGroups(btn, ids, onDone) {
+    document.getElementById('cim-grp-pick')?.remove();
+    const cur = new Set(ids || []);
+    const box = document.createElement('div');
+    box.id = 'cim-grp-pick';
+    const r = btn.getBoundingClientRect();
+    box.style.cssText = 'position:fixed;z-index:10002;left:' + Math.round(r.left) + 'px;top:' + Math.round(r.bottom + 2) +
+      'px;background:var(--cim-gray-800, #1f2937);border:1px solid var(--cim-gray-600, #4b5563);border-radius:8px;' +
+      'padding:8px;max-height:260px;overflow:auto;min-width:180px;font:12px system-ui;color:var(--cim-gray-200, #e5e7eb)';
+    box.innerHTML = (_groups.length ? _groups.map(g =>
+      '<label style="display:flex;gap:6px;align-items:center;padding:2px 0"><input type="checkbox" value="' + g.id + '"' +
+      (cur.has(g.id) ? ' checked' : '') + '>' + esc(g.name) +
+      '<span style="color:var(--cim-gray-500, #6b7280)">(' + esc(g.role) + ')</span></label>').join('')
+      : '<div style="color:var(--cim-gray-500, #6b7280)">No groups yet.</div>') +
+      '<div style="text-align:right;margin-top:6px"><button type="button" style="background:var(--cim-accent-500, #4f7cff);' +
+      'color:#fff;border:0;border-radius:5px;padding:3px 10px;cursor:pointer">Done</button></div>';
+    document.body.appendChild(box);
+    const close = () => {
+      const out = [...box.querySelectorAll('input:checked')].map(i => +i.value);
+      box.remove();
+      document.removeEventListener('mousedown', outside, true);
+      onDone(out);
+    };
+    const outside = e => { if (!box.contains(e.target) && e.target !== btn) close(); };
+    box.querySelector('button').onclick = close;
+    setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
   }
 
   // Account fields modules registered (host.add_account_field, e.g. layout):
@@ -261,11 +299,16 @@
     const naRole = document.getElementById('cim-na-role');
     if (naRole) naRole.innerHTML = roleOptions('custom');
     const naGrp = document.getElementById('cim-na-group');
-    if (naGrp) naGrp.innerHTML = groupOptions('');
+    if (naGrp) {
+      naGrp.textContent = groupLabel(JSON.parse(naGrp.dataset.gids || '[]'));
+      naGrp.onclick = () => pickGroups(naGrp, JSON.parse(naGrp.dataset.gids || '[]'), ids => {
+        naGrp.dataset.gids = JSON.stringify(ids); naGrp.textContent = groupLabel(ids);
+      });
+    }
 
     const t = document.getElementById('cim-um-table');
     t.innerHTML = '<tr style="text-align:left;color:var(--cim-gray-400, #9ca3af)">' +
-      '<th>User</th><th>Source</th><th>Admin</th><th>Role</th><th>Group</th>' +
+      '<th>User</th><th>Source</th><th>Admin</th><th>Role</th><th>Groups</th>' +
       xfFor('user').map(f => '<th>' + esc(f.label) + '</th>').join('') +
       '<th>Disabled</th><th></th></tr>';
     d.users.forEach(u => {
@@ -279,9 +322,9 @@
         '<td><select data-role="' + u.id + '"' + (u.is_admin ? ' disabled' : '') +
         ' style="background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);border:1px solid var(--cim-gray-700, #374151);border-radius:5px;padding:2px">' +
         roleOptions(u.role) + '</select></td>' +
-        '<td><select data-grp="' + u.id + '"' + (u.is_admin ? ' disabled' : '') +
-        ' style="background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);border:1px solid var(--cim-gray-700, #374151);border-radius:5px;padding:2px">' +
-        groupOptions(u.group_id) + '</select></td>' +
+        '<td><button type="button" data-grp="' + u.id + '"' + (u.is_admin ? ' disabled' : '') +
+        ' style="background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);border:1px solid var(--cim-gray-700, #374151);border-radius:5px;padding:2px 6px;cursor:pointer;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+        esc(groupLabel(u.group_ids || (u.group_id ? [u.group_id] : []))) + '</button></td>' +
         xfFor('user').map(f => '<td>' + xfSelect(f, (u.extra || {})[f.key], 'data-uxf="' + f.key + '" data-uid="' + u.id + '"') + '</td>').join('') +
         '<td><input type="checkbox" ' + (u.disabled ? 'checked' : '') + ' data-d="' + u.id + '"></td>' +
         '<td style="text-align:right;white-space:nowrap">' +
@@ -298,8 +341,14 @@
       update({ id: +cb.dataset.d, disabled: cb.checked }));
     t.querySelectorAll('[data-role]').forEach(s => s.onchange = () =>
       update({ id: +s.dataset.role, role: s.value }));
-    t.querySelectorAll('[data-grp]').forEach(s => s.onchange = () =>
-      update({ id: +s.dataset.grp, group_id: s.value ? +s.value : null }));
+    t.querySelectorAll('[data-grp]').forEach(b => b.onclick = () => {
+      const u = b.closest('tr')._user;
+      const before = u.group_ids || (u.group_id ? [u.group_id] : []);
+      pickGroups(b, before, ids => {
+        if (ids.length === before.length && ids.every(i => before.includes(i))) return;
+        update({ id: u.id, group_ids: ids }).then(refreshGroups);
+      });
+    });
     t.querySelectorAll('[data-uxf]').forEach(s => s.onchange = () =>
       update({ id: +s.dataset.uid, extra: { [s.dataset.uxf]: s.value } }));
     t.querySelectorAll('[data-del]').forEach(b => b.onclick = () => del(+b.dataset.del));
@@ -387,19 +436,21 @@
     refreshUsers();
   }
   async function addUser() {
-    const grpVal = document.getElementById('cim-na-group').value;
+    const grpBtn = document.getElementById('cim-na-group');
+    const gids = JSON.parse((grpBtn && grpBtn.dataset.gids) || '[]');
     const r = await post('/api/auth/users/create', {
       username: document.getElementById('cim-nu').value,
       password: document.getElementById('cim-np').value,
       is_admin: document.getElementById('cim-na').checked,
       role: document.getElementById('cim-na-role').value,
-      group_id: grpVal ? +grpVal : null,
+      group_ids: gids,
       extra: collectAdd('cim-na-xf-', 'user') });
     if (!r.ok) { err((await r.json()).error || 'Create failed'); return; }
     document.getElementById('cim-nu').value = '';
     document.getElementById('cim-np').value = '';
     document.getElementById('cim-na').checked = false;
-    refreshUsers();
+    if (grpBtn) grpBtn.dataset.gids = '[]';
+    refreshUsers(); refreshGroups();
   }
   function post(url, body) {
     return window.fetch(url, { method: 'POST',

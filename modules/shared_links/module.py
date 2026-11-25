@@ -11,7 +11,8 @@ resolve their members live, so pictures added to the album later show up on
 the page. Visits are counted. The page is a self-contained HTML document
 (templates/shared_link.html) with a thumbnail grid, a lightbox and an upload
 form; every public route checks the token, the expiry and the password
-cookie on each request and only serves files that belong to the link.
+cookie on each request and only serves files that belong to the link and
+whose permissions let a public-link visitor (ANONYMOUS@) read them.
 """
 
 import io
@@ -154,15 +155,21 @@ class Links:
         return self.db().execute("SELECT * FROM shared_links WHERE token=?", (token,)).fetchone()
 
     def members(self, row):
-        """! @brief The rel_paths a link exposes right now (album links read album_members live)."""
+        """! @brief The rel_paths a link exposes right now (album links read album_members live),
+        less any file whose permissions refuse a public-link visitor (ownership's ACLs:
+        ANONYMOUS@ needs read)."""
         if row["kind"] == "album":
-            return [r[0] for r in self.db().execute(
+            rels = [r[0] for r in self.db().execute(
                 "SELECT rel_path FROM album_members WHERE album=? ORDER BY added, rel_path",
                 (row["album"],)).fetchall()]
-        try:
-            return [str(x) for x in json.loads(row["files"] or "[]")]
-        except Exception:
-            return []
+        else:
+            try:
+                rels = [str(x) for x in json.loads(row["files"] or "[]")]
+            except Exception:
+                rels = []
+        own = self.host.get_service("ownership") or {}
+        ok = own.get("public_ok")
+        return [r for r in rels if ok(r)] if ok else rels
 
     def is_member(self, row, rel):
 
@@ -344,6 +351,11 @@ def register(host):
             fp = host.safe_path(host.media_dir, rel) if rel else None
             if not fp or not os.path.isfile(fp):
                 return "", [], (jsonify({"success": False, "error": f"not found: {rel}"}), 404)
+            own = host.get_service("ownership") or {}
+            if own.get("public_ok") and not own["public_ok"](rel):
+                return "", [], (jsonify({"success": False, "error":
+                    f"{rel}: its permissions don't allow public links (Owner tab: give "
+                    "'Everyone (public link)' read)"}), 403)
             if rel not in files:
                 files.append(rel)
         if not files:

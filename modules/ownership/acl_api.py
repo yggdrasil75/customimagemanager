@@ -15,6 +15,12 @@
   GET  /api/acl/objects                    every folder / file with an ACL (admin)
   GET|POST /api/acl/config                 audit retention (admin)
   GET  /api/acl/me                         the caller's upload scopes
+  GET  /api/acl/disk?path=                 host ACL of an object vs the app's (fsacl.py)
+  POST /api/acl/disk/push {path?}          write one object (or, without path, the whole
+                                           library) to disk (admin for the library)
+  POST /api/acl/disk/import {path? , files} read one object (or every folder, and with
+                                           files every file) back from disk
+  GET|POST /api/acl/disk/config            host-ACL settings and status (admin)
 
 Everything but /api/acl/me is behind the feature acl.manage (read to look,
 write to change), blocked for viewer and uploader roles by default: an admin
@@ -35,6 +41,7 @@ from flask import Response, g, jsonify, request
 import features as features_mod
 
 from . import acl
+from . import fsacl
 
 DDL = """
 CREATE TABLE IF NOT EXISTS acl_objects (
@@ -125,6 +132,29 @@ def register_acl(host, policy, mod):
     host.add_asset("acl.css")
     host.on_startup(policy.prune_audit)
 
+    # -- host ACLs (fsacl.py): only with LDAP enabled and configured ------------------
+    FS = {"mode": "fs_acl", "backend": "fs_acl_backend", "domain": "fs_acl_domain",
+          "everyone": "fs_acl_everyone", "service": "fs_acl_service", "import_on_sync": "fs_acl_import_on_sync"}
+
+    def _choice(*opts):
+        def check(v):
+            v = str(v or "").strip().lower() or opts[0]
+            return v if v in opts else None
+        return check
+    host.add_config_key(FS["mode"], default="auto", validate=_choice("auto", "off"), tab="permissions")
+    host.add_config_key(FS["backend"], default="auto", validate=_choice("auto", "windows", "nfs4", "fake"),
+                        tab="permissions")
+    for k in ("domain", "everyone", "service"):
+        host.add_config_key(FS[k], default="", validate=lambda v: str(v or "").strip(), tab="permissions")
+    host.add_config_key(FS["import_on_sync"], default=True, validate=lambda v: bool(v), tab="permissions")
+    hostacl = fsacl.HostAcl(host, policy, FS)
+    policy.hostacl = hostacl
+
+    def on_reconcile(**_kw):
+        if host.config.get(FS["import_on_sync"], True) and hostacl.active():
+            hostacl.import_all(include_files=False)
+    host.on("library.reconcile", on_reconcile)
+
     # -- helpers ------------------------------------------------------------------
     def _me():
         u = g.get("user")
@@ -163,6 +193,8 @@ def register_acl(host, policy, mod):
         if who in SPECIAL_LABELS:
             return {"who": who, "label": SPECIAL_LABELS[who], "kind": "special"}
         kind, _, ident = who.partition(":")
+        if kind == "host":
+            return {"who": who, "kind": "host", "label": f"Host: {ident}"}
         key = (kind, ident)
         if key not in _names or time.time() - _names[key][1] > 30:
             if kind == "user":
@@ -271,6 +303,7 @@ def register_acl(host, policy, mod):
         d.commit()
         policy.invalidate()
         policy.audit("file.move", old_rel, f"-> {new_rel}")
+        policy.push_disk(new_rel, False)     # a move keeps the old place's inherited entries on NTFS
     host.on("file.renamed", on_renamed)
 
     def on_folder_renamed(old_folder, new_folder, **_kw):
@@ -282,6 +315,7 @@ def register_acl(host, policy, mod):
         db().commit()
         policy.invalidate()
         policy.audit("folder.move", old, f"-> {new}")
+        policy.push_disk(new, True)
     host.on("folder.renamed", on_folder_renamed)
 
     def in_trash(rel_path):
@@ -531,3 +565,87 @@ def register_acl(host, policy, mod):
                         "default_scope": policy.default_scope(u) if u else "public",
                         "personal_allowed": policy.personal_allowed(u),
                         "personal_folder": mod.personal_folder(u["username"]) if u else None})
+
+    # -- host ACLs ----------------------------------------------------------------------
+    def _disk_payload(path, is_dir):
+        st = hostacl.status()
+        out = {"success": True, "status": st, "path": path}
+        if st["active"]:
+            try:
+                c = hostacl.compare(path, is_dir)
+                out.update(in_sync=c["in_sync"], unmapped=c["disk"]["unmapped"],
+                           disk={"protected": c["disk"]["protected"],
+                                 "entries": [_describe(a) for a in c["disk"]["entries"]],
+                                 "owner_id": c["disk"]["owner_id"]})
+            except Exception as e:
+                out.update(in_sync=None, error=str(e))
+        # what the app holds that the disk can not (local accounts, groups without a DN)
+        dirs = policy.dirs()
+        own = dirs.get(path) if is_dir else policy.file_acl(path)
+        kind = st.get("backend") or "nfs4"
+        out["app_only"] = [_principal(a["who"])["label"] for a in (own[1] if own else [])
+                           if a["who"] != "ANONYMOUS@" and not hostacl.host_principal(a, kind, None)]
+        return out
+
+    @host.route("/api/acl/disk", feature=F)
+    def acl_disk():
+        path, is_dir, err = _target(request.args)
+        if err:
+            return err
+        if not _can(path, is_dir, acl.READ_ACL):
+            return _err("You may not see the permissions of this item.", 403)
+        return jsonify(_disk_payload(path, is_dir))
+
+    @host.route("/api/acl/disk/push", methods=["POST"], feature=F, level="write")
+    def acl_disk_push():
+        d = request.get_json(silent=True) or {}
+        if not hostacl.active():
+            return _err("Host ACLs are off: " + hostacl.status().get("reason", ""), 409)
+        if d.get("path") is None:
+            if not host.is_admin():
+                return _err("admin only", 403)
+            started = hostacl.push_all()
+            return jsonify({"success": True, "started": started, "status": hostacl.status()})
+        path, is_dir, err = _target(d)
+        if err:
+            return err
+        if not _can(path, is_dir, acl.WRITE_ACL):
+            return _err("You may not change the permissions of this item.", 403)
+        warn = hostacl.push(path, is_dir)
+        policy.audit("host_acl.push", path, "; ".join(warn))
+        return jsonify(dict(_disk_payload(path, is_dir), warnings=warn))
+
+    @host.route("/api/acl/disk/import", methods=["POST"], feature=F, level="write")
+    def acl_disk_import():
+        d = request.get_json(silent=True) or {}
+        if not hostacl.active():
+            return _err("Host ACLs are off: " + hostacl.status().get("reason", ""), 409)
+        if d.get("path") is None:
+            if not host.is_admin():
+                return _err("admin only", 403)
+            started = hostacl.import_all(include_files=bool(d.get("files")))
+            return jsonify({"success": True, "started": started, "status": hostacl.status()})
+        path, is_dir, err = _target(d)
+        if err:
+            return err
+        if not _can(path, is_dir, acl.WRITE_ACL):
+            return _err("You may not change the permissions of this item.", 403)
+        u = _me() or {}
+        hostacl.import_object(path, is_dir, by=u.get("username") or "host")
+        return jsonify(dict(_payload(path, is_dir), disk=_disk_payload(path, is_dir)))
+
+    @host.route("/api/acl/disk/config", methods=["GET", "POST"], admin=True)
+    def acl_disk_config():
+        if request.method == "POST":
+            d = request.get_json(silent=True) or {}
+            try:
+                for k, key in FS.items():
+                    if k in d:
+                        host.set_config(key, d[k])
+            except ValueError as e:
+                return _err(str(e))
+            hostacl._avail = None
+            policy.audit("config.host_acl", "", ", ".join(f"{k}={d[k]!r}" for k in FS if k in d))
+        return jsonify({"success": True, "status": hostacl.status(),
+                        "config": {k: host.config.get(key) for k, key in FS.items()}})
+

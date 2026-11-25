@@ -183,6 +183,11 @@ def register(host):
         ("kobold_mmproj", "", "text", "Vision projector (mmproj)",
          "Same forms as the model. Needed for image input (VLM)."),
         ("kobold_port", 5001, "number", "Port", ""),
+        ("kobold_host", "127.0.0.1", "text", "Listen address",
+         "127.0.0.1 keeps the server reachable only through this app (the logged-in /chat pages). "
+         "Empty = every interface, which lets anyone on the network bypass the app's login."),
+        ("kobold_jinja", True, "toggle", "Jinja chat template (--jinja)",
+         "Format chats with the model's own template, including tool calls (needed by /chat tools)."),
         ("kobold_gpulayers", -1, "number", "GPU layers", "-1 = auto."),
         ("kobold_context", 8192, "number", "Context size", ""),
         ("kobold_backend", "auto", "select", "Backend", ""),
@@ -210,6 +215,10 @@ def register(host):
                 "--contextsize", str(int(cfg.get("kobold_context") or 8192)),
                 "--gpulayers", str(int(cfg.get("kobold_gpulayers") if cfg.get("kobold_gpulayers") is not None else -1)),
                 "--skiplauncher", "--quiet"]
+        if str(cfg.get("kobold_host") or "").strip():
+            cmd += ["--host", str(cfg.get("kobold_host")).strip()]
+        if cfg.get("kobold_jinja"):
+            cmd += ["--jinja"]
         if _hf(cfg.get("kobold_mmproj")):
             cmd += ["--mmproj", _hf(cfg.get("kobold_mmproj"))]
         cmd += {"cublas": ["--usecublas"], "vulkan": ["--usevulkan"],
@@ -311,7 +320,8 @@ def register(host):
                                        {"id": "download", "label": "\u2b07 Download build", "url": "/api/kobold/download",
                                         "variant": "neutral", "options_from": "builds", "newline": True,
                                         "lead": "No koboldcpp?", "title": "Fetch the latest release build for this OS"}])
-    host.provide_service("kobold", {"start": start, "stop": stop, "status": _status})
+    host.provide_service("kobold", {"start": start, "stop": stop, "status": _status,
+                                   "running": _alive, "url": lambda path="": _url(cfg, path)})
 
     if cfg.get("kobold_autostart") and cfg.get("kobold_model"):
         try:

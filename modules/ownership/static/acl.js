@@ -10,7 +10,9 @@
  *   - inherited entries, read-only, with the folder they come from;
  *   - auditing entries (log successful / failed access by whom);
  *   - effective access of any account, the public-link status (and a button to make
- *     a link when the shared_links module is on), the object's audit log.
+ *     a link when the shared_links module is on), the object's audit log;
+ *   - "On disk": with LDAP on, whether the file's NTFS / NFSv4 ACL matches, and
+ *     buttons to write the app's permissions to disk or read the disk's into the app.
  * The tab is behind the feature acl.manage; without write on it everything is read-only.
  * Server: modules/ownership/acl_api.py.
  */
@@ -137,6 +139,7 @@
           : 'Public links can not show this file (no entry lets Everyone (public link) read it).'}</div>
         ${d.public_link.allowed && d.public_link.links_module ? '<button id="acl_mklink" class="acl-btn mt-1">Create public link</button><div id="acl_link" class="mt-1 break-all"></div>' : ''}
       </div>` : ''}
+      <div class="acl-box" id="acl_disk_box"><b>On disk</b> <span id="acl_disk" class="text-gray-400">checking...</span></div>
       <div class="acl-box"><b>Effective access</b>
         <div class="flex gap-1 mt-1"><select id="acl_eff_who" class="bg-gray-700 rounded px-1 py-0.5 flex-1 min-w-0">
           <option value="">Check an account...</option><option value="anonymous">Everyone (public link)</option>
@@ -147,7 +150,7 @@
         <span class="flex gap-2"><button id="acl_log_btn" class="acl-btn">Show</button>
         <a class="acl-btn" href="/api/acl/audit?format=csv&path=${encodeURIComponent(target.path)}">CSV</a></span></div>
         <div id="acl_log" class="mt-1"></div></div>`;
-    renderRows(); renderInherited();
+    renderRows(); renderInherited(); renderDisk();
     const $ = id => pane.querySelector('#' + id);
     $('acl_target').onchange = e => {
       if (dirty && !confirm('Discard unsaved permission changes?')) { e.target.value = target.kind + ':' + target.path; return; }
@@ -254,6 +257,46 @@
         <span class="text-gray-500">from ${e.source == null ? 'library defaults' : esc(e.source || '(library root)')}</span></div>`).join('');
   }
 
+  /** @brief The "On disk" box: host ACL status of the object, push / import buttons. */
+  async function renderDisk(prefetched) {
+    const box = document.getElementById('acl_disk_box');
+    if (!box) return;
+    const d = prefetched || await j('/api/acl/disk?path=' + encodeURIComponent(target.path) + '&kind=' + target.kind);
+    const out = box.querySelector('#acl_disk');
+    if (!d.success) { out.textContent = d.error || 'Not available.'; return; }
+    const st = d.status;
+    if (!st.active) {
+      out.textContent = 'not enforced on disk (' + (st.reason || 'off') + ')';
+      if (!st.ldap) box.classList.add('hidden');
+      return;
+    }
+    const edit = data && data.can.write_acl;
+    const state = d.in_sync === null ? 'could not read: ' + esc(d.error || '')
+      : d.in_sync ? '<span class="text-green-400">matches (' + esc(st.backend) + ')</span>'
+      : '<span class="text-amber-400">differs from the app</span>';
+    out.innerHTML = state +
+      (d.in_sync === false && d.disk ? '<div class="text-gray-400 mt-0.5">Disk: ' + (d.disk.protected ? 'not inheriting; ' : '') +
+        (d.disk.entries.map(e => esc(e.type + ' ' + e.principal.label + ' ' + rightsText(e.mask, data.is_dir))).join('; ') || 'no entries of its own') + '</div>' : '') +
+      (d.unmapped && d.unmapped.length ? '<div class="text-amber-400 mt-0.5">Host accounts the app does not know: ' + esc(d.unmapped.join(', ')) + '</div>' : '') +
+      (d.app_only && d.app_only.length ? '<div class="text-amber-400 mt-0.5">Only enforced in the app (no directory account / group DN): ' + esc(d.app_only.join(', ')) + '</div>' : '') +
+      (edit ? '<div class="flex gap-2 mt-1"><button id="acl_disk_push" class="acl-btn" title="Write the permissions above to the file system">Write to disk</button>' +
+        '<button id="acl_disk_import" class="acl-btn" title="Replace the permissions above with what the file system says">Read from disk</button></div>' : '');
+    const pb = out.querySelector('#acl_disk_push'), ib = out.querySelector('#acl_disk_import');
+    if (pb) pb.onclick = async () => {
+      const r = await j('/api/acl/disk/push', { path: target.path, kind: target.kind });
+      if (!r.success) { alert(r.error || 'Could not write to disk.'); return; }
+      if (r.warnings && r.warnings.length) alert('Written, with warnings:\n' + r.warnings.join('\n'));
+      renderDisk(r);
+    };
+    if (ib) ib.onclick = async () => {
+      if (dirty && !confirm('Discard unsaved changes and read the permissions from disk?')) return;
+      const r = await j('/api/acl/disk/import', { path: target.path, kind: target.kind });
+      if (!r.success) { alert(r.error || 'Could not read from disk.'); return; }
+      data = r; draft = r.entries.map(e => ({ type: e.type, who: e.who, mask: e.mask, flags: e.flags }));
+      draftProtected = r.protected; dirty = false; render();
+    };
+  }
+
   // -- actions ------------------------------------------------------------------------
   function toggleInherit(protect) {
     if (protect) {
@@ -325,6 +368,8 @@
         pane. Who sees that tab is the feature <code>acl.manage</code> (Settings -&gt; Users -&gt; features: block it
         for basic accounts, read lets them look, write lets them change). Upload-only and view-only roles are blocked by default.</p>
       <div id="acl_objects" class="text-xs mb-3"></div>
+      <div class="text-sm font-bold mb-1">Enforce on disk (NTFS / NFSv4 ACLs)</div>
+      <div id="acl_fs" class="text-xs mb-3"></div>
       <div class="text-sm font-bold mb-1">Audit log</div>
       <div class="flex gap-2 flex-wrap items-center text-xs mb-2">
         <input id="acl_f_user" placeholder="user" class="bg-gray-700 rounded px-2 py-1 w-24">
@@ -344,6 +389,7 @@
         `<div class="acl-inh"><b>${o.is_dir ? '📁' : '📄'} ${esc(o.path || '(library root)')}</b>${o.protected ? ' <span class="text-amber-400">not inheriting</span>' : ''}
           <span class="text-gray-400">${esc(o.entries.map(e => e.type + ' ' + e.principal.label + ': ' + rightsText(e.mask, o.is_dir)).join('; ') || 'no entries')}</span></div>`).join('')
       : '<div class="text-gray-500">No folder or file has permissions of its own yet: the library uses the defaults.</div>';
+    renderFs(pane.querySelector('#acl_fs'));
     let offset = 0;
     const qs = () => {
       const p = new URLSearchParams();
@@ -374,6 +420,60 @@
       if (!d.success) alert(d.error || 'Could not save.'); else if (window.showToast) showToast('Saved.');
     };
     go();
+  }
+
+  /** @brief Settings -> Permissions & audit: the host-ACL block (status, settings, jobs). */
+  async function renderFs(box) {
+    const d = await j('/api/acl/disk/config');
+    if (!d.success) { box.textContent = d.error || 'Not available.'; return; }
+    const st = d.status, c = d.config;
+    const job = st.job || {};
+    box.innerHTML = `
+      <p class="text-[11px] text-gray-500 mb-1">Writes the permissions to the files themselves, so nobody opening the
+        media folder on the host or a share gets around them. Only with LDAP enabled: directory accounts and groups
+        (with an LDAP DN) are what both sides know. The server's own account, SYSTEM / Administrators and the LDAP
+        admin group always keep full control.</p>
+      <div class="mb-1">Status: ${st.active ? '<span class="text-green-400">on (' + esc(st.backend) + ', domain ' + esc(st.domain || '-') + ')</span>'
+        : '<span class="text-amber-400">off</span> - ' + esc(st.reason || '')}</div>
+      <div class="grid gap-1" style="grid-template-columns:auto 1fr">
+        <label>Enforce</label><select id="fs_mode" class="bg-gray-700 rounded px-1 py-0.5">
+          <option value="auto" ${c.mode === 'auto' ? 'selected' : ''}>When LDAP is enabled</option>
+          <option value="off" ${c.mode === 'off' ? 'selected' : ''}>Off</option></select>
+        <label>Backend</label><select id="fs_backend" class="bg-gray-700 rounded px-1 py-0.5">
+          ${['auto', 'windows', 'nfs4'].map(v => `<option value="${v}" ${c.backend === v ? 'selected' : ''}>${v === 'auto' ? 'Automatic (Windows: NTFS, else NFSv4)' : v === 'windows' ? 'Windows NTFS (pywin32)' : 'NFSv4 (nfs4-acl-tools)'}</option>`).join('')}</select>
+        <label>Domain</label><input id="fs_domain" value="${esc(c.domain || '')}" placeholder="from the LDAP base DN / idmapd.conf" class="bg-gray-700 rounded px-2 py-0.5">
+        <label>"Everyone signed in" on disk</label><input id="fs_everyone" value="${esc(c.everyone || '')}" placeholder="Authenticated Users / EVERYONE@ (e.g. CORP\\Domain Users)" class="bg-gray-700 rounded px-2 py-0.5">
+        <label>Server account</label><input id="fs_service" value="${esc(c.service || '')}" placeholder="the account the app runs as" class="bg-gray-700 rounded px-2 py-0.5">
+        <label>Read from disk on "Sync with disk"</label><input type="checkbox" id="fs_sync" ${c.import_on_sync ? 'checked' : ''}>
+      </div>
+      <div class="flex gap-2 mt-2 flex-wrap items-center">
+        <button id="fs_save" class="acl-btn acl-primary">Save</button>
+        <button id="fs_push" class="acl-btn" ${st.active ? '' : 'disabled'}>Write everything to disk</button>
+        <button id="fs_import" class="acl-btn" ${st.active ? '' : 'disabled'}>Read folders from disk</button>
+        <label class="flex items-center gap-1"><input type="checkbox" id="fs_files">and files</label>
+      </div>
+      <div class="mt-1 text-gray-400">${job.kind ? `Last ${esc(job.kind)}: ${job.running ? 'running, ' : ''}${job.done || 0} objects` +
+        `${job.changed ? ', ' + job.changed + ' changed' : ''}${(job.errors || []).length ? ', ' + job.errors.length + ' errors' : ''}` +
+        `${(job.warnings || []).length ? ', ' + job.warnings.length + ' warnings' : ''}` : ''}</div>
+      ${(job.errors || []).concat(job.warnings || []).length ? '<div class="text-amber-400 break-all max-h-32 overflow-y-auto">' +
+        (job.errors || []).concat(job.warnings || []).slice(-30).map(esc).join('<br>') + '</div>' : ''}`;
+    const $ = id => box.querySelector('#' + id);
+    $('fs_save').onclick = async () => {
+      const r = await j('/api/acl/disk/config', { mode: $('fs_mode').value, backend: $('fs_backend').value,
+        domain: $('fs_domain').value, everyone: $('fs_everyone').value, service: $('fs_service').value,
+        import_on_sync: $('fs_sync').checked });
+      if (!r.success) alert(r.error || 'Could not save.');
+      renderFs(box);
+    };
+    const run = async (url, body) => {
+      const r = await j(url, body);
+      if (!r.success) { alert(r.error || 'Failed.'); return; }
+      const poll = async () => { await renderFs(box); const s = await j('/api/acl/disk/config');
+        if (s.success && s.status.job && s.status.job.running) setTimeout(poll, 1500); };
+      setTimeout(poll, 500);
+    };
+    $('fs_push').onclick = () => { if (confirm('Write the permissions of the whole library to disk? This replaces the ACLs of the media folder, users/ folders and every item with permissions of its own.')) run('/api/acl/disk/push', {}); };
+    $('fs_import').onclick = () => run('/api/acl/disk/import', { files: $('fs_files').checked });
   }
 
   document.addEventListener('module-settings-tab', ev => { if (ev.detail === 'permissions') renderAdmin(); });

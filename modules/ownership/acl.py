@@ -6,7 +6,8 @@ order, so an ACL here reads like one on a file share:
 
   - an ACL is a list of ACEs; each ACE is ALLOW, DENY or AUDIT for one
     principal and an access mask (the RFC's bit values);
-  - principals: user:<id>, group:<id>, OWNER@ (the object's owner; inherited,
+  - principals: user:<id>, group:<id>, host:<name> (a host account imported from
+    disk, kept but never matched here), OWNER@ (the object's owner; inherited,
     it means the owner of the file it lands on, NTFS "CREATOR OWNER"),
     AUTHENTICATED@ (anyone signed in), ANONYMOUS@ (a visitor with a public
     link) and EVERYONE@ (both);
@@ -168,6 +169,10 @@ def norm_who(who):
     if w.upper() in SPECIAL:
         return w.upper()
     kind, _, ident = w.partition(":")
+    if kind == "host" and ident.strip():
+        # a host account the app has no account for (imported from disk): kept and
+        # written back as it is, never matched by the app itself
+        return "host:" + ident.strip()
     if kind in ("user", "group"):
         try:
             return f"{kind}:{int(ident)}"

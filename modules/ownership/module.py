@@ -422,6 +422,24 @@ class Policy:
         out.append({"type": "allow", "who": "ANONYMOUS@", "mask": acl.PRESETS["read"], "flags": inh})
         return out
 
+    def host_base_aces(self, path):
+        """! @brief The path rules as ACEs for nobody in particular: what the disk holds
+        (host ACLs, fsacl.py). Public library: owner full, everyone signed in Modify;
+        users/<name>/: owner and that account full, its partners read / Modify."""
+        inh = acl.FILE_INHERIT | acl.DIRECTORY_INHERIT
+        out = [{"type": "allow", "who": "OWNER@", "mask": acl.ALL, "flags": inh}]
+        zone = owner_of(path)
+        if zone is None:
+            out.append({"type": "allow", "who": "AUTHENTICATED@", "mask": acl.PRESETS["modify"], "flags": inh})
+            return out
+        oid = self._user_id(zone)
+        if oid is not None:
+            out.append({"type": "allow", "who": f"user:{oid}", "mask": acl.ALL, "flags": inh})
+            for r in self.db().execute("SELECT user_id, level FROM library_shares WHERE owner_id=?", (oid,)):
+                out.append({"type": "allow", "who": f"user:{r['user_id']}", "flags": inh,
+                            "mask": acl.PRESETS["modify" if r["level"] == "write" else "read"]})
+        return out
+
     # -- evaluation -----------------------------------------------------------
     def chain(self, rel, is_dir, u):
         """! @brief (ordered ACEs, base_reached) for an object as `u` sees it."""
@@ -772,7 +790,16 @@ class Policy:
         return folder
 
     # -- ACL writes ---------------------------------------------------------
-    def set_acl(self, path, is_dir, protected, aces, by=""):
+    def push_disk(self, path, is_dir=None):
+        """! @brief Write an object's permissions to disk (host ACLs), when that is on."""
+        h = getattr(self, "hostacl", None)
+        if h is not None:
+            try:
+                h.push_soon(path, is_dir)
+            except Exception as e:
+                self.host.logger.error(f"host ACL push {path}: {e}")
+
+    def set_acl(self, path, is_dir, protected, aces, by="", push=True):
         """! @brief Store (or with no entries and inheritance on, drop) an object's ACL."""
         path = str(path or "").replace("\\", "/").strip("/")
         db = self.db()
@@ -787,8 +814,10 @@ class Policy:
                  time.time(), by))
         db.commit()
         self.invalidate()
+        if push:
+            self.push_disk(path, is_dir)
 
-    def set_owner(self, rel, user_id):
+    def set_owner(self, rel, user_id, push=True):
         rel = str(rel or "").replace("\\", "/").strip("/")
         db = self.db()
         if user_id is None:
@@ -798,6 +827,8 @@ class Policy:
                        (rel, int(user_id), time.time()))
         db.commit()
         self.invalidate()
+        if push:
+            self.push_disk(rel)
 
     # -- auditing -----------------------------------------------------------
     def audit(self, action, path="", detail="", ok=True, u=_UNSET_USER):
@@ -879,7 +910,7 @@ def register(host):
     host.provide_service("acl", {
         "access": lambda rel, want, is_dir=None: policy.check(rel, want, is_dir=is_dir),
         "public_ok": policy.public_ok, "owner_id": policy.owner_id, "set_owner": policy.set_owner,
-        "audit": policy.audit, "rights": acl})
+        "audit": policy.audit, "rights": acl, "host_acl": policy.hostacl})
     host.add_asset("ownership.js")
     host.add_asset("ownership.css")
     # Shared with shared_links: one "Account & sharing" tab, a section per module.
@@ -1015,6 +1046,7 @@ def register(host):
             db().execute("INSERT OR REPLACE INTO library_shares(owner_id,user_id,level) VALUES(?,?,?)",
                          (u["id"], target, level))
         db().commit()
+        policy.push_disk(personal_folder(u["username"]), True)     # the folder's ACL on disk
         return jsonify({"success": True})
 
     @host.route("/api/albums/share", methods=["POST"], feature="tab.albums", level="write",

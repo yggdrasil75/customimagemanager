@@ -100,10 +100,15 @@ def register_feature(key, label, *, section="modules", section_label="Modules",
     else:
         feats.append((key, label, dflt))
     _rebuild()
+    role_defaults = dict(role_defaults or {})
+    # "user" is a standard account: what a module sets for "custom" holds for it too,
+    # unless the module names "user" itself
+    if "custom" in role_defaults and "user" not in role_defaults:
+        role_defaults["user"] = role_defaults["custom"]
     for role, bundle in ROLE_LEVELS.items():
         if role == "admin":
             continue
-        rd = (role_defaults or {}).get(role)
+        rd = role_defaults.get(role)
         if rd is not None:
             bundle[key] = level_of(rd, dflt)
     return key
@@ -115,10 +120,11 @@ def settings_tab_feature(tab_id):
 
 
 # Non-admin levels for a Settings tab: admin-only tabs start blocked, others readable.
+# "user" is a standard account: it sees only the public tabs, like viewer / uploader.
 _TAB_ROLE_DEFAULTS = {
-    "admin_only": {"viewer": "block", "uploader": "block", "custom": "block"},
-    "normal":     {"viewer": "block", "uploader": "block"},
-    "public":     {"viewer": "read", "uploader": "read"},
+    "admin_only": {"viewer": "block", "uploader": "block", "user": "block", "custom": "block"},
+    "normal":     {"viewer": "block", "uploader": "block", "user": "block"},
+    "public":     {"viewer": "read", "uploader": "read", "user": "read"},
 }
 
 
@@ -136,7 +142,19 @@ def registered_keys():
     return list(ALL_KEYS)
 
 
-ROLE_DEFAULT_LEVEL = {"admin": WRITE, "uploader": BLOCK, "viewer": READ, "custom": WRITE}
+## @brief Roles, most permissive first. "user" is a standard account: it uses every
+# feature (write) but sees none of the server Settings tabs; "custom" is the same plus
+# those tabs, the way accounts worked before roles had names.
+ROLE_DEFAULT_LEVEL = {"admin": WRITE, "custom": WRITE, "user": WRITE, "uploader": BLOCK,
+                      "viewer": READ}
+## @brief Rank of a role when several groups name one: higher wins.
+ROLE_RANK = {"viewer": 1, "uploader": 2, "user": 3, "custom": 4, "admin": 5}
+
+
+def best_role(roles):
+    """! @brief The most permissive of `roles` (unknown names ignored), or None."""
+    known = [r for r in roles if r in ROLE_RANK]
+    return max(known, key=ROLE_RANK.get) if known else None
 
 ROLE_LEVELS = {
     "admin":    {},
@@ -146,6 +164,7 @@ ROLE_LEVELS = {
                  "annot.description": READ, "annot.tags": READ, "annot.boxes": READ,
                  "data.delete": BLOCK, "data.move": BLOCK, "data.upload": BLOCK,
                  },
+    "user":     {},
     "custom":   {},
 }
 
@@ -179,6 +198,23 @@ def resolve_level(role, key, user_override=None, group_override=None):
     if grp is not None:
         return grp
     return _role_level(role, key)
+
+
+def merge_group_overrides(per_group):
+    """! @brief One override dict from several groups' overrides: per feature the most
+    permissive level any group sets ("default" is no opinion, "inherit" the feature's
+    own default). Membership adds rights, as allow entries do on a file share.
+    @param per_group  list of {feature: level | "inherit" | "default" | bool}.
+    """
+    out = {}
+    for ov in per_group or ():
+        for k, v in (ov or {}).items():
+            if v is None or v == "default":
+                continue
+            lv = FEATURE_DEFAULTS.get(k, READ) if v == "inherit" else level_of(v, FEATURE_DEFAULTS.get(k, READ))
+            if k not in out or lv > out[k]:
+                out[k] = lv
+    return {k: LEVEL_NAMES[v] for k, v in out.items()}
 
 
 def effective_permissions(role, overrides, group_overrides=None):

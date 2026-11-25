@@ -229,7 +229,7 @@ Settings tabs sit in collapsible groups in the rail - You, Server, Admin, Module
 
 `host.add_user_setting(key, label=, kind=, default=, validate=, options=, columns=, feature=, help=)` adds a setting each user saves for themselves in Settings -> User settings, with no `settings.*` permission involved. `default` may be a callable `default(user)` (an admin's default, a role's); `validate(value)` raises `ValueError` to reject; `feature` names a permission the user needs at write to change it (they see it read-only otherwise, and the server refuses it). `host.user_setting(key)` returns the current user's value, theirs if set, else the default. Saving fires `cim:user-settings` on `window` with `{keys}`.
 
-`host.add_account_field(key, label, options=, scopes=("user", "group"))` adds a select to the user and group rows in Settings -> Users, for things an admin decides per account (the layout a new account starts on). A user's value wins over their group's; read it as `g.user["account"].get(key)`.
+`host.add_account_field(key, label, options=, scopes=("user", "group"))` adds a select to the user and group rows in Settings -> Users, for things an admin decides per account (the layout a new account starts on). A user's value wins over their groups' (an account may be in several; a later group's value wins over an earlier one's); read it as `g.user["account"].get(key)`. `g.user["group_ids"]` lists the account's groups.
 
 ### Core events
 
@@ -243,12 +243,13 @@ The core emits, modules react; the core never names a module.
 | `upload.check` | `folder, filename, size` -> a reason string to refuse | veto an upload before it is written (quotas); the client gets 413. A chunked upload (`POST /api/upload/session`) asks once, with the full size, before any byte arrives. |
 | `upload.duplicate_check` | `sha, filename` -> existing rel_path or None | veto an upload as a duplicate |
 | `upload.before_convert` | `spool_path, filename, rel_path` | the spooled original before it is converted (and `rel_path` it will be stored as); keep what conversion drops (motion photos extract their video) |
-| `upload.stored` | `rel_path, filename` | index a file you own after upload |
+| `upload.stored` | `rel_path, filename` | index a file you own after upload; `host.upload_context()` says who sent it (`{"user": name, ...}`), in the request and in the queue worker alike |
 | `file.renamed` | `old_rel, new_rel` | repoint your tables |
 | `folder.renamed` | `old_folder, new_folder` | a whole folder moved (each file already had its `file.renamed`): repoint rows keyed by the folder itself (folder comics) |
 | `user.deleted` / `user.disabled` | `user_id, username` | an account was deleted / disabled (drop or suspend what it owns) |
 | `file.trash` | `rel_path, abs_path, members` -> truthy if moved away | claim a delete: move the file and its sidecars (`members`) out of the library instead of the core removing them (the trash module); DB rows are purged after it either way |
 | `file.deleted` | `rel_path` | drop your rows |
+| `file.revised` | `rel_path` | the revisions module replaced a file's content with a new or restored version (already re-indexed) |
 | `regions.cached` | `rel_path` -> region dicts | supply cached regions for an image with no sidecar |
 | `labels.pool` | - -> class names | extend the trainer's label pool |
 | `llm.image` | `image` (BGR) -> transformed image | preprocess every image bound for the vision LLM |
