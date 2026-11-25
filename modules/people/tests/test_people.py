@@ -285,11 +285,14 @@ def test_a_hand_drawn_named_face_joins_the_people_list(client, upload, app, unga
         assert row and row["cluster_id"] >= 0 and row["name"] == "Hand Drawn Harriet" and row["confirmed"] == 1
         names = [c["name"] for c in client.get("/api/faces/clusters").get_json()["clusters"]]
         assert "Hand Drawn Harriet" in names
-        for _ in range(100):                     # embedded in the background
-            if db.execute("SELECT embedding FROM face_regions WHERE id=?", (row["id"],)).fetchone()[0] is not None:
-                break
-            time.sleep(0.1)
-        assert db.execute("SELECT embedding FROM face_regions WHERE id=?", (row["id"],)).fetchone()[0] is not None
+        # embedded in the background - when a face embedder is installed (the
+        # ultralight install has none: the face still joins the person, unembedded)
+        if pc._faces() is not None:
+            for _ in range(100):
+                if db.execute("SELECT embedding FROM face_regions WHERE id=?", (row["id"],)).fetchone()[0] is not None:
+                    break
+                time.sleep(0.1)
+            assert db.execute("SELECT embedding FROM face_regions WHERE id=?", (row["id"],)).fetchone()[0] is not None
         # saving again doesn't add it twice
         write_meta(client, fn, tags=[], regions=[box(class_name="face", region_name="Hand Drawn Harriet",
                                                      cx=.4, cy=.4, w=.2, h=.3)])
