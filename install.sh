@@ -6,13 +6,17 @@
 #   ./install.sh cpu|cuda|rocm    force the backend
 #   ./install.sh cpu --minimal    backend wheels only; modules install their
 #                                 own deps when you enable them in Settings
+#   ./install.sh --no-system      skip the apt packages entirely
+#   ./install.sh --sudo           install missing apt packages through sudo
+#                                 (shows the command first; sudo asks for your
+#                                 password as usual)
 #   ./install.sh --no-compile     skip the native build of the Python modules
 #   ./install.sh --no-app         skip building the Android app
 #   ./install.sh --app            rebuild the Android app even if unchanged
 #
 # The Android app (android/) is built into static/app/cim-family.apk whenever
 # its sources changed since the last build. The first build needs a JDK
-# (installed here when missing) and fetches ~1.5 GB of Android SDK + Gradle
+# (listed with the system packages below) and fetches ~1.5 GB of Android SDK + Gradle
 # into android/.sdk and android/.gradle-dist; later builds reuse them. Keep
 # android/keystore/: phones only update over an APK signed with the same key.
 #
@@ -20,11 +24,12 @@
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
-MODE=""; MINIMAL=0; SYSTEM=1; COMPILE=1; APP=auto
+MODE=""; MINIMAL=0; SYSTEM=1; USE_SUDO=0; COMPILE=1; APP=auto
 for a in "$@"; do case "$a" in
     ultralight|cpu|cuda|rocm) MODE="$a" ;;
     --minimal) MINIMAL=1 ;;
     --no-system) SYSTEM=0 ;;
+    --sudo) USE_SUDO=1 ;;
     --no-compile) COMPILE=0 ;;
     --no-app) APP=0 ;;
     --app) APP=1 ;;
@@ -47,28 +52,43 @@ SYS="build-essential python3-venv python3-dev curl git libjxl-tools libexiv2-dev
 [ "$MODE" = ultralight ] || SYS="$SYS ffmpeg libgl1 libglib2.0-0 p7zip-full unrar-free"
 [ "$APP" = 0 ] || SYS="$SYS unzip"
 if [ "$SYSTEM" = 1 ]; then
-    SUDO=""
-    if [ "$(id -u)" != 0 ]; then
-        # Only use sudo when it works without a prompt; a box where sudo is
-        # not allowed (or needs a password we can't ask for) skips the system
-        # packages instead of erroring out of the whole install.
-        if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then SUDO="sudo"
-        else SYSTEM=0; echo "warn: no root/sudo - skipping system packages. Ask an admin for: $SYS" >&2; fi
-    fi
-fi
-if [ "$SYSTEM" = 1 ]; then
-    if command -v apt-get >/dev/null; then
-        echo "==> apt: $SYS"
-        $SUDO apt-get update -qq && $SUDO apt-get install -y --no-install-recommends $SYS \
-            || echo "warn: some packages failed; continuing" >&2
-        # a JDK for the Android build: 17 where the distro still has it, else 21
-        if [ "$APP" != 0 ] && ! command -v javac >/dev/null; then
-            $SUDO apt-get install -y --no-install-recommends openjdk-17-jdk-headless 2>/dev/null \
-                || $SUDO apt-get install -y --no-install-recommends openjdk-21-jdk-headless \
-                || echo "warn: no JDK installed; the Android app won't be built" >&2
-        fi
-    else
+    if ! command -v apt-get >/dev/null; then
         echo "warn: not apt - install the equivalents of: $SYS (and a JDK 17+ for the Android app)" >&2
+    else
+        MISSING=""
+        for p in $SYS; do
+            st=$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null || true)
+            [ "$st" = "install ok installed" ] || MISSING="$MISSING $p"
+        done
+        JDK=""
+        if [ "$APP" != 0 ] && ! command -v javac >/dev/null; then
+            JDK="openjdk-17-jdk-headless"
+            apt-cache show "$JDK" >/dev/null 2>&1 || JDK="openjdk-21-jdk-headless"
+        fi
+        WANT="${MISSING# }${JDK:+ $JDK}"
+        WANT="${WANT# }"
+        if [ -z "$WANT" ]; then
+            echo "==> apt: system packages already installed"
+        else
+            SUDO=""
+            if [ "$(id -u)" != 0 ]; then
+                if [ "$USE_SUDO" = 1 ] && command -v sudo >/dev/null; then
+                    SUDO="sudo"
+                else
+                    echo "warn: missing system packages (not installed: this needs root):" >&2
+                    echo "        sudo apt-get install --no-install-recommends $WANT" >&2
+                    echo "      run that yourself, or re-run with --sudo to have the script run it." >&2
+                    echo "      Continuing without them; features that need them stay off." >&2
+                    WANT=""
+                fi
+            fi
+            if [ -n "$WANT" ]; then
+                echo "==> apt${SUDO:+ (through sudo)}: $SUDO apt-get install -y --no-install-recommends $WANT"
+                # shellcheck disable=SC2086
+                $SUDO apt-get update -qq && $SUDO apt-get install -y --no-install-recommends $WANT \
+                    || echo "warn: some packages failed; continuing" >&2
+            fi
+        fi
     fi
 fi
 
