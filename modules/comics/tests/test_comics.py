@@ -28,6 +28,22 @@ def test_cbz_shelved_as_paged_comic(client, upload):
     assert b["page_count"] >= 3
 
 
+def test_shelved_cbz_is_one_gallery_tile(client, upload, host, tmp_path):
+    # a sync indexes every library kind: the cbz gets a 0x0 files row beside its shelf
+    # entry, which drew a second, broken image tile next to the book's cover
+    path = tmp_path / "one_tile.cbz"
+    with zipfile.ZipFile(path, "w") as z:
+        for n in range(3):
+            z.writestr("%03d.png" % n, png_bytes(seed=n))
+    fn = upload.file(str(path), folder="one_tile_%d" % int(time.time() * 1000))
+    assert _shelf(client, fn)
+    host.core.index_file(fn, force=True)
+    assert host.db().execute("SELECT 1 FROM files WHERE rel_path=?", (fn,)).fetchone()
+    folder = fn.rsplit("/", 1)[0] if "/" in fn else ""
+    files = client.get("/api/list", query_string={"folder": folder, "q": ""}).get_json()["files"]
+    assert [f["kind"] for f in files if f.get("filename") == fn or f.get("rel_path") == fn] == ["book"]
+
+
 def test_cbz_pages_render(client, upload):
     fn = upload.media("comic.cbz")
     b = _shelf(client, fn)

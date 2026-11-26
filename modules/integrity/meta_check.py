@@ -117,7 +117,15 @@ def find_wrong(tags_by_holder, w, h):
     @return [{holder, key, value, want}] (want: w for a width key, h for a height key).
     """
     wrong = []
+    # A JXL's own tags can't be rewritten: fix() puts the right value in its sidecar,
+    # which the app reads over the file. A sidecar copy of a tag shadows the JXL's.
+    side = {}
     for holder, tags in tags_by_holder.items():
+        if holder.lower().endswith((".xmp", ".exv")):
+            side.update(tags)
+    for holder, tags in tags_by_holder.items():
+        if holder.lower().endswith(".jxl"):
+            tags = {k: v for k, v in tags.items() if EXIF_TO_XMP.get(k, k) not in side and k not in side}
         for wk, hk in EXIF_PAIRS + XMP_PAIRS:
             x, y = tags.get(wk), tags.get(hk)
             if x is None and y is None:

@@ -147,6 +147,10 @@ def register(host):
     # Search: book and comic tiles in the gallery (the core puts them in its order).
     host.register_search_provider(book_routes.query_books, feature="tab.books")
     host.register_search_provider(book_routes.query_comics)
+    # A shelved book draws its own tile (query_books). Its files row (a library sync
+    # indexes every library kind, a book as a 0x0 stub) must not draw a second,
+    # broken image tile beside it.
+    host.register_gallery_filter("rel_path NOT IN (SELECT rel_path FROM books)")
 
     # Core events: the library scan, uploads and renames don't know about
     # books; they emit, and this module keeps the shelf in step.

@@ -283,3 +283,67 @@ def test_unsupported_issue_goes_once_a_module_handles_the_extension(host, client
     j = client.get("/api/integrity/issues").get_json()
     assert rel not in [i["rel_path"] for i in j["issues"]]
     assert _issue(host, rel)["resolved"] is not None
+
+
+_XMP = ('<?xml version="1.0"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF '
+        'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:subject><rdf:Bag><rdf:li>beach</rdf:li>'
+        '</rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta>')
+
+
+def test_orphan_sidecar_found_and_attached(host, client, stray_dir):
+    # the picture was moved into a subfolder without its sidecar
+    pic = _put(stray_dir + "/moved", "IMG_0042.jpg", _jpeg(7))
+    _put(stray_dir, "IMG_0041.jpg", _jpeg(8))          # a neighbour with a similar name
+    side = _put(stray_dir, "IMG_0042.xmp", _XMP.encode())
+    _svc(host)["scan"](stray_dir)
+    assert _row(host, pic) is not None
+    assert checks.reason_code(_issue(host, side)["detail"]) == "orphan_sidecar"
+    got = client.get("/api/integrity/match?rel_path=" + side).get_json()
+    assert got["success"] and got["candidates"][0]["rel_path"] == pic
+    assert "same name" in got["candidates"][0]["reason"]
+    assert any(c["rel_path"].endswith("IMG_0041.jpg") for c in got["candidates"])
+    r = client.post("/api/integrity/attach", json={"rel_path": side, "target": pic}).get_json()
+    assert r["success"] and r["sidecar"] == stray_dir + "/moved/IMG_0042.xmp"
+    assert not os.path.exists(media_path(side)) and os.path.exists(media_path(r["sidecar"]))
+    assert _issue(host, side)["resolved"]
+    # a file that has its own sidecar is not overwritten
+    other = _put(stray_dir, "IMG_0041.xmp", _XMP.encode())
+    stray = _put(stray_dir, "spare.xmp", _XMP.encode())
+    _svc(host)["scan"](stray_dir)
+    r = client.post("/api/integrity/attach", json={"rel_path": stray, "target": stray_dir + "/IMG_0041.jpg"})
+    assert r.status_code == 409 and os.path.exists(media_path(stray)) and os.path.exists(media_path(other))
+
+
+def test_dismissed_issue_stays_dismissed_and_any_row_can_be_deleted(host, client, stray_dir, no_trash):
+    side = _put(stray_dir, "lonely.xmp", _XMP.encode())
+    _svc(host)["scan"](stray_dir)
+    assert client.post("/api/integrity/accept", json={"rel_path": side}).get_json()["dismissed"]
+    _svc(host)["scan"](stray_dir)                      # the next walk sees it again
+    assert _issue(host, side)["resolved"]
+    open_ = [i["rel_path"] for i in client.get("/api/integrity/issues").get_json()["issues"]]
+    assert side not in open_
+    # a missing file's issue: Delete drops its rows
+    pic = _put(stray_dir, "gone.jpg", _jpeg(9))
+    _svc(host)["scan"](stray_dir)
+    os.remove(media_path(pic))
+    client.post("/api/integrity/recheck", json={"rel_path": pic})
+    assert _issue(host, pic)["kind"] == "missing"
+    r = client.post("/api/integrity/purge", json={"rel_paths": [pic]}).get_json()
+    assert r["purged"] == [{"rel_path": pic, "to": "gone"}] and _row(host, pic) is None
+
+
+def test_broken_sidecar_fixed(host, client, stray_dir):
+    pic = _put(stray_dir, "tagged.jpg", _jpeg(10))
+    _svc(host)["scan"](stray_dir)
+    host.update_file(pic, db={"tags": '["kept"]'}, dont_write=True)
+    side = media_path(os.path.splitext(pic)[0] + ".xmp")
+    with open(side, "w") as f:
+        f.write("")                                     # "no element found: line 1, column 0"
+    client.post("/api/integrity/recheck", json={"rel_path": pic})
+    issue = next(i for i in client.get("/api/integrity/issues").get_json()["issues"] if i["rel_path"] == pic)
+    assert issue["kind"] == "sidecar" and issue["indexed"]
+    r = client.post("/api/integrity/fix", json={"rel_path": pic}).get_json()
+    assert r["success"], r
+    assert checks.sidecar_error(side) == "" and _issue(host, pic)["resolved"]
+    assert "kept" in open(side).read()                  # rebuilt from the library's tags

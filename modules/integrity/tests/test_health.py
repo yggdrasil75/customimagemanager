@@ -380,6 +380,19 @@ def test_find_wrong_rules():
     assert zero and zero[0]["want"] == 1280
 
 
+def test_a_jxl_fixed_through_its_sidecar_is_not_wrong_again():
+    # exiv2 can't write a JXL: fix() puts the right size in the sidecar, which the
+    # app reads over the file; the JXL's own (unchangeable) tags must not count after
+    w, h = 1280, 960
+    jxl = {"a.jxl": {"Exif.Photo.PixelXDimension": 128, "Exif.Photo.PixelYDimension": 96}}
+    assert len(meta_check.find_wrong(jxl, w, h)) == 2
+    fixed = dict(jxl, **{"a.xmp": {"Xmp.exif.PixelXDimension": 1280, "Xmp.exif.PixelYDimension": 960}})
+    assert meta_check.find_wrong(fixed, w, h) == []
+    # a JPEG's own tags are writable: a sidecar never hides them
+    jpg = {"a.jpg": jxl["a.jxl"], "a.xmp": fixed["a.xmp"]}
+    assert len(meta_check.find_wrong(jpg, w, h)) == 2
+
+
 @needs_exiv2
 def test_thumbnail_tags_are_ignored_and_main_tags_fixed(tmp_path):
     # the reported case: IFD0 says 3600, the Exif sub-IFD 1920, the thumbnail IFD 0

@@ -9,8 +9,10 @@ covers both. Health findings are listed in the Review tab ("Corrupt files", "Wro
 metadata"); integrity's own issues there too ("Library issues", admins).
 
 """
+import difflib
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -51,6 +53,12 @@ WALK_MIN_AGE = 60.0
 QUARANTINE_DIR = os.path.join(".cim", "quarantine")
 ## @brief Issue kinds the Purge action handles.
 PURGEABLE = ("invalid", "invalid_row")
+## @brief Marks a dismissed issue's detail: the same finding is not reported again.
+DISMISSED = " [dismissed]"
+## @brief Seconds one bulk Fix request may run (the page asks again for the rest).
+FIX_SECONDS = 20.0
+## @brief Owner candidates the orphan sidecar search returns.
+MATCH_MAX = 12
 ## @brief Adopted files remembered for the tab.
 RECENT_ADOPTED = 20
 
@@ -212,8 +220,13 @@ def register(host):
         @return True when this is a new issue (worth a notification).
         """
         now = now or time.time()
-        row = host.db().execute("SELECT kind, resolved FROM integrity_issues WHERE rel_path=?",
+        row = host.db().execute("SELECT kind, detail, resolved FROM integrity_issues WHERE rel_path=?",
                                 (rel,)).fetchone()
+        if (row is not None and row["resolved"] and row["kind"] == kind
+                and (row["detail"] or "") == detail + DISMISSED):
+            # dismissed by an admin: stays dismissed while it is the same finding
+            host.update_file(rel, table="integrity_issues", set={"last_seen": now}, dont_write=True)
+            return False
         if row is not None and not row["resolved"]:
             if row["kind"] == kind:
                 host.update_file(rel, table="integrity_issues", set={"detail": detail, "last_seen": now},
@@ -800,10 +813,14 @@ def register(host):
             notify(new)
 
     def prune_resolved():
-        """! @brief Drop resolved issues older than KEEP_RESOLVED_DAYS."""
+        """! @brief Drop resolved issues older than KEEP_RESOLVED_DAYS (a dismissed one once
+        its file has not been seen for that long)."""
+        cut = time.time() - KEEP_RESOLVED_DAYS * 86400
         host.update_file(table="integrity_issues",
-                         where=("resolved IS NOT NULL AND resolved < ?",
-                                (time.time() - KEEP_RESOLVED_DAYS * 86400,)),
+                         # a dismissal is kept while its file is still seen
+                         where=("resolved IS NOT NULL AND ((detail NOT LIKE ? AND resolved < ?) "
+                                "OR last_seen < ?)",
+                                ("%" + DISMISSED, cut, cut)),
                          remove=True, dont_write=True)
 
     # -- health checks (health.py), run by the deep pass ---------------------------
@@ -949,10 +966,11 @@ def register(host):
         """! @brief GET /api/integrity/issues?resolved=1: issues (open ones only by default) + status."""
         resolved = request.args.get("resolved") in ("1", "true", "yes")
         resolve_now_supported()
-        sql = "SELECT * FROM integrity_issues"
+        sql = ("SELECT i.*, f.rel_path IS NOT NULL AS indexed, f.media_kind FROM integrity_issues i "
+               "LEFT JOIN files f ON f.rel_path = i.rel_path")
         if not resolved:
-            sql += " WHERE resolved IS NULL"
-        rows = host.db().execute(sql + " ORDER BY resolved IS NOT NULL, last_seen DESC LIMIT 1000").fetchall()
+            sql += " WHERE i.resolved IS NULL"
+        rows = host.db().execute(sql + " ORDER BY i.resolved IS NOT NULL, i.last_seen DESC LIMIT 1000").fetchall()
         return jsonify({"success": True, "issues": [dict(r) for r in rows], "status": status()})
 
     def recheck_one(rel):
@@ -1005,29 +1023,35 @@ def register(host):
             digest = checks.hash_file(fp)
             host.update_file(rel, db={"sha256": digest}, dont_write=True)
             out["sha256"] = digest
-        clear(rel, [r["kind"]])
+        if r["kind"] == "corrupt":
+            clear(rel, [r["kind"]])
+        else:
+            host.update_file(rel, table="integrity_issues",
+                             set={"resolved": time.time(), "detail": (r["detail"] or "") + DISMISSED},
+                             dont_write=True)
+            out["dismissed"] = True
         core.audit("integrity_accept", f"file={rel!r} kind={r['kind']}")
         return jsonify(out)
 
     def api_purge():
         """! @brief POST /api/integrity/purge {rel_paths: [...]} or {kind: "invalid" |
-        "invalid_row" | "all"}: purge open invalid issues (files to the trash bin or the
-        quarantine folder, invalid rows from the DB)."""
+        "invalid_row" | "all"}: purge files with open issues (to the trash bin or the
+        quarantine folder; invalid rows and missing files only lose their DB rows).
+        By kind only the invalid kinds are taken; by rel_paths any open issue."""
         body = request.get_json(silent=True) or {}
         rels = [str(r).strip() for r in (body.get("rel_paths") or []) if str(r).strip()]
         kind = str(body.get("kind") or "").strip()
         kinds = PURGEABLE if kind == "all" else tuple(k for k in PURGEABLE if k == kind)
         if not rels and not kinds:
             return jsonify({"success": False, "error": "rel_paths or kind (invalid, invalid_row, all)"}), 400
-        marks = ",".join("?" * len(PURGEABLE))
-        sql = f"SELECT rel_path FROM integrity_issues WHERE resolved IS NULL AND kind IN ({marks})"
-        params = list(PURGEABLE)
+        sql = "SELECT rel_path FROM integrity_issues WHERE resolved IS NULL"
         if rels:
+            # named files: any open issue (Delete on a row; a missing file's rows go)
             sql += " AND rel_path IN (%s)" % ",".join("?" * len(rels))
-            params += rels
+            params = rels
         else:
             sql += " AND kind IN (%s)" % ",".join("?" * len(kinds))
-            params += list(kinds)
+            params = list(kinds)
         todo = [r[0] for r in host.db().execute(sql, params).fetchall()]
         done, errors = [], []
         for rel in todo:
@@ -1042,6 +1066,265 @@ def register(host):
         skipped = sorted(set(rels) - set(todo))
         return jsonify({"success": not errors, "purged": done, "errors": errors,
                         "skipped": skipped})
+
+    # -- fixing --------------------------------------------------------------------
+    def _xmp_export():
+        """! @brief The metadata module's sidecar helpers, or None when it is off."""
+        try:
+            from modules.metadata import xmp_export
+            return xmp_export
+        except Exception:
+            return None
+
+    def _db_fields(rel):
+        """! @brief The DB-held tags / description / albums of a file (what a rebuilt
+        sidecar carries), or None when it has no row."""
+        r = host.db().execute("SELECT tags, description, albums FROM files WHERE rel_path=?",
+                              (rel,)).fetchone()
+        if r is None:
+            return None
+
+        def lst(v):
+            try:
+                out = json.loads(v or "[]")
+            except ValueError:
+                return []
+            return out if isinstance(out, list) else []
+        return {"tags": lst(r["tags"]), "description": r["description"] or "", "albums": lst(r["albums"])}
+
+    def fix_sidecar(rel):
+        """! @brief Make a file's broken .xmp sidecar parse again: cleaned in place when the
+        cleaner can fix it, else rebuilt from what the library holds (tags, description,
+        albums; indexed when the sidecar was last good). The original is kept under
+        .cim/xmp-backup/ either way. @return (how, error)."""
+        fp = host.safe_path(host.media_dir, rel)
+        if not fp or not os.path.isfile(fp):
+            return None, "file not found"
+        side = checks.sidecar_path(fp)
+        if not checks.sidecar_error(side):
+            clear(rel, ["sidecar"])
+            return "it parses already", ""
+        xe = _xmp_export()
+        if xe is None:
+            return None, "the metadata module is off"
+        bak = xe.repair_sidecar(side, backup_unrepairable=True)
+        how = "cleaned"
+        if checks.sidecar_error(side):
+            if not bak:
+                return None, "could not back up the sidecar, so it was left alone"
+            fields = _db_fields(rel)
+            if fields is None:
+                return None, "not in the library: nothing to rebuild the sidecar from"
+            try:
+                os.remove(side)
+            except OSError as e:
+                return None, "could not replace the sidecar: %s" % e
+            res = core.update_file(rel, set=fields, force=True)
+            if not res.get("success"):
+                return None, "rebuild failed: %s" % (res.get("error") or "?")
+            how = "rebuilt from the library"
+        err = checks.sidecar_error(side)
+        if err:
+            return None, "still broken: %s" % err
+        clear(rel, ["sidecar"])
+        try:
+            remember(rel, side_mtime=os.path.getmtime(side) if os.path.exists(side) else 0.0)
+        except OSError:
+            pass
+        core.audit("integrity_fix", f"file={rel!r} sidecar {how}")
+        return how + ("; original kept in .cim/xmp-backup" if bak else ""), ""
+
+    def fix_one(rel):
+        """! @brief The fix for a file's open issue: a broken sidecar is cleaned / rebuilt,
+        a row with impossible dimensions is indexed again. @return (how, error)."""
+        r = host.db().execute("SELECT kind, detail FROM integrity_issues WHERE rel_path=? "
+                              "AND resolved IS NULL", (rel,)).fetchone()
+        if r is None:
+            return None, "no open issue for this file"
+        code = checks.reason_code(r["detail"])
+        if r["kind"] == "sidecar":
+            return fix_sidecar(rel)
+        if r["kind"] == "invalid_row" and code == "bad_dims":
+            try:
+                core.index_file(rel, force=True)
+            except Exception as e:
+                return None, "re-index failed: %s" % e
+            issue, _ = recheck_one(rel)
+            if issue and not issue.get("resolved"):
+                return None, "still wrong: %s" % issue.get("detail")
+            return "indexed again", ""
+        return None, "no automatic fix for this; Delete or Dismiss it"
+
+    def api_fix():
+        """! @brief POST /api/integrity/fix {rel_path} or {kind: "sidecar", after}: fix one file,
+        or the open issues of that kind after `after` for up to FIX_SECONDS (ask again with
+        the returned `after` for the rest)."""
+        body = request.get_json(silent=True) or {}
+        rel = str(body.get("rel_path") or "").strip()
+        if rel:
+            how, err = fix_one(rel)
+            if err:
+                return jsonify({"success": False, "error": err})
+            return jsonify({"success": True, "how": how})
+        kind = str(body.get("kind") or "").strip()
+        if kind != "sidecar":
+            return jsonify({"success": False, "error": "rel_path or kind=sidecar"}), 400
+        after = str(body.get("after") or "")  # failures stay open: the next call goes on past them
+        rels = [x[0] for x in host.db().execute(
+            "SELECT rel_path FROM integrity_issues WHERE resolved IS NULL AND kind=? AND rel_path > ? "
+            "ORDER BY rel_path", (kind, after)).fetchall()]
+        stop_at, fixed, errors = time.time() + FIX_SECONDS, 0, []
+        done, last = 0, after
+        for rel in rels:
+            if time.time() > stop_at:
+                break
+            done, last = done + 1, rel
+            try:
+                how, err = fix_one(rel)
+            except Exception as e:
+                how, err = None, str(e)
+            if err:
+                errors.append({"rel_path": rel, "error": err})
+            else:
+                fixed += 1
+        return jsonify({"success": True, "fixed": fixed, "errors": errors[:50], "failed": len(errors),
+                        "remaining": len(rels) - done, "after": last})
+
+    # -- orphan sidecars: find the file one belongs to ---------------------------------
+    _HINT_RE = re.compile(r'(?:RawFileName|PreservedFileName|OriginalFileName|DerivedFrom|'
+                          r'SourceFile|FileName)\s*(?:=\s*"([^"]+)"|>([^<]+)<)', re.I)
+    _SUBJECT_RE = re.compile(r"<dc:subject>(.*?)</dc:subject>", re.S | re.I)
+    _LI_RE = re.compile(r"<rdf:li[^>]*>([^<]*)</rdf:li>", re.I)
+
+    def _like(text):
+        """! @brief A LIKE pattern piece with its wildcards escaped (ESCAPE '\\')."""
+        return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    def _sidecar_hints(fp):
+        """! @brief What an orphan sidecar says about its file: names it records and its tags."""
+        try:
+            with open(fp, "rb") as fh:
+                text = fh.read(1 << 20).decode("utf-8", "replace")
+        except OSError:
+            return [], set()
+        names = []
+        for a, b in _HINT_RE.findall(text):
+            n = os.path.basename((a or b).strip().replace("\\", "/"))
+            if n and n not in names:
+                names.append(n)
+        tags = set()
+        for block in _SUBJECT_RE.findall(text):
+            tags.update(t.strip().lower() for t in _LI_RE.findall(block) if t.strip())
+        return names, tags
+
+    def find_owner(rel):
+        """! @brief Library files an orphan sidecar may belong to, best first: a file its
+        XMP names, the same name in another folder, a similar name nearby; tags the
+        sidecar shares with a candidate raise it.
+        @return [{rel_path, reason, score, has_sidecar}]."""
+        fp = host.safe_path(host.media_dir, rel)
+        if not fp:
+            return []
+        stem = os.path.splitext(os.path.basename(rel))[0]
+        owner_stem = os.path.splitext(stem)[0] if "." in stem else stem  # IMG_1.jpg.xmp
+        folder = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        names, tags = _sidecar_hints(fp)
+        db = host.db()
+        side_exts = tuple(host.media.SIDECAR_EXTS)
+        found = {}
+
+        def add(r, score, reason):
+            if r == rel or r.lower().endswith(side_exts):
+                return
+            cur = found.get(r)
+            if cur is None or cur["score"] < score:
+                found[r] = {"rel_path": r, "score": score, "reason": reason}
+
+        for n in names:
+            for (r,) in db.execute("SELECT rel_path FROM files WHERE rel_path = ? OR rel_path LIKE ? "
+                                   "ESCAPE '\\' LIMIT 50", (n, "%/" + _like(n))).fetchall():
+                add(r, 0.97, "the sidecar names it (%s)" % n)
+        for s_ in {stem, owner_stem}:
+            for (r,) in db.execute("SELECT rel_path FROM files WHERE rel_path LIKE ? ESCAPE '\\' "
+                                   "OR rel_path LIKE ? ESCAPE '\\' LIMIT 200",
+                                   (_like(s_) + ".%", "%/" + _like(s_) + ".%")).fetchall():
+                if os.path.splitext(os.path.basename(r))[0].lower() != s_.lower():
+                    continue
+                here = (r.rsplit("/", 1)[0] if "/" in r else "") == folder
+                add(r, 0.95 if here else 0.85, "same name" + ("" if here else ", other folder"))
+        # similar names in its folder, its parent and the folders beside it
+        parent = folder.rsplit("/", 1)[0] if "/" in folder else ""
+        near = [folder] + ([parent] if parent != folder else [])
+        low = owner_stem.lower()
+        for d in near:
+            pat = (_like(d) + "/%") if d else "%"
+            for (r,) in db.execute("SELECT rel_path FROM files WHERE rel_path LIKE ? ESCAPE '\\' "
+                                   "LIMIT 20000", (pat,)).fetchall():
+                rest = r[len(d) + 1:] if d else r
+                if rest.count("/") > (0 if d == folder else 1):
+                    continue
+                cand = os.path.splitext(os.path.basename(r))[0].lower()
+                ratio = difflib.SequenceMatcher(None, low, cand).ratio()
+                if ratio >= 0.6:
+                    add(r, round(0.8 * ratio, 3), "similar name (%d%%)" % round(100 * ratio)
+                        + ("" if d == folder else ", parent folder" if d == parent and "/" not in rest
+                           else ", folder beside it"))
+        if tags and found:
+            marks = ",".join("?" * len(found))
+            for row in db.execute(f"SELECT rel_path, tags FROM files WHERE rel_path IN ({marks})",
+                                  list(found)).fetchall():
+                try:
+                    have = {str(t).lower() for t in json.loads(row["tags"] or "[]")}
+                except ValueError:
+                    continue
+                share = len(tags & have) / float(len(tags | have) or 1)
+                if share:
+                    it = found[row["rel_path"]]
+                    it["score"] = round(min(1.0, it["score"] + 0.2 * share), 3)
+                    it["reason"] += "; %d of %d tags shared" % (len(tags & have), len(tags))
+        out = sorted(found.values(), key=lambda x: (-x["score"], x["rel_path"]))[:MATCH_MAX]
+        for it in out:
+            ofp = host.safe_path(host.media_dir, it["rel_path"])
+            it["has_sidecar"] = bool(ofp and os.path.exists(checks.sidecar_path(ofp)))
+        return out
+
+    def api_match():
+        """! @brief GET /api/integrity/match?rel_path=: where an orphan sidecar may belong."""
+        rel = str(request.args.get("rel_path") or "").strip()
+        fp = host.safe_path(host.media_dir, rel) if rel else None
+        if not fp or not os.path.isfile(fp):
+            return jsonify({"success": False, "error": "not found"}), 404
+        return jsonify({"success": True, "candidates": find_owner(rel)})
+
+    def api_attach():
+        """! @brief POST /api/integrity/attach {rel_path, target}: move an orphan sidecar next
+        to its file under that file's name, then index the file from it."""
+        body = request.get_json(silent=True) or {}
+        rel = str(body.get("rel_path") or "").strip()
+        target = str(body.get("target") or "").strip()
+        fp = host.safe_path(host.media_dir, rel) if rel else None
+        tfp = host.safe_path(host.media_dir, target) if target else None
+        if not fp or not os.path.isfile(fp) or not fp.lower().endswith(".xmp"):
+            return jsonify({"success": False, "error": "no such sidecar"}), 404
+        if not tfp or not os.path.isfile(tfp) or files_row(target) is None:
+            return jsonify({"success": False, "error": "the file is not in the library"}), 404
+        dest = checks.sidecar_path(tfp)
+        if os.path.exists(dest):
+            return jsonify({"success": False, "error": "%s already has a sidecar"
+                            % os.path.basename(target)}), 409
+        try:
+            shutil.move(fp, dest)
+        except OSError as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+        try:
+            core.index_file(target, force=True)
+        except Exception as e:
+            log.warning(f"integrity: index {target} after attaching {rel}: {e}")
+        host.update_file(rel, table="integrity_issues",
+                         set={"resolved": time.time(), "detail": "attached to %s" % target},
+                         dont_write=True)
+        core.audit("integrity_attach", f"sidecar={rel!r} file={target!r}")
+        return jsonify({"success": True, "sidecar": os.path.relpath(dest, host.media_dir).replace(os.sep, "/")})
 
     def api_scan():
         """! @brief POST /api/integrity/scan {folder}: walk a folder (or everything) now."""
@@ -1061,6 +1344,11 @@ def register(host):
     host.add_route("/api/integrity/recheck", api_recheck, methods=["POST"], feature=FEATURE,
                    level="write", admin=True)
     host.add_route("/api/integrity/accept", api_accept, methods=["POST"], feature=FEATURE,
+                   level="write", admin=True)
+    host.add_route("/api/integrity/fix", api_fix, methods=["POST"], feature=FEATURE,
+                   level="write", admin=True)
+    host.add_route("/api/integrity/match", api_match, feature=FEATURE, admin=True)
+    host.add_route("/api/integrity/attach", api_attach, methods=["POST"], feature=FEATURE,
                    level="write", admin=True)
     host.add_asset("integrity.js")
 
